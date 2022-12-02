@@ -29,10 +29,14 @@ function RaptorEngine() {
         this.context.clearDepth(1.0);
         this.context.enable(this.context.DEPTH_TEST);
         this.context.depthFunc(this.context.LEQUAL);
+        requestAnimationFrame(this.drawClearColor);
+
     };
 
     this.clearScreen = () => {
         this.context.clear(this.context.COLOR_BUFFER_BIT | this.context.DEPTH_BUFFER_BIT);
+        requestAnimationFrame(this.clearScreen);
+
     };
 
     this.draw = () => {
@@ -40,8 +44,14 @@ function RaptorEngine() {
         this.clearScreen();
 
         var cuadrado = new Square(0,0,0,0, this.context);
+        cuadrado.setColor({red:0.5});
         cuadrado.init();
+        cuadrado.rotation = 45;
         cuadrado.draw();
+        
+        // requestAnimationFrame(this.drawClearColor);
+        // requestAnimationFrame(this.clearScreen);
+        // requestAnimationFrame(cuadrado.draw);
     };
 
    
@@ -51,22 +61,35 @@ function RaptorEngine() {
 function Square(x, y, w, h, context) {
 
     this.context = context;
-    this.programInfo = {};
+    this.programInfo = undefined;
+    this.rotation = 0.0;
+    this.then = 0;
+    this.color = undefined;
+    
+   
+
 
     this.vsSource = `
         attribute vec4 aVertexPosition;
+        attribute vec4 aVertexColor;
 
         uniform mat4 uModelViewMatrix;
         uniform mat4 uProjectionMatrix;
 
+        varying lowp vec4 vColor;
+
         void main() {
-        gl_Position = uProjectionMatrix * uModelViewMatrix * aVertexPosition;
+
+            gl_Position = uProjectionMatrix * uModelViewMatrix * aVertexPosition;
+            vColor = aVertexColor;
         }
     `;
 
     this.fsSource = `
+        varying lowp vec4 vColor;    
+
         void main() {
-        gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+            gl_FragColor = vColor;
         }
     `;
 
@@ -84,16 +107,65 @@ function Square(x, y, w, h, context) {
         }
 
         this.shaderProgram = shaderProgram;
+
+        const programInfo = {
+            ...this.programInfo,
+            program: shaderProgram
+        }
+
+        this.programInfo = programInfo;
     }
 
     this.initBuffers = () => {
+
         const positionBuffer = this.context.createBuffer();
 
         this.context.bindBuffer(this.context.ARRAY_BUFFER, positionBuffer);
 
-        const positions = [1.0, 1.0, -1.0, 1.0, 1.0, -1.0, -1.0, -1.0];
+        const positions = [
+            1.0, 1.0, 
+            -1.0, 1.0, 
+            1.0, -1.0, 
+            -1.0, -1.0,
+        ];
+
+        this.vCount = positions.length / 2;
 
         this.context.bufferData(this.context.ARRAY_BUFFER, new Float32Array(positions), this.context.STATIC_DRAW);
+
+
+        const colorBuffer = this.context.createBuffer();
+
+        this.context.bindBuffer(this.context.ARRAY_BUFFER, colorBuffer);
+
+        
+        if (this.color === undefined) {
+            this.setColor({red: 1, green: 1, blue: 1, alpha: 1});
+        }
+
+        var colors = [ this.color.red, this.color.green, this.color.blue, this.color.alpha,
+                        this.color.red, this.color.green, this.color.blue, this.color.alpha,
+                        this.color.red, this.color.green, this.color.blue, this.color.alpha,
+                        this.color.red, this.color.green, this.color.blue, this.color.alpha,
+                    ];
+        // var colors = [ 1.0, 1.0, 1.0, 1.0, // white
+        //                 1.0, 0.0, 0.0, 1.0, // red
+        //                 0.0, 1.0, 0.0, 1.0, // green
+        //                 0.0, 0.0, 1.0, 1.0, // blue
+        //             ];
+
+        this.context.bufferData(this.context.ARRAY_BUFFER, new Float32Array(colors), this.context.STATIC_DRAW);
+        
+        const programInfo = {
+            ...this.programInfo,
+            buffers: {
+                color: colorBuffer,
+                position: positionBuffer
+            }
+        }
+
+        this.programInfo = programInfo;
+
     }
 
     this.loadShader = (type, source) => {
@@ -120,6 +192,7 @@ function Square(x, y, w, h, context) {
             program: this.shaderProgram,
             attribLocations: {
                 vertexPosition: this.context.getAttribLocation(this.shaderProgram, "aVertexPosition"),
+                vertexColor: this.context.getAttribLocation(this.shaderProgram, "aVertexColor"),
             },
             uniformLocations: {
                 projectionMatrix: this.context.getUniformLocation(this.shaderProgram, "uProjectionMatrix"),
@@ -135,7 +208,12 @@ function Square(x, y, w, h, context) {
         this.initBuffers();
     }
 
-    this.draw = () => {
+    this.draw = (now) => {
+
+        // now *= 0.001;
+        // const deltaTime = now - this.then;
+        // this.then = now;
+
         const fieldOfView = (45 * Math.PI) / 180; // in radians
         const aspect = this.context.canvas.clientWidth / this.context.canvas.clientHeight;
         const zNear = 0.1;
@@ -149,8 +227,15 @@ function Square(x, y, w, h, context) {
         mat4.translate(
           modelViewMatrix, // destination matrix
           modelViewMatrix, // matrix to translate
-          [-0.0, 0.0, -6.0]
+          [-0.0, 0.0, -5.0]
         ); // amount to translate
+
+        mat4.rotate(
+            modelViewMatrix,
+            modelViewMatrix,
+            (this.rotation * Math.PI) / -180,
+            [0, 0, 1]
+        );
       
         {
           const numComponents = 2;
@@ -158,6 +243,7 @@ function Square(x, y, w, h, context) {
           const normalize = false;
           const stride = 0;
           const offset = 0;
+          this.context.bindBuffer(this.context.ARRAY_BUFFER, this.programInfo.buffers.position);
           this.context.vertexAttribPointer(
             this.programInfo.attribLocations.vertexPosition,
             numComponents,
@@ -168,6 +254,24 @@ function Square(x, y, w, h, context) {
           );
           this.context.enableVertexAttribArray(this.programInfo.attribLocations.vertexPosition);
         }
+
+        {
+            const numComponents = 4;
+            const type = this.context.FLOAT;
+            const normalize = false;
+            const stride = 0;
+            const offset = 0;
+            this.context.bindBuffer(this.context.ARRAY_BUFFER, this.programInfo.buffers.color);
+            this.context.vertexAttribPointer(
+              this.programInfo.attribLocations.vertexColor,
+              numComponents,
+              type,
+              normalize,
+              stride,
+              offset
+            );
+            this.context.enableVertexAttribArray(this.programInfo.attribLocations.vertexColor);
+          }
       
         this.context.useProgram(this.programInfo.program);
       
@@ -184,9 +288,18 @@ function Square(x, y, w, h, context) {
       
         {
           const offset = 0;
-          const vertexCount = 4;
-          this.context.drawArrays(this.context.TRIANGLE_STRIP, offset, vertexCount);
+        //   const vertexCount = 7;
+          this.context.drawArrays(this.context.TRIANGLE_STRIP, offset, this.vCount);
         }
+
+        // this.rotation += deltaTime;
+
+
+        requestAnimationFrame(this.draw);
+    }
+
+    this.setColor = ({red, green, blue, alpha}) => {
+        this.color = {red: red ?? 0.0 , green: green ?? 0.0 , blue: blue ?? 0.0 , alpha: alpha ?? 1.0 };
     }
 
 }
