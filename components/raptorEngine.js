@@ -43,10 +43,11 @@ function RaptorEngine() {
         this.drawClearColor();
         this.clearScreen();
 
-        var cuadrado = new Square(0,0,0,0, this.context);
+        var cuadrado = new Square(this.context);
         cuadrado.setColor({red:0.5});
         cuadrado.init();
         cuadrado.rotation = 45;
+        cuadrado.setScale({x: 0.5, y: 0.5})
         cuadrado.draw();
         
         // requestAnimationFrame(this.drawClearColor);
@@ -58,13 +59,14 @@ function RaptorEngine() {
 
 };
 
-function Square(x, y, w, h, context) {
+function Square(context) {
 
     this.context = context;
     this.programInfo = undefined;
     this.rotation = 0.0;
     this.then = 0;
     this.color = undefined;
+    this.scale = undefined;
     
    
 
@@ -197,6 +199,7 @@ function Square(x, y, w, h, context) {
             uniformLocations: {
                 projectionMatrix: this.context.getUniformLocation(this.shaderProgram, "uProjectionMatrix"),
                 modelViewMatrix: this.context.getUniformLocation(this.shaderProgram, "uModelViewMatrix"),
+                scaleMatrix: this.context.getUniformLocation(this.shaderProgram, "uScale"),
             },
         };
 
@@ -235,6 +238,16 @@ function Square(x, y, w, h, context) {
             modelViewMatrix,
             (this.rotation * Math.PI) / -180,
             [0, 0, 1]
+        );
+
+
+        if (this.scale == undefined) {
+            this.setScale({x: 1, y: 1});
+        }
+        mat4.scale(
+            modelViewMatrix,
+            modelViewMatrix,
+            [this.scale.x, this.scale.y, 1]
         );
       
         {
@@ -300,6 +313,9 @@ function Square(x, y, w, h, context) {
 
     this.setColor = ({red, green, blue, alpha}) => {
         this.color = {red: red ?? 0.0 , green: green ?? 0.0 , blue: blue ?? 0.0 , alpha: alpha ?? 1.0 };
+    }
+    this.setScale = ({x, y}) => {
+        this.scale = {x: x ?? 1.0 , y: y ?? 1.0};
     }
 
 }
