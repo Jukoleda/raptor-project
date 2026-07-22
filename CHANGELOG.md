@@ -6,6 +6,17 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Distribución)
+- **`index.html` autocontenido.** Nuevo build de un solo archivo con gl-matrix y
+  todo el motor embebidos, que se abre en cualquier navegador con doble clic, sin
+  servidor ni internet (funciona por `file://`). Es un archivo generado.
+- **`tools/build-standalone.mjs`** genera ese `index.html` a partir de los módulos
+  de `components/` y `vendor/gl-matrix-min.js` (desenrolla import/export e inlinea
+  todo). Regenerar con `node tools/build-standalone.mjs`.
+- **`vendor/gl-matrix-min.js`**: copia vendorizada de gl-matrix 3.4.3 para el build.
+- La entrada de desarrollo basada en módulos ES se movió a **`dev.html`** (sigue
+  usando gl-matrix por CDN y requiere servirse por HTTP).
+
 ### Añadido (Fase 3 — Sistema de formas)
 - **Clase base `Shape`** (`components/shapes/shape.js`) que encapsula todo el
   pipeline común: shaders, buffers, transform (posición, rotación, escala, color)

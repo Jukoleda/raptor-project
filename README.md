@@ -1,8 +1,9 @@
 # raptor-project
 
 Un motor de render **2D** ligero construido sobre **WebGL**, en JavaScript puro
-(módulos ES), sin dependencias de build. Usa
-[gl-matrix](https://glmatrix.net/) para las operaciones con matrices.
+(módulos ES). Usa [gl-matrix](https://glmatrix.net/) para las operaciones con
+matrices. Se distribuye además como un único `index.html` autocontenido que se
+abre en cualquier navegador sin servidor ni conexión.
 
 El motor inicializa un canvas WebGL, mantiene una lista de entidades y las dibuja
 en un único bucle de render. Incluye un juego de formas básicas (rectángulo,
@@ -12,7 +13,12 @@ con color, posición, rotación y escala configurables.
 ## Estructura
 
 ```
-index.html                 # Punto de entrada; carga gl-matrix (CDN) y el motor
+index.html                 # GENERADO: build autocontenido, se abre con doble clic
+dev.html                   # Entrada de desarrollo (módulos ES + gl-matrix por CDN)
+vendor/
+  gl-matrix-min.js         # Copia vendorizada de gl-matrix (para el build offline)
+tools/
+  build-standalone.mjs     # Genera index.html a partir de components/ + vendor/
 components/
   raptorEngine.js          # RaptorEngine: canvas + lista de entidades + render loop
   main.js                  # Arranque: crea el motor, añade formas y arranca
@@ -26,20 +32,29 @@ components/
     index.js               # Re-exporta todas las formas
 ```
 
-## Cómo ejecutarlo
+## Cómo verlo
 
-El proyecto usa módulos ES, así que necesita servirse por HTTP (no vale abrir
-`index.html` con `file://`). Con cualquier servidor estático, por ejemplo:
+**Opción rápida (cualquier navegador, sin servidor ni internet):** abre
+`index.html` con doble clic. Es un build autocontenido con gl-matrix y todo el
+motor embebidos, así que funciona incluso offline vía `file://`.
+
+**Desarrollo (con módulos ES):** `dev.html` usa los archivos de `components/`
+directamente, lo que exige servirlo por HTTP (los módulos no cargan desde
+`file://`). Con cualquier servidor estático:
 
 ```bash
-# Con Python
-python3 -m http.server 8000
-
-# o con Node
-npx serve
+python3 -m http.server 8000   # o: npx serve
+# luego abre http://localhost:8000/dev.html
 ```
 
-Luego abre `http://localhost:8000` en un navegador con soporte WebGL.
+### Regenerar `index.html`
+
+`index.html` es un **archivo generado**; no lo edites a mano. Tras cambiar algo
+en `components/`, reconstrúyelo con:
+
+```bash
+node tools/build-standalone.mjs
+```
 
 ## Uso básico
 
