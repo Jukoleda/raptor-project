@@ -6,6 +6,17 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Despliegue)
+- **Publicación en GitHub Pages** en <https://jukoleda.github.io/raptor-project/>
+  mediante `.github/workflows/deploy.yml`, que regenera las páginas
+  autocontenidas y despliega en cada push a `main`.
+- **Portada** (`index.html`, escrita a mano) que enlaza las tres demos.
+
+### Cambiado (Despliegue)
+- La demo de formas del motor pasa de `index.html` a **`engine.html`** para que
+  la raíz del sitio sea la portada. `build-standalone.mjs` genera ahora
+  `engine.html` (antes `index.html`).
+
 ### Añadido (Armas y balística)
 - **Módulo de armas** (`components/weapons/`):
   - `ballistics.js` — balas como **raycast** (segmento barrido) contra las aristas

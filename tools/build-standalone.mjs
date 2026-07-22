@@ -47,8 +47,8 @@ const WEAPONS = [
 // One entry per generated page: an explicit module list ending in a bootstrap.
 const PAGES = [
     {
-        out: "index.html",
-        title: "Raptor Engine",
+        out: "engine.html",
+        title: "Raptor Engine — Formas",
         modules: [...ENGINE, "components/main.js"],
         headStyle: `
         html, body { margin: 0; height: 100%; background: #111; }
