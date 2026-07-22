@@ -5,7 +5,7 @@
 
 import RaptorEngine from "../components/raptorEngine.js";
 import { Rectangle, Circle } from "../components/shapes/index.js";
-import { Weapon, Armor, raycastShape, evaluateImpact, reflect } from "../components/weapons/index.js";
+import { Weapon, Armor, raycastShape, resolveShot, reflect, PROJECTILES } from "../components/weapons/index.js";
 
 const MUZZLE = { x: -2.25, y: 0 };
 const CULL = { x: 4.2, y: 3.0 };
@@ -14,7 +14,11 @@ const RESULT_INFO = {
     penetration: { label: "PENETRA", color: [0.2, 0.9, 0.35] },
     ricochet: { label: "REBOTE", color: [0.95, 0.85, 0.2] },
     block: { label: "NO PENETRA", color: [0.9, 0.25, 0.2] },
+    splash: { label: "ESQUIRLAS", color: [0.95, 0.55, 0.2] },
 };
+
+// Selectable ammo, in the order shown in the panel.
+const AMMO = [PROJECTILES.AP, PROJECTILES.APCR, PROJECTILES.HEAT, PROJECTILES.HE];
 
 const STYLES = `
     * { box-sizing: border-box; }
@@ -32,6 +36,11 @@ const STYLES = `
     button:disabled { opacity: .5; cursor: default; }
     button.fire { border-color: #7a2f2f; background: #5a2626; font-weight: 600; }
     button.fire:hover:not(:disabled) { background: #6d2e2e; }
+    .ammo { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    button.shell { text-align: left; line-height: 1.3; }
+    button.shell.active { border-color: #4a7fb5; background: #2b3a4a; box-shadow: inset 0 0 0 1px #4a7fb5; }
+    button.shell b { display: block; font-size: 13px; }
+    button.shell small { color: #9aa0a6; font-size: 11px; }
     .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
     .row label { width: 96px; font-size: 12px; color: #b9bfc6; }
     .row input[type=range] { flex: 1; min-width: 0; }
@@ -90,12 +99,25 @@ function startDemo() {
     const markers = [];
     let flash = 0;
     let angle = 0;
+    let ammo = PROJECTILES.AP; // currently loaded projectile type
 
     // --- Panel ---
     const fireBtn = el("button", { className: "fire", textContent: "Disparar", onclick: fire });
     const resetBtn = el("button", { textContent: "Reiniciar", onclick: reset });
 
-    const penCtl = slider("Penetración", 40, 260, 5, weapon.penetration, (v) => { weapon.penetration = v; });
+    const penCtl = slider("Penetración base", 40, 260, 5, weapon.penetration, (v) => { weapon.penetration = v; refreshAmmo(); });
+
+    // One button per projectile type; clicking loads it and highlights it.
+    const ammoBtns = AMMO.map((type) =>
+        el("button", {
+            className: "shell",
+            onclick: () => setAmmo(type),
+        }, [
+            el("b", { textContent: type.name }),
+            el("small", { textContent: ammoStats(type) }),
+        ]),
+    );
+    const ammoBox = el("div", { className: "ammo" }, ammoBtns);
     const angleCtl = slider("Ángulo hull", -80, 80, 1, 0, (v) => setAngle(v));
     const frontCtl = slider("Blindaje frontal", 20, 220, 5, armor.faces[3].armor, (v) => { armor.faces[3].armor = v; refreshArmorLine(); });
 
@@ -105,31 +127,32 @@ function startDemo() {
     const hpBar = el("div", { className: "bar" }, [hpFill]);
 
     const result = el("div", { id: "result", textContent: "—" });
-    const kFace = kv("Cara"), kAngle = kv("Ángulo impacto"), kEff = kv("Blindaje efectivo"), kPen = kv("Penetración");
+    const kFace = kv("Cara"), kAngle = kv("Ángulo impacto"), kEff = kv("Blindaje efectivo"), kPen = kv("Penetración"), kDmg = kv("Daño");
 
     const panel = el("div", { id: "panel" }, [
         el("h1", { textContent: "Cañón vs Blindaje" }),
         el("div", { className: "card" }, [
             el("h2", { textContent: "Disparo" }),
             el("div", { className: "grid" }, [fireBtn, resetBtn]),
-            el("div", { className: "hint", textContent: "Espacio dispara · ←/→ giran el hull · clic dispara" }),
+            el("div", { className: "hint", textContent: "Espacio dispara · ←/→ giran el hull · 1-4 cambian munición" }),
         ]),
-        el("div", { className: "card" }, [el("h2", { textContent: "Proyectil" }), penCtl.row]),
+        el("div", { className: "card" }, [el("h2", { textContent: "Munición" }), ammoBox, penCtl.row]),
         el("div", { className: "card" }, [
             el("h2", { textContent: "Blanco" }), angleCtl.row, frontCtl.row, armorLine,
             el("div", { className: "row" }, [el("label", { textContent: "Integridad" }), hpBar]),
         ]),
         el("div", { className: "card" }, [
-            el("h2", { textContent: "Último impacto" }), result, kFace.row, kAngle.row, kEff.row, kPen.row,
+            el("h2", { textContent: "Último impacto" }), result, kFace.row, kAngle.row, kEff.row, kPen.row, kDmg.row,
         ]),
     ]);
 
     document.body.append(el("div", { id: "app" }, [stage, panel]));
     refreshArmorLine();
+    refreshAmmo();
     updateHp();
 
     // Debug handle for the console / automated tests.
-    const api = { game, weapon, armor, bullets, fire, setAngle, last: null };
+    const api = { game, weapon, armor, bullets, fire, setAngle, setAmmo, PROJECTILES, get ammo() { return ammo; }, last: null };
     window.raptorTanks = api;
 
     game.addUpdater(update);
@@ -140,6 +163,10 @@ function startDemo() {
         if (e.code === "Space") { e.preventDefault(); fire(); }
         else if (e.code === "ArrowLeft") setAngle(angle - 3);
         else if (e.code === "ArrowRight") setAngle(angle + 3);
+        else if (e.code >= "Digit1" && e.code <= "Digit4") {
+            const type = AMMO[Number(e.code.slice(-1)) - 1];
+            if (type) setAmmo(type);
+        }
     });
     stage.addEventListener("click", fire);
 
@@ -162,8 +189,29 @@ function startDemo() {
         angleCtl.set(angle);
     }
 
+    // Short one-line summary of what a shell does, for its button label.
+    function ammoStats(type) {
+        const pen = Math.round(weapon.penetration * type.penMultiplier);
+        const dmg = Math.round(weapon.damage * type.damageMultiplier);
+        return `${pen} mm · ${dmg} daño`;
+    }
+
+    function setAmmo(type) {
+        ammo = type;
+        weapon.type = type;
+        refreshAmmo();
+    }
+
+    // Reflect the loaded type in the selector (highlight + fresh stats).
+    function refreshAmmo() {
+        AMMO.forEach((type, i) => {
+            ammoBtns[i].classList.toggle("active", type === ammo);
+            ammoBtns[i].querySelector("small").textContent = ammoStats(type);
+        });
+    }
+
     function fire() {
-        const bullet = weapon.fire(MUZZLE.x, MUZZLE.y, 1, 0);
+        const bullet = weapon.fire(MUZZLE.x, MUZZLE.y, 1, 0, null, ammo);
         if (!bullet) return;
         bullet._entity = new Circle(gl, { radius: 0.05 })
             .setColor({ red: 1, green: 0.8, blue: 0.2 }).setPosition({ x: MUZZLE.x, y: MUZZLE.y }).init();
@@ -179,15 +227,19 @@ function startDemo() {
         markers.push({ shape: marker, life: 0.5 });
     }
 
-    function showImpact(resultKey, face, impact, penetration) {
-        const info = RESULT_INFO[resultKey];
-        api.last = { result: resultKey, face: face.name, armor: face.armor, angle: impact.angle, effectiveArmor: impact.effectiveArmor, penetration };
-        result.textContent = info.label;
+    function showImpact(shot, face, penetration) {
+        // A blocked hit that still chips the target (HE fragments) reads as
+        // "ESQUIRLAS" rather than a flat "NO PENETRA".
+        const key = shot.result === "block" && shot.damage > 0 ? "splash" : shot.result;
+        const info = RESULT_INFO[key];
+        api.last = { type: shot.type.id, result: shot.result, dealt: shot.damage, face: face.name, armor: face.armor, angle: shot.angle, effectiveArmor: shot.effectiveArmor, penetration };
+        result.textContent = `${info.label} · ${shot.type.name}`;
         result.style.color = `rgb(${info.color.map((c) => Math.round(c * 255)).join(",")})`;
         kFace.v.textContent = `${face.name} (${face.armor} mm)`;
-        kAngle.v.textContent = `${impact.angle.toFixed(0)}°`;
-        kEff.v.textContent = Number.isFinite(impact.effectiveArmor) ? `${impact.effectiveArmor.toFixed(0)} mm` : "∞";
+        kAngle.v.textContent = `${shot.angle.toFixed(0)}°`;
+        kEff.v.textContent = Number.isFinite(shot.effectiveArmor) ? `${shot.effectiveArmor.toFixed(0)} mm` : "∞";
         kPen.v.textContent = `${Math.round(penetration)} mm`;
+        kDmg.v.textContent = shot.damage > 0 ? `${Math.round(shot.damage)} HP` : "—";
     }
 
     function killBullet(bullet, at) {
@@ -210,7 +262,7 @@ function startDemo() {
         setAngle(0);
         result.textContent = "—";
         result.style.color = "";
-        kFace.v.textContent = kAngle.v.textContent = kEff.v.textContent = kPen.v.textContent = "—";
+        kFace.v.textContent = kAngle.v.textContent = kEff.v.textContent = kPen.v.textContent = kDmg.v.textContent = "—";
         updateHp();
     }
 
@@ -232,22 +284,19 @@ function startDemo() {
                 const hit = raycastShape(bullet.prev, bullet.position, tank);
                 if (hit) {
                     const face = armor.faceForEdge(hit.edgeIndex);
-                    const impact = evaluateImpact({
+                    const shot = resolveShot({
+                        type: bullet.type,
+                        penetration: bullet.penetration,
+                        damage: bullet.damage,
                         direction: bullet.direction,
                         normal: hit.normal,
-                        penetration: bullet.penetration,
                         armor: face.armor,
                     });
-                    spawnMarker(hit.point, impact.result);
-                    showImpact(impact.result, face, impact, bullet.penetration);
+                    const markerKey = shot.result === "block" && shot.damage > 0 ? "splash" : shot.result;
+                    spawnMarker(hit.point, markerKey);
+                    showImpact(shot, face, bullet.penetration);
 
-                    if (impact.result === "penetration") {
-                        armor.takeDamage(bullet.damage);
-                        updateHp();
-                        flash = 0.12;
-                        killBullet(bullet, hit.point);
-                        if (!armor.alive) destroyTank();
-                    } else if (impact.result === "ricochet") {
+                    if (shot.result === "ricochet") {
                         bullet.velocity = reflect(bullet.velocity, hit.normal);
                         bullet.velocity.x *= 0.7;
                         bullet.velocity.y *= 0.7;
@@ -255,6 +304,14 @@ function startDemo() {
                         bullet.position = { x: hit.point.x + hit.normal.x * 0.04, y: hit.point.y + hit.normal.y * 0.04 };
                         bullet.prev = { x: bullet.position.x, y: bullet.position.y };
                     } else {
+                        // Penetration deals full damage; a blocked HE shell still
+                        // sprays fragments (shot.damage > 0). Either way the shell stops.
+                        if (shot.damage > 0) {
+                            armor.takeDamage(shot.damage);
+                            updateHp();
+                            flash = 0.12;
+                            if (!armor.alive) destroyTank();
+                        }
                         killBullet(bullet, hit.point);
                     }
                 }

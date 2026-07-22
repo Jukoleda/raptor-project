@@ -45,6 +45,7 @@ components/
     index.js               # Re-exporta la física
   weapons/
     ballistics.js          # Raycast segmento-arista + modelo de penetración
+    projectiles.js         # Tipos de proyectil (AP/APCR/HEAT/HE) + esquema de daño
     bullet.js              # Bullet: proyectil (raycast continuo)
     weapon.js              # Weapon: cadencia, penetración, velocidad de boca
     armor.js               # Armor: blindaje por cara + integridad (HP)
@@ -140,24 +141,39 @@ game.addUpdater((dt) => world.step(dt));                       // integra en el 
   - **No penetra** en caso contrario.
 - **Blindaje por cara:** frontal / lateral / trasera, deducido de qué arista
   golpea la bala. Angular el blanco cambia el blindaje efectivo.
+- **Tipos de proyectil y esquema de daño** (`projectiles.js`): cada tipo escala la
+  penetración y el daño del arma y ajusta el modelo de impacto.
+
+  | Tipo | ×Penetración | ×Daño | Rebote | Notas |
+  |------|:---:|:---:|:---:|-------|
+  | **AP** — Perforante | 1.0 | 1.0 | 70° | Polivalente; el ángulo importa. |
+  | **APCR** — Subcalibre | 1.4 | 0.7 | 68° | Más penetración, menos daño, rebota antes. |
+  | **HEAT** — Carga hueca | 1.2 | 1.1 | — | Ignora la inclinación y no rebota. |
+  | **HE** — Alto explosivo | 0.35 | 1.8 | — | Poca penetración, mucho daño; sin penetrar astilla (25%). |
+
+  `resolveShot()` resuelve el impacto de principio a fin: aplica el modelo de
+  penetración afinado por el tipo y devuelve los **HP causados** (penetración =
+  daño completo; bloqueo = esquirlas de HE; rebote = 0).
 
 ```js
-import { Weapon, Armor, raycastShape, evaluateImpact } from "./weapons/index.js";
+import { Weapon, Armor, raycastShape, resolveShot, PROJECTILES } from "./weapons/index.js";
 
 const weapon = new Weapon({ penetration: 150, muzzleSpeed: 10, reload: 0.6, damage: 25 });
 const armor = Armor.rectangle(tankShape, { front: 120, side: 50, rear: 30, frontEdge: 3 });
 
-const bullet = weapon.fire(muzzleX, muzzleY, 1, 0);   // dispara hacia +x
+// Dispara hacia +x con carga hueca (ignora el ángulo del blindaje).
+const bullet = weapon.fire(muzzleX, muzzleY, 1, 0, null, PROJECTILES.HEAT);
 // ...cada frame:
 bullet.update(dt);
 const hit = raycastShape(bullet.prev, bullet.position, tankShape);
 if (hit) {
     const face = armor.faceForEdge(hit.edgeIndex);
-    const impact = evaluateImpact({
-        direction: bullet.direction, normal: hit.normal,
-        penetration: bullet.penetration, armor: face.armor,
+    const shot = resolveShot({
+        type: bullet.type, penetration: bullet.penetration, damage: bullet.damage,
+        direction: bullet.direction, normal: hit.normal, armor: face.armor,
     });
-    // impact.result -> "penetration" | "ricochet" | "block"
+    // shot.result -> "penetration" | "ricochet" | "block"
+    if (shot.damage > 0) armor.takeDamage(shot.damage);
 }
 ```
 

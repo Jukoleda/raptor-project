@@ -16,15 +16,28 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
   - `weapon.js` — arma con penetración, velocidad de boca, recarga y daño.
   - `armor.js` — blindaje por cara (frontal/lateral/trasera) e integridad (HP);
     helper `Armor.rectangle`.
+  - `projectiles.js` — **tipos de proyectil básicos** con su **esquema de daño**:
+    `AP` (perforante, polivalente), `APCR` (subcalibre: más penetración, menos
+    daño, rebota antes), `HEAT` (carga hueca: ignora la inclinación del blindaje
+    y no rebota) y `HE` (alto explosivo: poca penetración pero mucho daño, y aun
+    sin penetrar astilla al blanco con esquirlas). Cada tipo escala penetración y
+    daño del arma y ajusta el modelo de penetración (`ricochetAngle`,
+    `normalizes`); `resolveShot()` resuelve impacto → HP según el tipo.
+  - `ballistics.js` — `evaluateImpact` acepta `normalizes` para que los cargas
+    huecas / HE penetren el blindaje nominal sin bonificación por ángulo.
 - **Demo `tanks.html`** (fuente `weapons/tanksDemo.js`): cañón que dispara contra
   un blanco cuyo blindaje se puede **rotar** para ver PENETRA / REBOTE / NO PENETRA
-  según el ángulo, con HUD (cara, ángulo, blindaje efectivo, penetración) y barra
-  de integridad. Controles: Espacio / clic disparan, ←/→ rotan, sliders de
-  penetración, ángulo y blindaje frontal. Handle `window.raptorTanks`.
+  según el ángulo, con **selector de munición** (AP/APCR/HEAT/HE), HUD (cara,
+  ángulo, blindaje efectivo, penetración y daño causado) y barra de integridad.
+  Controles: Espacio / clic disparan, ←/→ rotan, teclas 1-4 cambian de munición,
+  sliders de penetración base, ángulo y blindaje frontal. Handle
+  `window.raptorTanks` (expone `setAmmo` y `PROJECTILES`).
 - **Build:** `tools/build-standalone.mjs` genera también `tanks.html`; entrada de
   desarrollo `tanks-dev.html`.
-- **Alcance:** balas rectas (sin gravedad) y respuesta binaria por cara plana;
-  penetración por ángulo/blindaje. Sin fragmentación ni sobrepenetración.
+- **Alcance:** balas rectas (sin gravedad) y respuesta por cara plana;
+  penetración por ángulo/blindaje con esquema de daño por tipo de proyectil
+  (incluye esquirlas de HE al no penetrar). Aún sin sobrepenetración, daño por
+  área/radio real ni blindaje espaciado.
 
 ### Añadido (Física — Fase A: colisiones)
 - **Módulo de física** (`components/physics/`):

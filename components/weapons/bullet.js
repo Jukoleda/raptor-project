@@ -1,13 +1,16 @@
 // A shell in flight. It stores its previous position so the ballistics layer can
 // raycast the segment travelled during the last frame (continuous collision).
 
+import { DEFAULT_PROJECTILE } from "./projectiles.js";
+
 export default class Bullet {
-    constructor({ x, y, vx, vy, penetration, damage = 100, owner = null, life = 3 }) {
+    constructor({ x, y, vx, vy, penetration, damage = 100, owner = null, life = 3, type = DEFAULT_PROJECTILE }) {
         this.position = { x, y };
         this.prev = { x, y };
         this.velocity = { x: vx, y: vy };
         this.penetration = penetration;
         this.damage = damage;
+        this.type = type; // projectile type (AP / APCR / HEAT / HE), drives the damage scheme
         this.owner = owner;
         this.alive = true;
         this.life = life; // seconds before it despawns
