@@ -98,6 +98,10 @@ export default class Shape {
         // Subclasses override this (e.g. TRIANGLE_STRIP, TRIANGLE_FAN, TRIANGLES).
         this.drawMode = context.TRIANGLES;
 
+        // How the physics layer should treat this shape: "polygon" (convex
+        // outline from getColliderVertices) or "circle" (uses this.radius).
+        this.colliderShape = "polygon";
+
         this.programInfo = null;
         this.buffers = null;
         this.vCount = 0;
@@ -107,6 +111,13 @@ export default class Shape {
     // vertex positions: [x0, y0, x1, y1, ...].
     getVertices() {
         throw new Error(`${this.constructor.name} must implement getVertices()`);
+    }
+
+    // Convex outline used for collision, as an ordered list of local-space
+    // points [{x, y}, ...] (no fan center, no duplicated closing vertex).
+    // Polygon shapes override this; circle shapes set colliderShape = "circle".
+    getColliderVertices() {
+        throw new Error(`${this.constructor.name} must implement getColliderVertices()`);
     }
 
     // Uploads geometry to the GPU. Call once, after configuring the shape.

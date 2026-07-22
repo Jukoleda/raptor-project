@@ -13,16 +13,20 @@ con color, posición, rotación y escala configurables.
 ## Estructura
 
 ```
-index.html                 # GENERADO: demo autocontenido, se abre con doble clic
+index.html                 # GENERADO: demo de formas autocontenido, doble clic
 editor.html                # GENERADO: editor visual autocontenido, doble clic
+tanks.html                 # GENERADO: demo cañón vs blindaje, doble clic
 dev.html                   # Demo en desarrollo (módulos ES + gl-matrix por CDN)
 editor-dev.html            # Editor en desarrollo (módulos ES + gl-matrix por CDN)
+tanks-dev.html             # Demo de tanques en desarrollo (módulos ES + CDN)
 vendor/
   gl-matrix-min.js         # Copia vendorizada de gl-matrix (para el build offline)
 tools/
-  build-standalone.mjs     # Genera index.html y editor.html desde el source
+  build-standalone.mjs     # Genera index/editor/tanks .html desde el source
 editor/
   editor.js                # Editor visual: UI + edición en vivo de las entidades
+weapons/
+  tanksDemo.js             # Demo de armas: cañón, blanco con blindaje y HUD
 components/
   raptorEngine.js          # RaptorEngine: canvas + lista de entidades + render loop
   main.js                  # Arranque: crea el motor, añade formas y arranca
@@ -34,6 +38,17 @@ components/
     circle.js              # Circle (extiende RegularPolygon)
     polygon.js             # Polygon (puntos) y RegularPolygon (N lados)
     index.js               # Re-exporta todas las formas
+  physics/
+    body.js                # Body: tipo (static/dynamic), velocidad, masa, grupos
+    collision.js           # Detección convexa (círculo + SAT de polígonos)
+    world.js               # World: integra, resuelve colisiones, grupos y bounds
+    index.js               # Re-exporta la física
+  weapons/
+    ballistics.js          # Raycast segmento-arista + modelo de penetración
+    bullet.js              # Bullet: proyectil (raycast continuo)
+    weapon.js              # Weapon: cadencia, penetración, velocidad de boca
+    armor.js               # Armor: blindaje por cara + integridad (HP)
+    index.js               # Re-exporta las armas
 ```
 
 ## Cómo verlo
@@ -44,6 +59,7 @@ motor embebidos, funcionan incluso offline vía `file://`:
 
 - `index.html` — demo con las formas.
 - `editor.html` — editor visual (ver abajo).
+- `tanks.html` — demo de armas: cañón vs blindaje (ver abajo).
 
 **Desarrollo (con módulos ES):** `dev.html` / `editor-dev.html` usan los archivos
 fuente directamente, lo que exige servirlos por HTTP (los módulos no cargan desde
@@ -71,11 +87,79 @@ node tools/build-standalone.mjs
 - **Escena:** lista de formas; clic para seleccionar.
 - **Propiedades:** color, posición, rotación y escala de la forma seleccionada,
   con actualización **en vivo** (el motor redibuja cada frame).
+- **Física** por forma: tipo de **cuerpo** (dinámico / estático / sin física),
+  **grupo** de colisión y **rebote**.
+- **Simulación:** **Play/Pausa**, **Gravedad** y **Reiniciar** (restaura las
+  posiciones y velocidades de antes de simular).
 - **Eliminar** la forma seleccionada.
 
 La edición en vivo es directa porque el motor lee el transform de cada entidad en
 `draw()`; los controles solo mutan la forma seleccionada (`setPosition`,
 `setRotation`, `setScale`, `setColor`).
+
+## Física (colisiones)
+
+`components/physics/` añade una capa de colisiones 2D (rigid-body lineal):
+
+- **Tipos de cuerpo:** `static` (no se mueve, masa infinita) y `dynamic` (se
+  integra y responde a colisiones).
+- **Detección convexa:** círculo-círculo, y **SAT** para polígono-polígono y
+  círculo-polígono (todas las formas del motor son convexas).
+- **Resolución:** corrección posicional + impulso con restitución (rebote).
+- **Grupos de colisión:** `groupIndex` (estilo Box2D: mismo grupo negativo → se
+  ignoran; positivo → siempre colisionan) más `category`/`mask` por bits.
+- **Límites del mundo** (bounds) opcionales para mantener los cuerpos en pantalla.
+
+```js
+import { World, Body, STATIC } from "./physics/index.js";
+
+const world = new World({ gravity: { x: 0, y: -6 }, bounds: { minX: -3.2, maxX: 3.2, minY: -2.4, maxY: 2.4 } });
+world.add(new Body(circulo, { restitution: 0.6 }));           // dinámico
+world.add(new Body(suelo, { type: STATIC }));                 // estático
+
+game.addUpdater((dt) => world.step(dt));                       // integra en el loop
+```
+
+> **Alcance (Fase A):** rigid-body **lineal** (sin rotación por impacto). *Soft
+> body* y respuesta angular quedan para una fase posterior — ver el
+> [ROADMAP](./ROADMAP.md).
+
+## Armas y balística
+
+`components/weapons/` añade armas y balas con penetración realista por blindaje y
+ángulo (estilo arcade de tanques). Pruébalo en `tanks.html`.
+
+- **Balas por raycast:** cada frame se lanza el segmento *posición anterior →
+  actual* contra las aristas del blanco. Esto evita el *tunneling* de balas
+  rápidas y da el punto de impacto exacto **y la normal de la cara** — lo que el
+  modelo de ángulo necesita. (Las balas no son cuerpos físicos que rebotan.)
+- **Modelo de penetración:** `blindajeEfectivo = blindajeNominal / cos(θ)`, con θ
+  el ángulo entre la bala y la normal de la superficie.
+  - **Rebota** si θ ≥ umbral (~70°).
+  - **Penetra** si `penetración ≥ blindajeEfectivo`.
+  - **No penetra** en caso contrario.
+- **Blindaje por cara:** frontal / lateral / trasera, deducido de qué arista
+  golpea la bala. Angular el blanco cambia el blindaje efectivo.
+
+```js
+import { Weapon, Armor, raycastShape, evaluateImpact } from "./weapons/index.js";
+
+const weapon = new Weapon({ penetration: 150, muzzleSpeed: 10, reload: 0.6, damage: 25 });
+const armor = Armor.rectangle(tankShape, { front: 120, side: 50, rear: 30, frontEdge: 3 });
+
+const bullet = weapon.fire(muzzleX, muzzleY, 1, 0);   // dispara hacia +x
+// ...cada frame:
+bullet.update(dt);
+const hit = raycastShape(bullet.prev, bullet.position, tankShape);
+if (hit) {
+    const face = armor.faceForEdge(hit.edgeIndex);
+    const impact = evaluateImpact({
+        direction: bullet.direction, normal: hit.normal,
+        penetration: bullet.penetration, armor: face.armor,
+    });
+    // impact.result -> "penetration" | "ricochet" | "block"
+}
+```
 
 ## Uso básico
 

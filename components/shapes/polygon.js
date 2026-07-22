@@ -19,6 +19,10 @@ export class Polygon extends Shape {
         }
         return vertices;
     }
+
+    getColliderVertices() {
+        return this.points.map((p) => ({ x: p.x, y: p.y }));
+    }
 }
 
 // A regular N-sided polygon (equilateral triangle, pentagon, hexagon, ...).
@@ -42,5 +46,15 @@ export class RegularPolygon extends Shape {
         }
 
         return vertices;
+    }
+
+    getColliderVertices() {
+        const points = [];
+        // The rim points only (no center, no duplicated closing vertex).
+        for (let i = 0; i < this.sides; i++) {
+            const angle = (i / this.sides) * Math.PI * 2 - Math.PI / 2;
+            points.push({ x: Math.cos(angle) * this.radius, y: Math.sin(angle) * this.radius });
+        }
+        return points;
     }
 }

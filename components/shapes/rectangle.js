@@ -21,4 +21,16 @@ export default class Rectangle extends Shape {
             -hw, -hh,
         ];
     }
+
+    getColliderVertices() {
+        const hw = this.width / 2;
+        const hh = this.height / 2;
+        // Counter-clockwise outline.
+        return [
+            { x: -hw, y: -hh },
+            { x:  hw, y: -hh },
+            { x:  hw, y:  hh },
+            { x: -hw, y:  hh },
+        ];
+    }
 }

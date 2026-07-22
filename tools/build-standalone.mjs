@@ -14,8 +14,8 @@ import { dirname, join } from "path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-// Engine modules, in dependency order (base classes first). The barrel
-// components/shapes/index.js is skipped: it only re-exports.
+// Engine modules, in dependency order (base classes first). Barrel files
+// (shapes/index.js, physics/index.js) are skipped: they only re-export.
 const ENGINE = [
     "components/shapes/shape.js",
     "components/shapes/rectangle.js",
@@ -26,12 +26,27 @@ const ENGINE = [
     "components/raptorEngine.js",
 ];
 
-// One entry per generated page: the engine plus a bootstrap module.
+// Physics modules, in dependency order (body + collision before world).
+const PHYSICS = [
+    "components/physics/body.js",
+    "components/physics/collision.js",
+    "components/physics/world.js",
+];
+
+// Weapons / ballistics modules (bullet before weapon).
+const WEAPONS = [
+    "components/weapons/ballistics.js",
+    "components/weapons/bullet.js",
+    "components/weapons/weapon.js",
+    "components/weapons/armor.js",
+];
+
+// One entry per generated page: an explicit module list ending in a bootstrap.
 const PAGES = [
     {
         out: "index.html",
         title: "Raptor Engine",
-        bootstrap: "components/main.js",
+        modules: [...ENGINE, "components/main.js"],
         headStyle: `
         html, body { margin: 0; height: 100%; background: #111; }
         body { display: flex; align-items: center; justify-content: center; }
@@ -40,8 +55,15 @@ const PAGES = [
     {
         out: "editor.html",
         title: "Raptor Editor",
-        bootstrap: "editor/editor.js",
+        modules: [...ENGINE, ...PHYSICS, "editor/editor.js"],
         // The editor injects its own styles from JS; the body starts empty.
+        headStyle: "",
+    },
+    {
+        out: "tanks.html",
+        title: "Raptor — Cañón vs Blindaje",
+        modules: [...ENGINE, ...WEAPONS, "weapons/tanksDemo.js"],
+        // The demo injects its own styles from JS; the body starts empty.
         headStyle: "",
     },
 ];
@@ -66,9 +88,8 @@ async function inline(rel) {
 const glMatrix = await readFile(join(root, "vendor/gl-matrix-min.js"), "utf8");
 
 for (const page of PAGES) {
-    const modules = [...ENGINE, page.bootstrap];
     const bundle = [];
-    for (const rel of modules) bundle.push(await inline(rel));
+    for (const rel of page.modules) bundle.push(await inline(rel));
     const engine = bundle.join("\n\n");
 
     const html = `<!DOCTYPE html>
@@ -79,7 +100,7 @@ for (const page of PAGES) {
     <title>${page.title}</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/${page.bootstrap === "components/main.js" ? "" : " + " + dirname(page.bootstrap) + "/"} + vendor/gl-matrix-min.js
+        Source: ${page.modules.join(", ")} + vendor/gl-matrix-min.js
         Regenerate with: node tools/build-standalone.mjs
         This file is fully self-contained: open it directly in any browser.
     -->

@@ -6,7 +6,7 @@
     <title>Raptor Editor</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/ + editor/ + vendor/gl-matrix-min.js
+        Source: components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/raptorEngine.js, components/physics/body.js, components/physics/collision.js, components/physics/world.js, editor/editor.js + vendor/gl-matrix-min.js
         Regenerate with: node tools/build-standalone.mjs
         This file is fully self-contained: open it directly in any browser.
     -->
@@ -145,6 +145,10 @@ class Shape {
         // Subclasses override this (e.g. TRIANGLE_STRIP, TRIANGLE_FAN, TRIANGLES).
         this.drawMode = context.TRIANGLES;
 
+        // How the physics layer should treat this shape: "polygon" (convex
+        // outline from getColliderVertices) or "circle" (uses this.radius).
+        this.colliderShape = "polygon";
+
         this.programInfo = null;
         this.buffers = null;
         this.vCount = 0;
@@ -154,6 +158,13 @@ class Shape {
     // vertex positions: [x0, y0, x1, y1, ...].
     getVertices() {
         throw new Error(`${this.constructor.name} must implement getVertices()`);
+    }
+
+    // Convex outline used for collision, as an ordered list of local-space
+    // points [{x, y}, ...] (no fan center, no duplicated closing vertex).
+    // Polygon shapes override this; circle shapes set colliderShape = "circle".
+    getColliderVertices() {
+        throw new Error(`${this.constructor.name} must implement getColliderVertices()`);
     }
 
     // Uploads geometry to the GPU. Call once, after configuring the shape.
@@ -285,6 +296,18 @@ class Rectangle extends Shape {
             -hw, -hh,
         ];
     }
+
+    getColliderVertices() {
+        const hw = this.width / 2;
+        const hh = this.height / 2;
+        // Counter-clockwise outline.
+        return [
+            { x: -hw, y: -hh },
+            { x:  hw, y: -hh },
+            { x:  hw, y:  hh },
+            { x: -hw, y:  hh },
+        ];
+    }
 }
 
 // ===== components/shapes/square.js =====
@@ -315,6 +338,17 @@ class Triangle extends Shape {
              hw, -hh, // bottom-right
         ];
     }
+
+    getColliderVertices() {
+        const hw = this.width / 2;
+        const hh = this.height / 2;
+        // Counter-clockwise outline.
+        return [
+            { x: -hw, y: -hh },
+            { x:  hw, y: -hh },
+            { x:   0, y:  hh },
+        ];
+    }
 }
 
 // ===== components/shapes/polygon.js =====
@@ -336,6 +370,10 @@ class Polygon extends Shape {
             vertices.push(p.x, p.y);
         }
         return vertices;
+    }
+
+    getColliderVertices() {
+        return this.points.map((p) => ({ x: p.x, y: p.y }));
     }
 }
 
@@ -361,6 +399,16 @@ class RegularPolygon extends Shape {
 
         return vertices;
     }
+
+    getColliderVertices() {
+        const points = [];
+        // The rim points only (no center, no duplicated closing vertex).
+        for (let i = 0; i < this.sides; i++) {
+            const angle = (i / this.sides) * Math.PI * 2 - Math.PI / 2;
+            points.push({ x: Math.cos(angle) * this.radius, y: Math.sin(angle) * this.radius });
+        }
+        return points;
+    }
 }
 
 // ===== components/shapes/circle.js =====
@@ -369,6 +417,9 @@ class RegularPolygon extends Shape {
 class Circle extends RegularPolygon {
     constructor(context, { radius = 0.5, segments = 48 } = {}) {
         super(context, { sides: segments, radius });
+        // Treated as a true circle by the physics layer (uses this.radius),
+        // not as a 48-gon.
+        this.colliderShape = "circle";
     }
 }
 
@@ -436,15 +487,36 @@ function RaptorEngine() {
         this.context.clear(this.context.COLOR_BUFFER_BIT);
     };
 
+    // Per-frame update callbacks, each called as fn(deltaSeconds). Register
+    // physics, animation, input, etc. here — they run before drawing.
+    this.updaters = [];
+    this.addUpdater = (fn) => {
+        this.updaters.push(fn);
+        return fn;
+    };
+
+    this._lastTime = undefined;
+
     // Configures GL state and starts the render loop.
     this.start = () => {
         this.configure();
         requestAnimationFrame(this.renderLoop);
     };
 
-    // Single render loop for the whole engine: clear -> draw every entity ->
-    // schedule the next frame, in that order.
-    this.renderLoop = () => {
+    // Single render loop for the whole engine: update -> clear -> draw every
+    // entity -> schedule the next frame, in that order. `now` is the timestamp
+    // requestAnimationFrame passes in, used to derive delta-time.
+    this.renderLoop = (now) => {
+        // Delta-time in seconds, clamped so a background tab / long stall does
+        // not produce a huge jump that tunnels bodies through each other.
+        let dt = this._lastTime === undefined ? 0 : (now - this._lastTime) / 1000;
+        this._lastTime = now;
+        if (dt > 0.05) dt = 0.05;
+
+        for (const update of this.updaters) {
+            update(dt);
+        }
+
         this.clearScreen();
 
         for (const entity of this.entities) {
@@ -457,14 +529,413 @@ function RaptorEngine() {
 
 RaptorEngine;
 
+// ===== components/physics/body.js =====
+// A physics body attached to a shape. The shape remains the source of truth for
+// the transform (position/rotation/scale); the body adds the dynamics on top:
+// type, velocity, mass and collision filtering.
+//
+// Body types:
+//   - "static":  never moves, infinite mass. Walls, ground.
+//   - "dynamic": integrated every step and pushed by collisions (rigid body).
+//
+// Collision filtering (see World.shouldCollide):
+//   - groupIndex: bodies sharing the same non-zero group always collide (>0) or
+//     never collide (<0), overriding category/mask. 0 means "use category/mask".
+//   - category/mask: bitmasks; A and B collide only if
+//     (A.mask & B.category) && (B.mask & A.category).
+
+const STATIC = "static";
+const DYNAMIC = "dynamic";
+
+class Body {
+    constructor(shape, {
+        type = DYNAMIC,
+        mass = 1,
+        restitution = 0.4,
+        velocity = { x: 0, y: 0 },
+        groupIndex = 0,
+        category = 0x0001,
+        mask = 0xffff,
+    } = {}) {
+        this.shape = shape;
+        this.type = type;
+        this.velocity = { x: velocity.x, y: velocity.y };
+        this.restitution = restitution;
+        this.groupIndex = groupIndex;
+        this.category = category;
+        this.mask = mask;
+        this._mass = mass;
+        this._recomputeMass();
+    }
+
+    get isDynamic() {
+        return this.type === DYNAMIC;
+    }
+
+    // Convenience access to the shape transform.
+    get position() {
+        return this.shape.position;
+    }
+
+    _recomputeMass() {
+        this.invMass = this.type === DYNAMIC && this._mass > 0 ? 1 / this._mass : 0;
+    }
+
+    setType(type) {
+        this.type = type;
+        if (type === STATIC) {
+            this.velocity.x = 0;
+            this.velocity.y = 0;
+        }
+        this._recomputeMass();
+        return this;
+    }
+
+    setMass(mass) {
+        this._mass = mass;
+        this._recomputeMass();
+        return this;
+    }
+
+    setVelocity(x, y) {
+        this.velocity.x = x;
+        this.velocity.y = y;
+        return this;
+    }
+}
+
+// ===== components/physics/collision.js =====
+// Convex collision detection for the shapes the engine ships with.
+//
+// collide(bodyA, bodyB) returns null when they are apart, or a manifold
+// { normal, penetration } when they overlap. `normal` is a unit vector pointing
+// from A toward B, and `penetration` is how deep the overlap is along it.
+//
+// Physics happens in the flat 2D world plane the shapes live in (their x/y
+// before the perspective projection), so colliders are built from each shape's
+// local collider outline transformed by position/rotation/scale.
+
+function transformPoint(p, shape) {
+    const angle = (shape.rotation * Math.PI) / 180;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    const x = p.x * shape.scale.x;
+    const y = p.y * shape.scale.y;
+    return {
+        x: shape.position.x + x * cos - y * sin,
+        y: shape.position.y + x * sin + y * cos,
+    };
+}
+
+function worldPolygon(shape) {
+    return shape.getColliderVertices().map((p) => transformPoint(p, shape));
+}
+
+function worldCircle(shape) {
+    // Uniform scale is assumed for circles; scale.x drives the radius.
+    return { center: { x: shape.position.x, y: shape.position.y }, radius: shape.radius * shape.scale.x };
+}
+
+// Largest distance from the shape's origin to its outline, in world units.
+function boundingRadius(shape) {
+    if (shape.colliderShape === "circle") {
+        return shape.radius * Math.max(shape.scale.x, shape.scale.y);
+    }
+    let max = 0;
+    for (const p of shape.getColliderVertices()) {
+        max = Math.max(max, Math.hypot(p.x * shape.scale.x, p.y * shape.scale.y));
+    }
+    return max;
+}
+
+function centroid(poly) {
+    let x = 0;
+    let y = 0;
+    for (const p of poly) {
+        x += p.x;
+        y += p.y;
+    }
+    return { x: x / poly.length, y: y / poly.length };
+}
+
+function projectOntoAxis(poly, axis) {
+    let min = Infinity;
+    let max = -Infinity;
+    for (const p of poly) {
+        const dot = p.x * axis.x + p.y * axis.y;
+        min = Math.min(min, dot);
+        max = Math.max(max, dot);
+    }
+    return [min, max];
+}
+
+// Separating Axis Theorem for two convex polygons. Returns the minimum
+// translation vector as { normal (A->B), penetration } or null if separated.
+function satPolygons(a, b) {
+    let minOverlap = Infinity;
+    let smallestAxis = null;
+
+    for (const poly of [a, b]) {
+        for (let i = 0; i < poly.length; i++) {
+            const p1 = poly[i];
+            const p2 = poly[(i + 1) % poly.length];
+            const edge = { x: p2.x - p1.x, y: p2.y - p1.y };
+            const len = Math.hypot(edge.x, edge.y) || 1;
+            const axis = { x: -edge.y / len, y: edge.x / len };
+
+            const [minA, maxA] = projectOntoAxis(a, axis);
+            const [minB, maxB] = projectOntoAxis(b, axis);
+
+            if (maxA < minB || maxB < minA) {
+                return null; // found a separating axis
+            }
+
+            const overlap = Math.min(maxA, maxB) - Math.max(minA, minB);
+            if (overlap < minOverlap) {
+                minOverlap = overlap;
+                smallestAxis = axis;
+            }
+        }
+    }
+
+    // Orient the normal from A toward B.
+    const ca = centroid(a);
+    const cb = centroid(b);
+    if ((cb.x - ca.x) * smallestAxis.x + (cb.y - ca.y) * smallestAxis.y < 0) {
+        smallestAxis = { x: -smallestAxis.x, y: -smallestAxis.y };
+    }
+
+    return { normal: smallestAxis, penetration: minOverlap };
+}
+
+function circleCircle(ca, cb) {
+    const dx = cb.center.x - ca.center.x;
+    const dy = cb.center.y - ca.center.y;
+    const dist = Math.hypot(dx, dy);
+    const sum = ca.radius + cb.radius;
+    if (dist >= sum) return null;
+    const normal = dist > 1e-6 ? { x: dx / dist, y: dy / dist } : { x: 1, y: 0 };
+    return { normal, penetration: sum - dist };
+}
+
+function closestPointOnSegment(p, a, b) {
+    const abx = b.x - a.x;
+    const aby = b.y - a.y;
+    const lenSq = abx * abx + aby * aby || 1;
+    let t = ((p.x - a.x) * abx + (p.y - a.y) * aby) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    return { x: a.x + abx * t, y: a.y + aby * t };
+}
+
+function pointInPolygon(p, poly) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const a = poly[i];
+        const b = poly[j];
+        if ((a.y > p.y) !== (b.y > p.y) && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+// Returns manifold with normal pointing from the polygon toward the circle.
+function circlePolygon(circle, poly) {
+    let closest = null;
+    let minDistSq = Infinity;
+    for (let i = 0; i < poly.length; i++) {
+        const cp = closestPointOnSegment(circle.center, poly[i], poly[(i + 1) % poly.length]);
+        const dsq = (cp.x - circle.center.x) ** 2 + (cp.y - circle.center.y) ** 2;
+        if (dsq < minDistSq) {
+            minDistSq = dsq;
+            closest = cp;
+        }
+    }
+
+    const inside = pointInPolygon(circle.center, poly);
+    const dist = Math.sqrt(minDistSq);
+    if (!inside && dist >= circle.radius) return null;
+
+    let normal;
+    if (dist > 1e-6) {
+        normal = { x: (circle.center.x - closest.x) / dist, y: (circle.center.y - closest.y) / dist };
+    } else {
+        normal = { x: 0, y: 1 };
+    }
+    if (inside) {
+        return { normal, penetration: circle.radius + dist };
+    }
+    return { normal, penetration: circle.radius - dist };
+}
+
+function collide(bodyA, bodyB) {
+    const sa = bodyA.shape;
+    const sb = bodyB.shape;
+    const aCircle = sa.colliderShape === "circle";
+    const bCircle = sb.colliderShape === "circle";
+
+    if (aCircle && bCircle) {
+        return circleCircle(worldCircle(sa), worldCircle(sb));
+    }
+    if (!aCircle && !bCircle) {
+        return satPolygons(worldPolygon(sa), worldPolygon(sb));
+    }
+
+    // One circle, one polygon.
+    const circleShape = aCircle ? sa : sb;
+    const polyShape = aCircle ? sb : sa;
+    const res = circlePolygon(worldCircle(circleShape), worldPolygon(polyShape));
+    if (!res) return null;
+
+    // res.normal points polygon -> circle. Reorient to A -> B.
+    const normal = aCircle ? { x: -res.normal.x, y: -res.normal.y } : res.normal;
+    return { normal, penetration: res.penetration };
+}
+
+// ===== components/physics/world.js =====
+// The physics world: holds the bodies, integrates them and resolves collisions.
+// Call step(dt) once per frame (register it as an engine updater).
+//
+// Scope (Fase A): linear rigid-body dynamics. Bodies translate and bounce along
+// the collision normal; angular response (spin from off-center hits) is not
+// simulated yet.
+
+
+// Positional correction keeps overlapping bodies from sinking into each other.
+const CORRECTION_PERCENT = 0.8;
+const CORRECTION_SLOP = 0.001;
+const SOLVER_ITERATIONS = 2;
+
+class World {
+    constructor({ gravity = { x: 0, y: 0 }, bounds = null, linearDamping = 0 } = {}) {
+        this.bodies = [];
+        this.gravity = gravity;
+        this.bounds = bounds; // { minX, maxX, minY, maxY } or null
+        this.linearDamping = linearDamping;
+    }
+
+    add(body) {
+        this.bodies.push(body);
+        return body;
+    }
+
+    remove(body) {
+        const i = this.bodies.indexOf(body);
+        if (i !== -1) this.bodies.splice(i, 1);
+        return this;
+    }
+
+    // Whether two bodies are allowed to collide, per group/category/mask rules.
+    static shouldCollide(a, b) {
+        if (a.type === STATIC && b.type === STATIC) return false;
+        if (a.groupIndex !== 0 && a.groupIndex === b.groupIndex) {
+            return a.groupIndex > 0;
+        }
+        return (a.mask & b.category) !== 0 && (b.mask & a.category) !== 0;
+    }
+
+    step(dt) {
+        if (dt <= 0) return;
+        this.integrate(dt);
+
+        for (let iter = 0; iter < SOLVER_ITERATIONS; iter++) {
+            for (let i = 0; i < this.bodies.length; i++) {
+                for (let j = i + 1; j < this.bodies.length; j++) {
+                    const a = this.bodies[i];
+                    const b = this.bodies[j];
+                    if (!World.shouldCollide(a, b)) continue;
+
+                    const manifold = collide(a, b);
+                    if (manifold && manifold.penetration > 0) {
+                        this.resolve(a, b, manifold);
+                    }
+                }
+            }
+        }
+
+        if (this.bounds) this.applyBounds();
+    }
+
+    integrate(dt) {
+        const damp = Math.max(0, 1 - this.linearDamping * dt);
+        for (const body of this.bodies) {
+            if (!body.isDynamic) continue;
+            body.velocity.x += this.gravity.x * dt;
+            body.velocity.y += this.gravity.y * dt;
+            body.velocity.x *= damp;
+            body.velocity.y *= damp;
+            body.shape.position.x += body.velocity.x * dt;
+            body.shape.position.y += body.velocity.y * dt;
+        }
+    }
+
+    resolve(a, b, { normal, penetration }) {
+        const invSum = a.invMass + b.invMass;
+        if (invSum === 0) return;
+
+        // Positional correction so bodies stop overlapping.
+        const correction = (Math.max(penetration - CORRECTION_SLOP, 0) / invSum) * CORRECTION_PERCENT;
+        a.shape.position.x -= normal.x * correction * a.invMass;
+        a.shape.position.y -= normal.y * correction * a.invMass;
+        b.shape.position.x += normal.x * correction * b.invMass;
+        b.shape.position.y += normal.y * correction * b.invMass;
+
+        // Impulse along the normal (relative velocity is B - A).
+        const rvx = b.velocity.x - a.velocity.x;
+        const rvy = b.velocity.y - a.velocity.y;
+        const velAlongNormal = rvx * normal.x + rvy * normal.y;
+        if (velAlongNormal > 0) return; // already separating
+
+        const e = Math.min(a.restitution, b.restitution);
+        const jImpulse = (-(1 + e) * velAlongNormal) / invSum;
+        const ix = jImpulse * normal.x;
+        const iy = jImpulse * normal.y;
+
+        a.velocity.x -= ix * a.invMass;
+        a.velocity.y -= iy * a.invMass;
+        b.velocity.x += ix * b.invMass;
+        b.velocity.y += iy * b.invMass;
+    }
+
+    applyBounds() {
+        const { minX, maxX, minY, maxY } = this.bounds;
+        for (const body of this.bodies) {
+            if (!body.isDynamic) continue;
+            const r = boundingRadius(body.shape);
+            const pos = body.shape.position;
+
+            if (pos.x - r < minX) {
+                pos.x = minX + r;
+                if (body.velocity.x < 0) body.velocity.x = -body.velocity.x * body.restitution;
+            } else if (pos.x + r > maxX) {
+                pos.x = maxX - r;
+                if (body.velocity.x > 0) body.velocity.x = -body.velocity.x * body.restitution;
+            }
+
+            if (pos.y - r < minY) {
+                pos.y = minY + r;
+                if (body.velocity.y < 0) body.velocity.y = -body.velocity.y * body.restitution;
+            } else if (pos.y + r > maxY) {
+                pos.y = maxY - r;
+                if (body.velocity.y > 0) body.velocity.y = -body.velocity.y * body.restitution;
+            }
+        }
+    }
+}
+
 // ===== editor/editor.js =====
-// Basic visual editor for RaptorEngine.
+// Basic visual editor for RaptorEngine, with a physics layer.
 //
 // It renders the engine canvas next to a control panel. You can add shapes,
-// select them from the scene list and edit their color, position, rotation and
-// scale — everything updates live because the engine redraws every frame and
-// shapes read their transform in draw().
+// select them from the scene list and edit their color, position, rotation,
+// scale and physics (body type, collision group, restitution). Press Play to
+// run the simulation: dynamic bodies fall (if gravity is on), collide and bounce
+// off each other, static bodies and the world bounds.
 
+
+// Visible world area at the default camera depth (used as physics bounds).
+const BOUNDS = { minX: -3.2, maxX: 3.2, minY: -2.4, maxY: 2.4 };
+const GRAVITY_Y = -6;
 
 // --- Styles -----------------------------------------------------------------
 
@@ -489,14 +960,17 @@ const STYLES = `
         border-radius: 6px; padding: 8px 10px; font-size: 13px;
     }
     button:hover { background: #3a4047; }
+    button.primary { border-color: #3a5bbf; background: #35507f; }
+    button.primary:hover { background: #3d5f96; }
     button.danger { border-color: #6b2f2f; background: #3a2626; width: 100%; }
     button.danger:hover { background: #4a2c2c; }
     .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
     .row label { width: 78px; font-size: 12px; color: #b9bfc6; }
     .row input[type=range] { flex: 1; min-width: 0; }
     .row input[type=color] { width: 44px; height: 26px; padding: 0; border: none; background: none; }
+    .row select { flex: 1; min-width: 0; background: #2f343a; color: #e6e6e6; border: 1px solid #3a3f45; border-radius: 6px; padding: 6px; }
     .row .val { width: 42px; text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; color: #9aa0a6; }
-    #list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow: auto; }
+    #list { display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow: auto; }
     .item {
         display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 6px;
         background: #2f343a; border: 1px solid transparent; cursor: pointer; font-size: 13px;
@@ -510,7 +984,6 @@ const STYLES = `
 
 // --- Helpers ----------------------------------------------------------------
 
-// Pleasant, well-separated default colors cycled as shapes are added.
 const PALETTE = ["#e0533d", "#22b573", "#3d7fe0", "#f2c518", "#8e44e0", "#26c1a3"];
 let colorIndex = 0;
 
@@ -530,13 +1003,20 @@ function el(tag, props = {}, children = []) {
     return node;
 }
 
-// Builds a labelled range control and returns its parts.
 function slider(labelText, min, max, step, apply) {
     const input = el("input", { type: "range", min, max, step });
     const val = el("span", { className: "val" });
     input.oninput = () => { val.textContent = (+input.value).toFixed(2); apply(+input.value); };
     const row = el("div", { className: "row" }, [el("label", { textContent: labelText }), input, val]);
     return { row, input, val };
+}
+
+function select(labelText, options, apply) {
+    const node = el("select");
+    for (const [value, text] of options) node.append(el("option", { value: String(value), textContent: text }));
+    node.onchange = () => apply(node.value);
+    const row = el("div", { className: "row" }, [el("label", { textContent: labelText }), node]);
+    return { row, node };
 }
 
 // --- Editor -----------------------------------------------------------------
@@ -549,18 +1029,26 @@ function startEditor() {
     game.createWindow(stage);
     const gl = game.context;
 
+    const world = new World({ gravity: { x: 0, y: 0 }, bounds: BOUNDS, linearDamping: 0.05 });
+
+    let playing = false;
+    let snapshot = null; // captured transforms to restore on reset
+
+    // Physics stepping is driven by the engine loop but only while playing.
+    game.addUpdater((dt) => { if (playing) world.step(dt); });
+
     const FACTORIES = {
         "Rectángulo": () => new Rectangle(gl, { width: 1.2, height: 0.8 }),
         "Cuadrado": () => new Square(gl, { size: 1 }),
         "Triángulo": () => new Triangle(gl, { width: 1.2, height: 1.2 }),
-        "Círculo": () => new Circle(gl, { radius: 0.6 }),
-        "Hexágono": () => new RegularPolygon(gl, { sides: 6, radius: 0.7 }),
+        "Círculo": () => new Circle(gl, { radius: 0.5 }),
+        "Hexágono": () => new RegularPolygon(gl, { sides: 6, radius: 0.6 }),
     };
 
-    const items = new Map(); // shape -> list DOM node
-    let selected = null;
+    const entries = new Map(); // shape -> { shape, item, body, type, inWorld }
+    let selected = null;       // selected shape or null
 
-    // Property controls (their apply() mutates the selected shape live).
+    // --- Property controls ---
     const color = el("input", { type: "color", value: "#ffffff" });
     color.oninput = () => selected && selected.setColor({ ...hexToRgb01(color.value), alpha: 1 });
 
@@ -569,24 +1057,53 @@ function startEditor() {
     const rot = slider("Rotación", 0, 360, 1, (v) => selected && selected.setRotation(v));
     const scale = slider("Escala", 0.1, 3, 0.05, (v) => selected && selected.setScale({ x: v, y: v }));
 
+    const bodyType = select("Cuerpo", [
+        [DYNAMIC, "Dinámico (rigid)"],
+        [STATIC, "Estático"],
+        ["none", "Sin física"],
+    ], (v) => selected && setBodyType(entries.get(selected), v));
+
+    const group = select("Grupo", [
+        [0, "Ninguno"],
+        [-1, "Equipo 1 (se ignoran)"],
+        [-2, "Equipo 2 (se ignoran)"],
+    ], (v) => { if (selected) entries.get(selected).body.groupIndex = parseInt(v, 10); });
+
+    const bounce = slider("Rebote", 0, 1, 0.05, (v) => { if (selected) entries.get(selected).body.restitution = v; });
+
     const delBtn = el("button", { className: "danger", textContent: "Eliminar forma", onclick: deleteSelected });
 
     const props = el("div", { id: "props", className: "disabled" }, [
         el("div", { className: "row" }, [el("label", { textContent: "Color" }), color]),
         posX.row, posY.row, rot.row, scale.row,
+        bodyType.row, group.row, bounce.row,
         el("div", { className: "row" }, [delBtn]),
     ]);
 
+    // --- Scene list ---
     const list = el("div", { id: "list" });
     const emptyHint = el("div", { className: "empty", textContent: "Escena vacía. Añade una forma." });
     list.append(emptyHint);
 
+    // --- Add buttons ---
     const addButtons = Object.keys(FACTORIES).map((name) =>
         el("button", { textContent: name, onclick: () => addShape(name) })
     );
 
+    // --- Simulation controls ---
+    const playBtn = el("button", { className: "primary", textContent: "▶ Play", onclick: togglePlay });
+    const resetBtn = el("button", { textContent: "↺ Reiniciar", onclick: reset });
+    const gravityChk = el("input", { type: "checkbox" });
+    gravityChk.onchange = () => { world.gravity.y = gravityChk.checked ? GRAVITY_Y : 0; };
+    const gravityRow = el("label", { className: "row" }, [gravityChk, el("span", { textContent: "Gravedad" })]);
+
     const panel = el("div", { id: "panel" }, [
         el("h1", { textContent: "Raptor Editor" }),
+        el("div", { className: "card" }, [
+            el("h2", { textContent: "Simulación" }),
+            el("div", { className: "grid" }, [playBtn, resetBtn]),
+            gravityRow,
+        ]),
         el("div", { className: "card" }, [el("h2", { textContent: "Añadir" }), el("div", { className: "grid" }, addButtons)]),
         el("div", { className: "card" }, [el("h2", { textContent: "Escena" }), list]),
         el("div", { className: "card" }, [el("h2", { textContent: "Propiedades" }), props]),
@@ -595,6 +1112,9 @@ function startEditor() {
     document.body.append(el("div", { id: "editor" }, [stage, panel]));
 
     game.start();
+
+    // Debug handle (useful from the console or automated tests).
+    window.raptorEditor = { game, world, entries };
 
     // --- Behaviour ---
 
@@ -606,21 +1126,26 @@ function startEditor() {
             .init();
         game.add(shape);
 
+        const body = new Body(shape, { type: DYNAMIC, restitution: 0.4 });
+        world.add(body);
+
         const swatch = el("span", { className: "swatch" });
         swatch.style.background = hex;
         const item = el("div", { className: "item" }, [swatch, el("span", { textContent: name })]);
-        item.onclick = () => select(shape);
+        item.onclick = () => selectShape(shape);
 
+        const entry = { shape, item, body, type: DYNAMIC, inWorld: true };
         emptyHint.remove();
         list.append(item);
-        items.set(shape, item);
+        entries.set(shape, entry);
 
-        select(shape);
+        selectShape(shape);
     }
 
-    function select(shape) {
+    function selectShape(shape) {
         selected = shape;
-        for (const [s, node] of items) node.classList.toggle("selected", s === shape);
+        const entry = entries.get(shape);
+        for (const [s, e] of entries) e.item.classList.toggle("selected", s === shape);
         props.classList.remove("disabled");
 
         color.value = rgb01ToHex(shape.color);
@@ -628,16 +1153,60 @@ function startEditor() {
         setSlider(posY, shape.position.y);
         setSlider(rot, shape.rotation);
         setSlider(scale, shape.scale.x);
+        bodyType.node.value = entry.type;
+        group.node.value = String(entry.body.groupIndex);
+        setSlider(bounce, entry.body.restitution);
+    }
+
+    function setBodyType(entry, type) {
+        entry.type = type;
+        if (type === "none") {
+            if (entry.inWorld) { world.remove(entry.body); entry.inWorld = false; }
+        } else {
+            if (!entry.inWorld) { world.add(entry.body); entry.inWorld = true; }
+            entry.body.setType(type);
+        }
     }
 
     function deleteSelected() {
         if (!selected) return;
+        const entry = entries.get(selected);
         game.remove(selected);
-        items.get(selected).remove();
-        items.delete(selected);
+        world.remove(entry.body);
+        entry.item.remove();
+        entries.delete(selected);
         selected = null;
         props.classList.add("disabled");
-        if (items.size === 0) list.append(emptyHint);
+        if (entries.size === 0) list.append(emptyHint);
+    }
+
+    function togglePlay() {
+        playing = !playing;
+        if (playing && !snapshot) snapshot = capture();
+        playBtn.textContent = playing ? "⏸ Pausa" : "▶ Play";
+    }
+
+    function reset() {
+        playing = false;
+        playBtn.textContent = "▶ Play";
+        if (snapshot) restore(snapshot);
+        snapshot = null;
+        for (const entry of entries.values()) entry.body.setVelocity(0, 0);
+    }
+
+    function capture() {
+        const state = new Map();
+        for (const entry of entries.values()) {
+            state.set(entry, { x: entry.shape.position.x, y: entry.shape.position.y, rot: entry.shape.rotation });
+        }
+        return state;
+    }
+
+    function restore(state) {
+        for (const [entry, t] of state) {
+            entry.shape.setPosition({ x: t.x, y: t.y });
+            entry.shape.setRotation(t.rot);
+        }
     }
 
     function setSlider(s, value) {

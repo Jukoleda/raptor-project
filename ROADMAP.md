@@ -21,8 +21,10 @@ capaz de manejar múltiples objetos.
       programa compilado por contexto.
 - [x] **Primitivas básicas.** `Rectangle`, `Square`, `Triangle`, `Circle`,
       `RegularPolygon` y `Polygon`.
-- [ ] **Animación con delta-time.** Reactivar la rotación/animación usando el
-      tiempo entre frames (`deltaTime`) para que sea independiente del framerate.
+- [x] **Delta-time.** El `renderLoop` calcula `dt` y ejecuta *updaters* antes de
+      dibujar (`addUpdater`). Base para física/animación/input.
+- [ ] **Animación con delta-time.** Usar `dt` para animar transformaciones
+      (rotación continua, tweens) además de la física.
 - [ ] **Polígonos cóncavos.** `Polygon` sólo rellena convexos (TRIANGLE_FAN);
       añadir triangulación (ear clipping) para formas cóncavas.
 - [ ] **Contornos / stroke.** Modo wireframe además del relleno.
@@ -39,6 +41,35 @@ color, posición, rotación y escala en vivo. Mejoras posibles:
 - [ ] **Deshacer / rehacer**.
 - [ ] **Reordenar** (z-order) y duplicar formas.
 
+## Física (colisiones)
+
+**Fase A — completada:** módulo `components/physics/` con `Body` (static /
+dynamic), `World` (integración + colisiones), detección convexa (círculo y SAT
+para polígonos), corrección posicional + impulso, **grupos de colisión** y
+límites del mundo. Integrado en el editor (tipo de cuerpo, grupo, rebote,
+play/pausa, gravedad). Es rigid-body **lineal**.
+
+- [ ] **Fase B — Soft body.** Cuerpos deformables con Position-Based Dynamics
+      (malla de masas + constraints) y geometría dinámica (buffer por frame).
+      Es un módulo aparte porque cambia el pipeline de render.
+- [ ] **Respuesta angular.** Torque e inercia para que los cuerpos giren al
+      chocar (rigid-body completo).
+- [ ] **Fricción** tangencial en el contacto.
+- [ ] **Broadphase espacial** (grid / quadtree) si crece el número de cuerpos
+      (hoy es O(n²), suficiente para pocas formas).
+
+## Armas y balística
+
+**Completado:** módulo `components/weapons/` (arma, bala por raycast, blindaje por
+cara) con modelo de penetración por blindaje/ángulo (penetra / rebota / no
+penetra), y demo `tanks.html`. Mejoras posibles:
+
+- [ ] **Sobrepenetración:** tras penetrar, la bala sigue con penetración reducida.
+- [ ] **Fragmentación / HE:** proyectiles de alto explosivo con daño por área.
+- [ ] **Blindaje espaciado** y multi-capa.
+- [ ] **Balística con gravedad** (obuses en arco) además del tiro tenso.
+- [ ] **Mini-juego jugable:** mover tanque, IA enemiga, HUD, puntuación.
+
 ## Fase 4 — Infraestructura del proyecto
 
 Objetivo: preparar el repositorio para desarrollo continuo.
@@ -53,7 +84,6 @@ Objetivo: preparar el repositorio para desarrollo continuo.
 
 - Sistema de input (teclado / ratón).
 - Cámara 2D con paneo y zoom.
-- Detección de colisiones básica.
 - Bucle de juego con estados (update / render separados).
 
 > **Nota sobre 3D:** el pipeline actual ya usa matrices de proyección en
