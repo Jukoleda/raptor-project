@@ -67,8 +67,11 @@ export function raycastShape(a, b, shape) {
 
 // Decides what happens when a shell of `penetration` mm hits `armor` mm of plate
 // whose outward `normal` is hit head-on by a shell travelling along `direction`.
+// `normalizes` controls the slope model: true (solid shot) makes sloped armor
+// count more (effective = nominal / cosθ); false (shaped charge / HE) defeats the
+// nominal thickness regardless of slope.
 // Returns { result: "penetration" | "ricochet" | "block", angle, effectiveArmor }.
-export function evaluateImpact({ direction, normal, penetration, armor, ricochetAngle = 70 }) {
+export function evaluateImpact({ direction, normal, penetration, armor, ricochetAngle = 70, normalizes = true }) {
     // cos of the impact angle measured from the surface normal.
     const cos = -(direction.x * normal.x + direction.y * normal.y);
     const angle = (Math.acos(Math.max(-1, Math.min(1, cos))) * 180) / Math.PI;
@@ -78,7 +81,7 @@ export function evaluateImpact({ direction, normal, penetration, armor, ricochet
         return { result: "ricochet", angle, effectiveArmor: Infinity };
     }
 
-    const effectiveArmor = armor / cos;
+    const effectiveArmor = normalizes ? armor / cos : armor;
     if (angle >= ricochetAngle) {
         return { result: "ricochet", angle, effectiveArmor };
     }

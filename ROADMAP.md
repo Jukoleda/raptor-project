@@ -62,11 +62,16 @@ play/pausa, gravedad). Es rigid-body **lineal**.
 
 **Completado:** módulo `components/weapons/` (arma, bala por raycast, blindaje por
 cara) con modelo de penetración por blindaje/ángulo (penetra / rebota / no
-penetra), y demo `tanks.html`. Mejoras posibles:
+penetra), **tipos de proyectil con esquema de daño** (AP / APCR / HEAT / HE) y
+demo `tanks.html`. Mejoras posibles:
 
+- [x] **Tipos de proyectil / esquema de daño:** `projectiles.js` con AP, APCR,
+      HEAT y HE; cada tipo ajusta penetración, daño, rebote y sensibilidad al
+      ángulo, y HE astilla al blanco aun sin penetrar.
 - [ ] **Sobrepenetración:** tras penetrar, la bala sigue con penetración reducida.
-- [ ] **Fragmentación / HE:** proyectiles de alto explosivo con daño por área.
-- [ ] **Blindaje espaciado** y multi-capa.
+- [ ] **Daño por área (HE radial):** hoy el HE sólo astilla la cara impactada;
+      falta radio de explosión que afecte a varios blancos/caras.
+- [ ] **Blindaje espaciado** y multi-capa (necesario para modelar bien el HEAT).
 - [ ] **Balística con gravedad** (obuses en arco) además del tiro tenso.
 - [ ] **Mini-juego jugable:** mover tanque, IA enemiga, HUD, puntuación.
 

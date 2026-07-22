@@ -33,9 +33,12 @@ const PHYSICS = [
     "components/physics/world.js",
 ];
 
-// Weapons / ballistics modules (bullet before weapon).
+// Weapons / ballistics modules. Order: ballistics before projectiles (uses
+// evaluateImpact), projectiles before bullet/weapon (they default to a type),
+// bullet before weapon.
 const WEAPONS = [
     "components/weapons/ballistics.js",
+    "components/weapons/projectiles.js",
     "components/weapons/bullet.js",
     "components/weapons/weapon.js",
     "components/weapons/armor.js",
