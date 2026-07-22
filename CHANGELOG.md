@@ -11,13 +11,17 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
   - `tankController.js` — `TankController` mueve una forma como un tanque de
     orugas: acelerador hacia adelante/atrás según la orientación, giro del casco
     **sobre su eje** (giro neutral), fricción al soltar y límites opcionales
-    (`bounds`). Es input-agnóstico (`setInput({forward, turn})`) y trae binding
-    de teclado **WASD + flechas** vía `bindKeys()`. Expone `forward` y
+    (`bounds`). Es input-agnóstico (`setInput` / `hold`) y trae bindings de
+    **teclado** (WASD + flechas, `bindKeys()`) y **táctil/ratón** (botones en
+    pantalla vía *pointer events*, `bindTouch()`); ambos alimentan el mismo
+    estado, así que el multitáctil combina avanzar y girar. Expone `forward` y
     `velocity`. Sigue la convención del motor (rotación CCW, local +Y = adelante).
 - **Demo `drive.html`** (fuente `controls/driveDemo.js`): un tanque manejable
   (casco + torreta + cañón) por un arena con obstáculos de referencia y HUD
-  (velocidad, rumbo, acelerador y teclas activas). Entrada de desarrollo
-  `drive-dev.html`. Handle `window.raptorDrive`.
+  (velocidad, rumbo, acelerador y teclas activas). **Funciona en móvil**: D-pad
+  táctil superpuesto al lienzo (giro a la izquierda, acelerador a la derecha) y
+  diseño responsive que apila el panel bajo el lienzo en pantallas estrechas.
+  Entrada de desarrollo `drive-dev.html`. Handle `window.raptorDrive`.
 
 ### Añadido (Despliegue)
 - **Publicación en GitHub Pages** en <https://jukoleda.github.io/raptor-project/>

@@ -15,9 +15,25 @@ const STYLES = `
     * { box-sizing: border-box; }
     body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #e6e6e6; background: #1b1d21; }
     #app { display: flex; gap: 16px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
-    #stage { background: #0a0d12; border-radius: 8px; overflow: hidden; box-shadow: 0 6px 24px rgba(0,0,0,.4); }
+    #stage { position: relative; background: #0a0d12; border-radius: 8px; overflow: hidden; box-shadow: 0 6px 24px rgba(0,0,0,.4); }
     #stage canvas { display: block; max-width: 100%; height: auto; }
     #panel { width: 280px; display: flex; flex-direction: column; gap: 16px; }
+
+    /* On-screen controls overlaid on the canvas (touch + mouse). */
+    .pad { position: absolute; bottom: 16px; display: flex; gap: 12px; }
+    .pad.left { left: 16px; }
+    .pad.right { right: 16px; }
+    .pad .col { display: flex; flex-direction: column; gap: 12px; }
+    .tbtn {
+        width: 60px; height: 60px; border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 22px; line-height: 1; color: #e6e6e6;
+        background: rgba(38, 43, 51, .55); border: 1px solid rgba(255, 255, 255, .28);
+        -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+        touch-action: none; user-select: none; -webkit-user-select: none;
+        -webkit-tap-highlight-color: transparent; cursor: pointer;
+    }
+    .tbtn.on, .tbtn:active { background: rgba(74, 127, 181, .7); border-color: #7fb2e6; }
     h1 { font-size: 17px; margin: 0 0 4px; }
     h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #9aa0a6; margin: 0 0 10px; }
     .card { background: #26292e; border: 1px solid #33373d; border-radius: 8px; padding: 12px; }
@@ -37,6 +53,13 @@ const STYLES = `
     .bar > i { display: block; height: 100%; width: 0; background: #43c06a; transition: width .08s linear; }
     button { cursor: pointer; border: 1px solid #3a3f45; background: #2f343a; color: #e6e6e6; border-radius: 6px; padding: 9px 10px; font-size: 13px; width: 100%; }
     button:hover { background: #3a4047; }
+
+    /* Stack the panel under the canvas and grow the touch buttons on phones. */
+    @media (max-width: 720px) {
+        #app { flex-direction: column; padding: 10px; gap: 10px; }
+        #panel { width: 100%; }
+        .tbtn { width: 68px; height: 68px; font-size: 24px; }
+    }
 `;
 
 function el(tag, props = {}, children = []) {
@@ -83,6 +106,17 @@ function startDemo() {
     const tank = new TankController(hull, { bounds: BOUNDS });
     tank.bindKeys(window);
 
+    // On-screen controls overlaid on the canvas: steering on the left (for the
+    // left thumb), throttle on the right. Works with touch and mouse; holding
+    // two at once (e.g. ▲ + ◀) drives and turns together.
+    const tbtn = (label) => el("div", { className: "tbtn", textContent: label });
+    const btn = { up: tbtn("▲"), down: tbtn("▼"), left: tbtn("◀"), right: tbtn("▶") };
+    stage.append(
+        el("div", { className: "pad left" }, [btn.left, btn.right]),
+        el("div", { className: "pad right" }, [el("div", { className: "col" }, [btn.up, btn.down])]),
+    );
+    tank.bindTouch({ forward: btn.up, back: btn.down, left: btn.left, right: btn.right });
+
     // --- Panel / HUD ---
     const keyEls = {};
     const mkKey = (id, label) => (keyEls[id] = el("kbd", { textContent: label }));
@@ -101,7 +135,7 @@ function startDemo() {
         el("h1", { textContent: "Conducción de tanque" }),
         el("div", { className: "card" }, [
             el("h2", { textContent: "Controles" }), keypad,
-            el("div", { className: "hint", textContent: "W/S o ↑/↓ avanzan · A/D o ←/→ giran" }),
+            el("div", { className: "hint", textContent: "W/S o ↑/↓ avanzan · A/D o ←/→ giran · o usa los botones en pantalla" }),
         ]),
         el("div", { className: "card" }, [
             el("h2", { textContent: "Telemetría" }), kSpeed.row, speedBar, kHeading.row, kThrottle.row,
@@ -143,11 +177,18 @@ function startDemo() {
         tank.update(dt);
         syncParts();
 
-        // Highlight the keys currently pressed.
-        keyEls.up.classList.toggle("on", tank.input.forward > 0);
-        keyEls.down.classList.toggle("on", tank.input.forward < 0);
-        keyEls.left.classList.toggle("on", tank.input.turn > 0);
-        keyEls.right.classList.toggle("on", tank.input.turn < 0);
+        // Highlight the active directions on both the panel keypad and the
+        // on-screen buttons, whatever the input source (keyboard or touch).
+        const fwd = tank.input.forward > 0, back = tank.input.forward < 0;
+        const left = tank.input.turn > 0, right = tank.input.turn < 0;
+        keyEls.up.classList.toggle("on", fwd);
+        keyEls.down.classList.toggle("on", back);
+        keyEls.left.classList.toggle("on", left);
+        keyEls.right.classList.toggle("on", right);
+        btn.up.classList.toggle("on", fwd);
+        btn.down.classList.toggle("on", back);
+        btn.left.classList.toggle("on", left);
+        btn.right.classList.toggle("on", right);
 
         // Telemetry.
         const speed = tank.speed;

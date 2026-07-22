@@ -204,8 +204,8 @@ if (hit) {
 orugas: el acelerador la impulsa hacia adelante/atrás según su orientación y el
 volante gira el casco **sobre su eje** (giro neutral). Al soltar el acelerador,
 la fricción la frena enseguida. Pruébalo en `drive.html` (W/S o ↑/↓ avanzan,
-A/D o ←/→ giran). Sigue la convención del motor: rotación en grados CCW y el
-eje local **+Y es «adelante»**.
+A/D o ←/→ giran; **en móvil** hay un D-pad táctil en pantalla). Sigue la
+convención del motor: rotación en grados CCW y el eje local **+Y es «adelante»**.
 
 ```js
 import { TankController } from "./controls/index.js";
@@ -214,7 +214,9 @@ const tank = new TankController(hullShape, {
     maxSpeed: 3, accel: 5, turnSpeed: 140,
     bounds: { minX: -3, maxX: 3, minY: -2.1, maxY: 2.1 }, // opcional
 });
-tank.bindKeys(window); // WASD + flechas (o alimenta tank.setInput({forward, turn}) tú)
+tank.bindKeys(window);                       // teclado: WASD + flechas
+tank.bindTouch({ forward, back, left, right }); // táctil/ratón: elementos-botón
+// (o alimenta tú el estado con tank.setInput({forward, turn}) / tank.hold(dir, on))
 
 // ...cada frame:
 tank.update(dt);       // mueve y rota la forma; tank.forward / tank.velocity disponibles

@@ -5,9 +5,12 @@
 // neutral-steer). Coasting bleeds speed off with friction, so it stops shortly
 // after you let go — that heavy, planted feel a car controller wouldn't have.
 //
-// It is input-agnostic: feed it `setInput({ forward, turn })` each frame from
-// whatever you like (keyboard, gamepad, AI), or call `bindKeys()` for a ready
-// WASD + arrow-keys binding. `update(dt)` moves the shape.
+// It is input-agnostic. Feed it `setInput({ forward, turn })` each frame from
+// whatever you like, or use the built-in bindings that both drive the same set
+// of held directions:
+//   - `bindKeys()`  — WASD + arrow keys (desktop)
+//   - `bindTouch()` — on-screen buttons via pointer events (touch / mouse)
+// `update(dt)` moves the shape.
 //
 // Facing follows the engine's convention: rotation is CCW degrees and local +Y
 // is "forward", so at rotation 0 the shape drives up the screen.
@@ -31,7 +34,12 @@ export default class TankController {
 
         this.speed = 0;                       // signed scalar along the heading
         this.input = { forward: 0, turn: 0 }; // each clamped to [-1, 1]
-        this._unbind = null;
+
+        // Directions currently held down, from any input source. Keyboard and
+        // touch both toggle these, so combining sources "just works".
+        this._held = { forward: false, back: false, left: false, right: false };
+        this._unbindKeys = null;
+        this._unbindTouch = null;
     }
 
     // Heading in radians (from the shape's rotation).
@@ -56,6 +64,16 @@ export default class TankController {
         this.input.forward = Math.max(-1, Math.min(1, forward));
         this.input.turn = Math.max(-1, Math.min(1, turn));
         return this;
+    }
+
+    // Presses/releases a logical direction ("forward" | "back" | "left" |
+    // "right"). Any input source can call this; it recomputes setInput.
+    hold(dir, on) {
+        if (!(dir in this._held)) return this;
+        this._held[dir] = !!on;
+        const forward = (this._held.forward ? 1 : 0) - (this._held.back ? 1 : 0);
+        const turn = (this._held.left ? 1 : 0) - (this._held.right ? 1 : 0);
+        return this.setInput({ forward, turn });
     }
 
     update(dt) {
@@ -97,40 +115,82 @@ export default class TankController {
     // Binds WASD + arrow keys on `target` (default: window). W/↑ and S/↓ drive,
     // A/← and D/→ steer. Returns an unbind function; also stored for unbind().
     bindKeys(target = window) {
-        const down = new Set();
-        const tracked = ["w", "a", "s", "d", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"];
-        const keyOf = (e) => (e.key.length === 1 ? e.key.toLowerCase() : e.key);
-
-        const sync = () => {
-            const forward = (down.has("w") || down.has("ArrowUp") ? 1 : 0) - (down.has("s") || down.has("ArrowDown") ? 1 : 0);
-            const turn = (down.has("a") || down.has("ArrowLeft") ? 1 : 0) - (down.has("d") || down.has("ArrowRight") ? 1 : 0);
-            this.setInput({ forward, turn });
+        const map = {
+            w: "forward", ArrowUp: "forward",
+            s: "back", ArrowDown: "back",
+            a: "left", ArrowLeft: "left",
+            d: "right", ArrowRight: "right",
         };
+        const keyOf = (e) => (e.key.length === 1 ? e.key.toLowerCase() : e.key);
         const onDown = (e) => {
-            const k = keyOf(e);
-            if (!tracked.includes(k)) return;
+            const dir = map[keyOf(e)];
+            if (!dir) return;
             e.preventDefault();
-            down.add(k);
-            sync();
+            this.hold(dir, true);
         };
         const onUp = (e) => {
-            down.delete(keyOf(e));
-            sync();
+            const dir = map[keyOf(e)];
+            if (dir) this.hold(dir, false);
         };
 
         target.addEventListener("keydown", onDown);
         target.addEventListener("keyup", onUp);
-        this._unbind = () => {
+        if (this._unbindKeys) this._unbindKeys();
+        this._unbindKeys = () => {
             target.removeEventListener("keydown", onDown);
             target.removeEventListener("keyup", onUp);
-            this._unbind = null;
+            this._unbindKeys = null;
         };
-        return this._unbind;
+        return this._unbindKeys;
     }
 
-    // Removes the keyboard binding installed by bindKeys(), if any.
+    // Binds on-screen buttons for touch (and mouse) via pointer events. `buttons`
+    // maps a direction to a DOM element: { forward, back, left, right }; any
+    // subset is fine. Multi-touch works — hold two buttons to drive and turn at
+    // once. Returns an unbind function; also stored for unbind().
+    bindTouch(buttons = {}) {
+        const teardown = [];
+        for (const dir of Object.keys(buttons)) {
+            const node = buttons[dir];
+            if (!node || !(dir in this._held)) continue;
+
+            const press = (e) => {
+                e.preventDefault();
+                if (node.setPointerCapture && e.pointerId != null) {
+                    try { node.setPointerCapture(e.pointerId); } catch { /* older browsers */ }
+                }
+                this.hold(dir, true);
+            };
+            const release = () => this.hold(dir, false);
+
+            node.addEventListener("pointerdown", press);
+            node.addEventListener("pointerup", release);
+            node.addEventListener("pointercancel", release);
+            node.addEventListener("pointerleave", release);
+            // Keep touches from scrolling / selecting / zooming the page.
+            node.style.touchAction = "none";
+            node.style.userSelect = "none";
+
+            teardown.push(() => {
+                node.removeEventListener("pointerdown", press);
+                node.removeEventListener("pointerup", release);
+                node.removeEventListener("pointercancel", release);
+                node.removeEventListener("pointerleave", release);
+            });
+        }
+
+        if (this._unbindTouch) this._unbindTouch();
+        this._unbindTouch = () => {
+            for (const fn of teardown) fn();
+            this._unbindTouch = null;
+        };
+        return this._unbindTouch;
+    }
+
+    // Removes any keyboard and touch bindings installed above.
     unbind() {
-        if (this._unbind) this._unbind();
+        if (this._unbindKeys) this._unbindKeys();
+        if (this._unbindTouch) this._unbindTouch();
         return this;
     }
 }
