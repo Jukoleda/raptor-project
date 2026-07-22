@@ -28,6 +28,17 @@ capaz de manejar múltiples objetos.
 - [ ] **Contornos / stroke.** Modo wireframe además del relleno.
 - [ ] **Sprites con textura.**
 
+## Editor visual
+
+Existe un editor básico (`editor.html`): añadir/seleccionar formas y editar
+color, posición, rotación y escala en vivo. Mejoras posibles:
+
+- [ ] **Selección por clic** en el canvas (picking), no sólo desde la lista.
+- [ ] **Manipuladores** (mover/rotar/escalar arrastrando sobre el canvas).
+- [ ] **Guardar / cargar** la escena (export a JSON).
+- [ ] **Deshacer / rehacer**.
+- [ ] **Reordenar** (z-order) y duplicar formas.
+
 ## Fase 4 — Infraestructura del proyecto
 
 Objetivo: preparar el repositorio para desarrollo continuo.

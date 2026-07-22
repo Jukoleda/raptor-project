@@ -13,12 +13,16 @@ con color, posición, rotación y escala configurables.
 ## Estructura
 
 ```
-index.html                 # GENERADO: build autocontenido, se abre con doble clic
-dev.html                   # Entrada de desarrollo (módulos ES + gl-matrix por CDN)
+index.html                 # GENERADO: demo autocontenido, se abre con doble clic
+editor.html                # GENERADO: editor visual autocontenido, doble clic
+dev.html                   # Demo en desarrollo (módulos ES + gl-matrix por CDN)
+editor-dev.html            # Editor en desarrollo (módulos ES + gl-matrix por CDN)
 vendor/
   gl-matrix-min.js         # Copia vendorizada de gl-matrix (para el build offline)
 tools/
-  build-standalone.mjs     # Genera index.html a partir de components/ + vendor/
+  build-standalone.mjs     # Genera index.html y editor.html desde el source
+editor/
+  editor.js                # Editor visual: UI + edición en vivo de las entidades
 components/
   raptorEngine.js          # RaptorEngine: canvas + lista de entidades + render loop
   main.js                  # Arranque: crea el motor, añade formas y arranca
@@ -34,27 +38,44 @@ components/
 
 ## Cómo verlo
 
-**Opción rápida (cualquier navegador, sin servidor ni internet):** abre
-`index.html` con doble clic. Es un build autocontenido con gl-matrix y todo el
-motor embebidos, así que funciona incluso offline vía `file://`.
+**Opción rápida (cualquier navegador, sin servidor ni internet):** abre con doble
+clic el archivo que quieras — son builds autocontenidos con gl-matrix y todo el
+motor embebidos, funcionan incluso offline vía `file://`:
 
-**Desarrollo (con módulos ES):** `dev.html` usa los archivos de `components/`
-directamente, lo que exige servirlo por HTTP (los módulos no cargan desde
+- `index.html` — demo con las formas.
+- `editor.html` — editor visual (ver abajo).
+
+**Desarrollo (con módulos ES):** `dev.html` / `editor-dev.html` usan los archivos
+fuente directamente, lo que exige servirlos por HTTP (los módulos no cargan desde
 `file://`). Con cualquier servidor estático:
 
 ```bash
 python3 -m http.server 8000   # o: npx serve
-# luego abre http://localhost:8000/dev.html
+# luego abre http://localhost:8000/dev.html  (o editor-dev.html)
 ```
 
-### Regenerar `index.html`
+### Regenerar los HTML
 
-`index.html` es un **archivo generado**; no lo edites a mano. Tras cambiar algo
-en `components/`, reconstrúyelo con:
+`index.html` y `editor.html` son **archivos generados**; no los edites a mano.
+Tras cambiar algo en `components/` o `editor/`, reconstrúyelos con:
 
 ```bash
 node tools/build-standalone.mjs
 ```
+
+## Editor visual
+
+`editor.html` es un editor básico de escena: canvas del motor + panel de control.
+
+- **Añadir** formas (rectángulo, cuadrado, triángulo, círculo, hexágono).
+- **Escena:** lista de formas; clic para seleccionar.
+- **Propiedades:** color, posición, rotación y escala de la forma seleccionada,
+  con actualización **en vivo** (el motor redibuja cada frame).
+- **Eliminar** la forma seleccionada.
+
+La edición en vivo es directa porque el motor lee el transform de cada entidad en
+`draw()`; los controles solo mutan la forma seleccionada (`setPosition`,
+`setRotation`, `setScale`, `setColor`).
 
 ## Uso básico
 

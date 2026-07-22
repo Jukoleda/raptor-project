@@ -3,16 +3,19 @@
 // it will be drawn every frame. See components/shapes/ for the built-in shapes.
 function RaptorEngine() {
     this.context = undefined;
+    this.canvas = undefined;
     this.entities = [];
 
-    this.createWindow = () => {
+    // Creates the canvas and WebGL context. Pass a `mount` element to place the
+    // canvas inside it (e.g. an editor layout); defaults to document.body.
+    this.createWindow = (mount) => {
         var gameWindow = document.createElement("canvas");
 
         gameWindow.id = "gameWindow";
         gameWindow.width = 800;
         gameWindow.height = 600;
 
-        document.body.appendChild(gameWindow);
+        (mount || document.body).appendChild(gameWindow);
 
         var context = gameWindow.getContext("webgl");
 
@@ -21,6 +24,7 @@ function RaptorEngine() {
             return;
         }
 
+        this.canvas = gameWindow;
         this.context = context;
     };
 
@@ -28,6 +32,15 @@ function RaptorEngine() {
     this.add = (entity) => {
         this.entities.push(entity);
         return entity;
+    };
+
+    // Removes a previously added entity. Returns the engine for chaining.
+    this.remove = (entity) => {
+        const index = this.entities.indexOf(entity);
+        if (index !== -1) {
+            this.entities.splice(index, 1);
+        }
+        return this;
     };
 
     // One-time GL state configuration. Runs once, not per frame.
