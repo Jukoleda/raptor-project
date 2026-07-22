@@ -88,10 +88,21 @@ Objetivo: preparar el repositorio para desarrollo continuo.
       importándolo como módulo ES.
 - [ ] **Tests** para la lógica no gráfica (transformaciones, utilidades).
 
+## Controles / input
+
+**Completado:** `components/controls/TankController` mueve una forma con controles
+estilo tanque (acelerador + giro sobre el eje, fricción y límites), con binding
+de teclado WASD/flechas incluido. Demo `drive.html`. Mejoras posibles:
+
+- [ ] **Colisión al conducir:** integrar el tanque manejable con el módulo de
+      física (`components/physics/`) para que choque con obstáculos.
+- [ ] **Disparar mientras se conduce:** combinar `TankController` con el arma de
+      `components/weapons/` (torreta apuntable con el ratón).
+- [ ] **Gamepad** además del teclado.
+
 ## Ideas futuras
 
-- Sistema de input (teclado / ratón).
-- Cámara 2D con paneo y zoom.
+- Cámara 2D con paneo y zoom (seguir al tanque).
 - Bucle de juego con estados (update / render separados).
 
 > **Nota sobre 3D:** el pipeline actual ya usa matrices de proyección en

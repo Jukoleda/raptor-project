@@ -15,13 +15,15 @@ con color, posición, rotación y escala configurables.
 ## Estructura
 
 ```
-index.html                 # Portada (escrita a mano): enlaza las tres demos
+index.html                 # Portada (escrita a mano): enlaza las demos
 engine.html                # GENERADO: demo de formas autocontenido, doble clic
 editor.html                # GENERADO: editor visual autocontenido, doble clic
 tanks.html                 # GENERADO: demo cañón vs blindaje, doble clic
+drive.html                 # GENERADO: demo conducción de tanque, doble clic
 dev.html                   # Demo en desarrollo (módulos ES + gl-matrix por CDN)
 editor-dev.html            # Editor en desarrollo (módulos ES + gl-matrix por CDN)
 tanks-dev.html             # Demo de tanques en desarrollo (módulos ES + CDN)
+drive-dev.html             # Demo de conducción en desarrollo (módulos ES + CDN)
 .github/workflows/
   deploy.yml               # Despliega el sitio en GitHub Pages en cada push a main
 vendor/
@@ -32,6 +34,8 @@ editor/
   editor.js                # Editor visual: UI + edición en vivo de las entidades
 weapons/
   tanksDemo.js             # Demo de armas: cañón, blanco con blindaje y HUD
+controls/
+  driveDemo.js             # Demo de conducción: tanque manejable + HUD
 components/
   raptorEngine.js          # RaptorEngine: canvas + lista de entidades + render loop
   main.js                  # Arranque: crea el motor, añade formas y arranca
@@ -55,6 +59,9 @@ components/
     weapon.js              # Weapon: cadencia, penetración, velocidad de boca
     armor.js               # Armor: blindaje por cara + integridad (HP)
     index.js               # Re-exporta las armas
+  controls/
+    tankController.js      # TankController: movimiento estilo tanque + input de teclado
+    index.js               # Re-exporta los controladores
 ```
 
 ## Cómo verlo
@@ -63,10 +70,11 @@ components/
 clic el archivo que quieras — son builds autocontenidos con gl-matrix y todo el
 motor embebidos, funcionan incluso offline vía `file://`:
 
-- `index.html` — portada que enlaza las tres demos.
+- `index.html` — portada que enlaza las demos.
 - `engine.html` — demo con las formas.
 - `editor.html` — editor visual (ver abajo).
 - `tanks.html` — demo de armas: cañón vs blindaje (ver abajo).
+- `drive.html` — conducción de un tanque con teclado (ver abajo).
 
 **Online:** publicado con GitHub Pages en
 <https://jukoleda.github.io/raptor-project/>. El workflow
@@ -84,9 +92,10 @@ python3 -m http.server 8000   # o: npx serve
 
 ### Regenerar los HTML
 
-`engine.html`, `editor.html` y `tanks.html` son **archivos generados**; no los
-edites a mano (`index.html` sí es la portada escrita a mano). Tras cambiar algo
-en `components/`, `editor/` o `weapons/`, reconstrúyelos con:
+`engine.html`, `editor.html`, `tanks.html` y `drive.html` son **archivos
+generados**; no los edites a mano (`index.html` sí es la portada escrita a mano).
+Tras cambiar algo en `components/`, `editor/`, `weapons/` o `controls/`,
+reconstrúyelos con:
 
 ```bash
 node tools/build-standalone.mjs
@@ -187,6 +196,30 @@ if (hit) {
     // shot.result -> "penetration" | "ricochet" | "block"
     if (shot.damage > 0) armor.takeDamage(shot.damage);
 }
+```
+
+## Conducción (controles de tanque)
+
+`components/controls/TankController` mueve cualquier forma como un tanque de
+orugas: el acelerador la impulsa hacia adelante/atrás según su orientación y el
+volante gira el casco **sobre su eje** (giro neutral). Al soltar el acelerador,
+la fricción la frena enseguida. Pruébalo en `drive.html` (W/S o ↑/↓ avanzan,
+A/D o ←/→ giran; **en móvil** hay un D-pad táctil en pantalla). Sigue la
+convención del motor: rotación en grados CCW y el eje local **+Y es «adelante»**.
+
+```js
+import { TankController } from "./controls/index.js";
+
+const tank = new TankController(hullShape, {
+    maxSpeed: 3, accel: 5, turnSpeed: 140,
+    bounds: { minX: -3, maxX: 3, minY: -2.1, maxY: 2.1 }, // opcional
+});
+tank.bindKeys(window);                       // teclado: WASD + flechas
+tank.bindTouch({ forward, back, left, right }); // táctil/ratón: elementos-botón
+// (o alimenta tú el estado con tank.setInput({forward, turn}) / tank.hold(dir, on))
+
+// ...cada frame:
+tank.update(dt);       // mueve y rota la forma; tank.forward / tank.velocity disponibles
 ```
 
 ## Uso básico
