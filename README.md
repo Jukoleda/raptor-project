@@ -2,8 +2,10 @@
 
 Un motor de render **2D** ligero construido sobre **WebGL**, en JavaScript puro
 (módulos ES). Usa [gl-matrix](https://glmatrix.net/) para las operaciones con
-matrices. Se distribuye además como un único `index.html` autocontenido que se
+matrices. Cada demo se distribuye además como un `.html` autocontenido que se
 abre en cualquier navegador sin servidor ni conexión.
+
+**▶ En vivo:** <https://jukoleda.github.io/raptor-project/>
 
 El motor inicializa un canvas WebGL, mantiene una lista de entidades y las dibuja
 en un único bucle de render. Incluye un juego de formas básicas (rectángulo,
@@ -13,16 +15,19 @@ con color, posición, rotación y escala configurables.
 ## Estructura
 
 ```
-index.html                 # GENERADO: demo de formas autocontenido, doble clic
+index.html                 # Portada (escrita a mano): enlaza las tres demos
+engine.html                # GENERADO: demo de formas autocontenido, doble clic
 editor.html                # GENERADO: editor visual autocontenido, doble clic
 tanks.html                 # GENERADO: demo cañón vs blindaje, doble clic
 dev.html                   # Demo en desarrollo (módulos ES + gl-matrix por CDN)
 editor-dev.html            # Editor en desarrollo (módulos ES + gl-matrix por CDN)
 tanks-dev.html             # Demo de tanques en desarrollo (módulos ES + CDN)
+.github/workflows/
+  deploy.yml               # Despliega el sitio en GitHub Pages en cada push a main
 vendor/
   gl-matrix-min.js         # Copia vendorizada de gl-matrix (para el build offline)
 tools/
-  build-standalone.mjs     # Genera index/editor/tanks .html desde el source
+  build-standalone.mjs     # Genera engine/editor/tanks .html desde el source
 editor/
   editor.js                # Editor visual: UI + edición en vivo de las entidades
 weapons/
@@ -58,9 +63,15 @@ components/
 clic el archivo que quieras — son builds autocontenidos con gl-matrix y todo el
 motor embebidos, funcionan incluso offline vía `file://`:
 
-- `index.html` — demo con las formas.
+- `index.html` — portada que enlaza las tres demos.
+- `engine.html` — demo con las formas.
 - `editor.html` — editor visual (ver abajo).
 - `tanks.html` — demo de armas: cañón vs blindaje (ver abajo).
+
+**Online:** publicado con GitHub Pages en
+<https://jukoleda.github.io/raptor-project/>. El workflow
+`.github/workflows/deploy.yml` regenera las páginas y despliega en cada push a
+`main`.
 
 **Desarrollo (con módulos ES):** `dev.html` / `editor-dev.html` usan los archivos
 fuente directamente, lo que exige servirlos por HTTP (los módulos no cargan desde
@@ -73,8 +84,9 @@ python3 -m http.server 8000   # o: npx serve
 
 ### Regenerar los HTML
 
-`index.html` y `editor.html` son **archivos generados**; no los edites a mano.
-Tras cambiar algo en `components/` o `editor/`, reconstrúyelos con:
+`engine.html`, `editor.html` y `tanks.html` son **archivos generados**; no los
+edites a mano (`index.html` sí es la portada escrita a mano). Tras cambiar algo
+en `components/`, `editor/` o `weapons/`, reconstrúyelos con:
 
 ```bash
 node tools/build-standalone.mjs

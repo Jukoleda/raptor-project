@@ -79,6 +79,9 @@ demo `tanks.html`. Mejoras posibles:
 
 Objetivo: preparar el repositorio para desarrollo continuo.
 
+- [x] **Despliegue en GitHub Pages.** Workflow `.github/workflows/deploy.yml` que
+      regenera las páginas y publica en cada push a `main`; portada en
+      `index.html`. Sitio en <https://jukoleda.github.io/raptor-project/>.
 - [ ] **`package.json`** con un servidor de desarrollo estático (p. ej. `vite`).
 - [ ] **Linter** (ESLint) con configuración base y script `npm run lint`.
 - [ ] **gl-matrix como dependencia npm** (en vez de CDN) una vez haya build,
