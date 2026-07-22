@@ -2,9 +2,9 @@
 
 Plan de evolución de **raptor-project**, un motor de render 2D sobre WebGL.
 
-Las Fases 1 y 2 (arreglo del render loop, limpieza de bugs y actualización de
-gl-matrix) ya están completadas — ver el [CHANGELOG](./CHANGELOG.md). Este
-documento recoge el trabajo pendiente.
+Las Fases 1 y 2 (render loop, limpieza de bugs, gl-matrix) están completadas, y
+la Fase 3 está en marcha: el sistema de formas ya existe. Ver el
+[CHANGELOG](./CHANGELOG.md) para el detalle. Este documento recoge lo pendiente.
 
 ---
 
@@ -13,15 +13,20 @@ documento recoge el trabajo pendiente.
 Objetivo: dejar de ser un demo de un solo cuadrado y convertirse en un motor
 capaz de manejar múltiples objetos.
 
-- [ ] **Lista de entidades.** Introducir un array `entities[]` que el `renderLoop`
-      recorra y dibuje, en lugar de tener el cuadrado cableado en el motor.
-- [ ] **Separar archivos.** Mover `Square` a su propio módulo (p. ej.
-      `components/shapes/square.js`) y dejar `raptorEngine.js` solo con el motor.
-- [ ] **Reutilizar helpers.** Extraer `loadShader` y la compilación/enlace del
-      programa a un módulo común, para no duplicarlos en cada figura.
+- [x] **Lista de entidades.** `RaptorEngine` tiene `entities[]`, `add()` y
+      `start()`; el `renderLoop` dibuja todas las entidades.
+- [x] **Separar archivos.** Las figuras viven en `components/shapes/`; el motor
+      quedó independiente de las formas.
+- [x] **Reutilizar helpers.** `Shape` centraliza shaders/buffers/draw y cachea el
+      programa compilado por contexto.
+- [x] **Primitivas básicas.** `Rectangle`, `Square`, `Triangle`, `Circle`,
+      `RegularPolygon` y `Polygon`.
 - [ ] **Animación con delta-time.** Reactivar la rotación/animación usando el
       tiempo entre frames (`deltaTime`) para que sea independiente del framerate.
-- [ ] **Más primitivas.** Triángulo, círculo y sprites con textura.
+- [ ] **Polígonos cóncavos.** `Polygon` sólo rellena convexos (TRIANGLE_FAN);
+      añadir triangulación (ear clipping) para formas cóncavas.
+- [ ] **Contornos / stroke.** Modo wireframe además del relleno.
+- [ ] **Sprites con textura.**
 
 ## Fase 4 — Infraestructura del proyecto
 

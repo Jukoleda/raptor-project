@@ -6,6 +6,24 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Fase 3 — Sistema de formas)
+- **Clase base `Shape`** (`components/shapes/shape.js`) que encapsula todo el
+  pipeline común: shaders, buffers, transform (posición, rotación, escala, color)
+  y `draw()`. Cada figura solo implementa `getVertices()` y su modo de dibujo.
+- **Programa de shaders compartido y cacheado por contexto** (`WeakMap`): se
+  compila y enlaza una sola vez y lo reutilizan todas las figuras, en lugar de
+  recompilarlo por objeto.
+- **Primitivas nuevas:** `Rectangle`, `Square`, `Triangle`, `Circle`,
+  `RegularPolygon` (N lados) y `Polygon` (puntos arbitrarios, convexo).
+- **API fluida (encadenable):** `setColor`, `setPosition`, `setScale`,
+  `setRotation`, `setDepth` e `init()` devuelven la instancia. Recolorear tras
+  `init()` reescribe el buffer de color sin reconstruir la geometría.
+- **Barrel `components/shapes/index.js`** para importar todas las figuras de una.
+- **Motor basado en entidades.** `RaptorEngine` ahora expone `add(entity)` y
+  `start()`, y el `renderLoop` dibuja todas las entidades registradas. Sustituye
+  al antiguo `draw()` que tenía un cuadrado cableado. `Square` se movió fuera de
+  `raptorEngine.js`.
+
 ### Corregido (Fase 1 — Render loop)
 - **Bucle de render unificado.** Antes existían tres bucles `requestAnimationFrame`
   independientes y sin orden garantizado (`drawClearColor`, `clearScreen` y
