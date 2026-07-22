@@ -6,7 +6,7 @@
     <title>Raptor Engine — Formas</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/raptorEngine.js, components/main.js + vendor/gl-matrix-min.js
+        Source: components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/camera.js, components/raptorEngine.js, components/main.js + vendor/gl-matrix-min.js
         Regenerate with: node tools/build-standalone.mjs
         This file is fully self-contained: open it directly in any browser.
     -->
@@ -123,6 +123,9 @@ function buildProgramInfo(gl) {
 // independent.
 const programCache = new WeakMap();
 
+// Used when draw() is called without a camera: pan 0, zoom 1 (world == screen).
+const IDENTITY_CAMERA = { x: 0, y: 0, zoom: 1 };
+
 function getProgramInfo(gl) {
     let info = programCache.get(gl);
     if (!info) {
@@ -209,7 +212,9 @@ class Shape {
         gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
     }
 
-    draw() {
+    // `camera` is an optional { x, y, zoom }; omitted (or the identity default)
+    // means "no camera", i.e. world space maps straight to the screen as before.
+    draw(camera = IDENTITY_CAMERA) {
         const gl = this.context;
         // gl-matrix 3.x exposes its modules under the global `glMatrix` namespace.
         const { mat4 } = glMatrix;
@@ -219,10 +224,16 @@ class Shape {
         const projectionMatrix = mat4.create();
         mat4.perspective(projectionMatrix, fieldOfView, aspect, 0.1, 100.0);
 
+        // View transform: pan by the camera center, then zoom about it. Depth is
+        // constant, so scaling the world coordinates scales the screen linearly.
+        const zoom = camera.zoom ?? 1;
+        const viewX = (this.position.x - (camera.x ?? 0)) * zoom;
+        const viewY = (this.position.y - (camera.y ?? 0)) * zoom;
+
         const modelViewMatrix = mat4.create();
-        mat4.translate(modelViewMatrix, modelViewMatrix, [this.position.x, this.position.y, this.depth]);
+        mat4.translate(modelViewMatrix, modelViewMatrix, [viewX, viewY, this.depth]);
         mat4.rotate(modelViewMatrix, modelViewMatrix, (this.rotation * Math.PI) / 180, [0, 0, 1]);
-        mat4.scale(modelViewMatrix, modelViewMatrix, [this.scale.x, this.scale.y, 1]);
+        mat4.scale(modelViewMatrix, modelViewMatrix, [this.scale.x * zoom, this.scale.y * zoom, 1]);
 
         const { attribLocations, uniformLocations, program } = this.programInfo;
 
@@ -426,14 +437,68 @@ class Circle extends RegularPolygon {
     }
 }
 
+// ===== components/camera.js =====
+// A 2D camera: a movable window onto the world.
+//
+// The camera has a world-space center (x, y) and a zoom. Shapes subtract the
+// camera center and multiply by zoom when they draw, so moving the camera pans
+// the whole scene and raising the zoom magnifies it — the world stays put, the
+// view moves. A fresh camera sits at the origin with zoom 1, which is a no-op,
+// so scenes that never touch the camera render exactly as before.
+//
+// `follow()` eases the center toward a target (the player) instead of snapping,
+// and optional `bounds` keep the center from revealing past the edges of a map.
+
+class Camera {
+    constructor({ x = 0, y = 0, zoom = 1, smoothing = 8, bounds = null } = {}) {
+        this.x = x;
+        this.y = y;
+        this.zoom = zoom;
+        this.smoothing = smoothing; // higher = the camera catches up faster
+        this.bounds = bounds;       // { minX, maxX, minY, maxY } for the center
+    }
+
+    // Jumps the center straight to (x, y) — no easing.
+    centerOn(x, y) {
+        this.x = x;
+        this.y = y;
+        this._clamp();
+        return this;
+    }
+
+    // Eases the center toward `target` over dt seconds. The exponential factor
+    // makes the smoothing frame-rate independent (same feel at 30 or 144 fps).
+    follow(target, dt) {
+        const t = 1 - Math.exp(-this.smoothing * dt);
+        this.x += (target.x - this.x) * t;
+        this.y += (target.y - this.y) * t;
+        this._clamp();
+        return this;
+    }
+
+    _clamp() {
+        const b = this.bounds;
+        if (!b) return;
+        // If the map is narrower than the view, min can exceed max; center it.
+        this.x = b.minX > b.maxX ? (b.minX + b.maxX) / 2 : Math.max(b.minX, Math.min(b.maxX, this.x));
+        this.y = b.minY > b.maxY ? (b.minY + b.maxY) / 2 : Math.max(b.minY, Math.min(b.maxY, this.y));
+    }
+}
+
 // ===== components/raptorEngine.js =====
 // RaptorEngine owns the canvas, the WebGL context and the render loop. It is
 // shape-agnostic: anything with a `draw()` method can be added as an entity and
 // it will be drawn every frame. See components/shapes/ for the built-in shapes.
+
 function RaptorEngine() {
     this.context = undefined;
     this.canvas = undefined;
     this.entities = [];
+
+    // The view onto the world. Defaults to the origin with zoom 1 (a no-op), so
+    // scenes that ignore it render unchanged. Move/replace it to pan or zoom;
+    // every entity is drawn through it. See components/camera.js.
+    this.camera = new Camera();
 
     // Creates the canvas and WebGL context. Pass a `mount` element to place the
     // canvas inside it (e.g. an editor layout); defaults to document.body.
@@ -523,7 +588,7 @@ function RaptorEngine() {
         this.clearScreen();
 
         for (const entity of this.entities) {
-            entity.draw();
+            entity.draw(this.camera);
         }
 
         requestAnimationFrame(this.renderLoop);

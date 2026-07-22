@@ -23,6 +23,7 @@ const ENGINE = [
     "components/shapes/triangle.js",
     "components/shapes/polygon.js",
     "components/shapes/circle.js",
+    "components/camera.js",
     "components/raptorEngine.js",
 ];
 
