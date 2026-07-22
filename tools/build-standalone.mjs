@@ -1,12 +1,12 @@
-// Builds a single, self-contained index.html that opens in any browser by
-// double-clicking it (no server, no internet). It inlines gl-matrix and the
-// engine source, so index.html is a GENERATED file — edit the modules under
-// components/ and re-run this script:
+// Builds self-contained HTML pages that open in any browser by double-clicking
+// them (no server, no internet). Each page inlines gl-matrix and the engine
+// source, so the generated .html files are GENERATED — edit the modules under
+// components/ (and editor/) and re-run this script:
 //
 //     node tools/build-standalone.mjs
 //
-// For module-based development (with real ES imports) use dev.html + a static
-// server instead.
+// For module-based development (with real ES imports) use the *-dev.html pages
+// plus a static server instead.
 
 import { readFile, writeFile } from "fs/promises";
 import { fileURLToPath } from "url";
@@ -14,9 +14,9 @@ import { dirname, join } from "path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-// Source modules, in dependency order (base classes first). The barrel
-// components/shapes/index.js is intentionally skipped: it only re-exports.
-const MODULES = [
+// Engine modules, in dependency order (base classes first). The barrel
+// components/shapes/index.js is skipped: it only re-exports.
+const ENGINE = [
     "components/shapes/shape.js",
     "components/shapes/rectangle.js",
     "components/shapes/square.js",
@@ -24,7 +24,26 @@ const MODULES = [
     "components/shapes/polygon.js",
     "components/shapes/circle.js",
     "components/raptorEngine.js",
-    "components/main.js",
+];
+
+// One entry per generated page: the engine plus a bootstrap module.
+const PAGES = [
+    {
+        out: "index.html",
+        title: "Raptor Engine",
+        bootstrap: "components/main.js",
+        headStyle: `
+        html, body { margin: 0; height: 100%; background: #111; }
+        body { display: flex; align-items: center; justify-content: center; }
+        #gameWindow { max-width: 100%; height: auto; }`,
+    },
+    {
+        out: "editor.html",
+        title: "Raptor Editor",
+        bootstrap: "editor/editor.js",
+        // The editor injects its own styles from JS; the body starts empty.
+        headStyle: "",
+    },
 ];
 
 // Turns an ES module into plain script text: drops import lines and unwraps
@@ -39,31 +58,32 @@ function stripModuleSyntax(code) {
         .join("\n");
 }
 
+async function inline(rel) {
+    const code = await readFile(join(root, rel), "utf8");
+    return `// ===== ${rel} =====\n${stripModuleSyntax(code).trim()}`;
+}
+
 const glMatrix = await readFile(join(root, "vendor/gl-matrix-min.js"), "utf8");
 
-const parts = [];
-for (const rel of MODULES) {
-    const code = await readFile(join(root, rel), "utf8");
-    parts.push(`// ===== ${rel} =====\n${stripModuleSyntax(code).trim()}`);
-}
-const engine = parts.join("\n\n");
+for (const page of PAGES) {
+    const modules = [...ENGINE, page.bootstrap];
+    const bundle = [];
+    for (const rel of modules) bundle.push(await inline(rel));
+    const engine = bundle.join("\n\n");
 
-const html = `<!DOCTYPE html>
+    const html = `<!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Raptor Engine</title>
+    <title>${page.title}</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/ + vendor/gl-matrix-min.js
+        Source: components/${page.bootstrap === "components/main.js" ? "" : " + " + dirname(page.bootstrap) + "/"} + vendor/gl-matrix-min.js
         Regenerate with: node tools/build-standalone.mjs
         This file is fully self-contained: open it directly in any browser.
     -->
-    <style>
-        html, body { margin: 0; height: 100%; background: #111; }
-        body { display: flex; align-items: center; justify-content: center; }
-        #gameWindow { max-width: 100%; height: auto; }
+    <style>${page.headStyle}
     </style>
 </head>
 <body>
@@ -75,5 +95,6 @@ ${engine}
 </html>
 `;
 
-await writeFile(join(root, "index.html"), html, "utf8");
-console.log("Wrote index.html (%d KB, %d modules inlined)", Math.round(html.length / 1024), MODULES.length);
+    await writeFile(join(root, page.out), html, "utf8");
+    console.log("Wrote %s (%d KB)", page.out, Math.round(html.length / 1024));
+}

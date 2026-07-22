@@ -6,6 +6,18 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Editor visual)
+- **Editor básico de escena** (`editor.html`, fuente en `editor/editor.js`):
+  canvas del motor + panel para **añadir** formas, **listarlas** y **seleccionarlas**,
+  y **editar en vivo** color, posición, rotación y escala de la seleccionada, más
+  **eliminar**. La edición es directa porque el motor lee el transform de cada
+  entidad en `draw()`. Se genera autocontenido igual que `index.html`.
+- **`RaptorEngine`**: `createWindow(mount)` admite montar el canvas en un
+  contenedor (por defecto `document.body`) y expone `engine.canvas`; nuevo
+  `remove(entity)` para quitar entidades.
+- **`tools/build-standalone.mjs`** ahora genera varias páginas (`index.html` y
+  `editor.html`) desde un mismo pipeline. Entrada de desarrollo `editor-dev.html`.
+
 ### Añadido (Distribución)
 - **`index.html` autocontenido.** Nuevo build de un solo archivo con gl-matrix y
   todo el motor embebidos, que se abre en cualquier navegador con doble clic, sin
