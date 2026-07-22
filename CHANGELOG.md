@@ -6,6 +6,28 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Física — Fase A: colisiones)
+- **Módulo de física** (`components/physics/`):
+  - `Body` — componente que se adjunta a una forma: tipo (`static` / `dynamic`),
+    velocidad, masa/`invMass`, restitución (rebote) y filtrado de colisión
+    (`groupIndex` estilo Box2D + `category`/`mask`).
+  - `collision.js` — detección convexa: círculo-círculo, **SAT** polígono-polígono
+    y círculo-polígono; devuelve normal + penetración. Aprovecha que todas las
+    formas son convexas.
+  - `World` — `step(dt)`: integra, detecta y resuelve (corrección posicional +
+    impulso con restitución), con **grupos de colisión** y **límites** (bounds)
+    del mundo. Escala O(n²), suficiente para el tamaño actual.
+- **Colliders en las formas:** `getColliderVertices()` en rectángulo, cuadrado,
+  triángulo y polígonos; `Circle` se trata como círculo real (`colliderShape`).
+- **`RaptorEngine`:** el `renderLoop` calcula **delta-time** y ejecuta *updaters*
+  (`addUpdater(fn)`) antes de dibujar. Base para física/animación/input.
+- **Editor con física:** controles de **cuerpo** (dinámico / estático / sin física),
+  **grupo** de colisión y **rebote** por forma, más **Play/Pausa**, **Gravedad**
+  y **Reiniciar** (restaura posiciones y velocidades). Handle de depuración
+  `window.raptorEditor`.
+- **Nota de alcance:** Fase A es rigid-body **lineal** (sin respuesta angular) y no
+  incluye soft body, que queda para una fase posterior (PBD + geometría dinámica).
+
 ### Añadido (Editor visual)
 - **Editor básico de escena** (`editor.html`, fuente en `editor/editor.js`):
   canvas del motor + panel para **añadir** formas, **listarlas** y **seleccionarlas**,

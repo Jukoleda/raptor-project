@@ -19,4 +19,15 @@ export default class Triangle extends Shape {
              hw, -hh, // bottom-right
         ];
     }
+
+    getColliderVertices() {
+        const hw = this.width / 2;
+        const hh = this.height / 2;
+        // Counter-clockwise outline.
+        return [
+            { x: -hw, y: -hh },
+            { x:  hw, y: -hh },
+            { x:   0, y:  hh },
+        ];
+    }
 }

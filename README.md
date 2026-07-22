@@ -34,6 +34,11 @@ components/
     circle.js              # Circle (extiende RegularPolygon)
     polygon.js             # Polygon (puntos) y RegularPolygon (N lados)
     index.js               # Re-exporta todas las formas
+  physics/
+    body.js                # Body: tipo (static/dynamic), velocidad, masa, grupos
+    collision.js           # Detección convexa (círculo + SAT de polígonos)
+    world.js               # World: integra, resuelve colisiones, grupos y bounds
+    index.js               # Re-exporta la física
 ```
 
 ## Cómo verlo
@@ -71,11 +76,42 @@ node tools/build-standalone.mjs
 - **Escena:** lista de formas; clic para seleccionar.
 - **Propiedades:** color, posición, rotación y escala de la forma seleccionada,
   con actualización **en vivo** (el motor redibuja cada frame).
+- **Física** por forma: tipo de **cuerpo** (dinámico / estático / sin física),
+  **grupo** de colisión y **rebote**.
+- **Simulación:** **Play/Pausa**, **Gravedad** y **Reiniciar** (restaura las
+  posiciones y velocidades de antes de simular).
 - **Eliminar** la forma seleccionada.
 
 La edición en vivo es directa porque el motor lee el transform de cada entidad en
 `draw()`; los controles solo mutan la forma seleccionada (`setPosition`,
 `setRotation`, `setScale`, `setColor`).
+
+## Física (colisiones)
+
+`components/physics/` añade una capa de colisiones 2D (rigid-body lineal):
+
+- **Tipos de cuerpo:** `static` (no se mueve, masa infinita) y `dynamic` (se
+  integra y responde a colisiones).
+- **Detección convexa:** círculo-círculo, y **SAT** para polígono-polígono y
+  círculo-polígono (todas las formas del motor son convexas).
+- **Resolución:** corrección posicional + impulso con restitución (rebote).
+- **Grupos de colisión:** `groupIndex` (estilo Box2D: mismo grupo negativo → se
+  ignoran; positivo → siempre colisionan) más `category`/`mask` por bits.
+- **Límites del mundo** (bounds) opcionales para mantener los cuerpos en pantalla.
+
+```js
+import { World, Body, STATIC } from "./physics/index.js";
+
+const world = new World({ gravity: { x: 0, y: -6 }, bounds: { minX: -3.2, maxX: 3.2, minY: -2.4, maxY: 2.4 } });
+world.add(new Body(circulo, { restitution: 0.6 }));           // dinámico
+world.add(new Body(suelo, { type: STATIC }));                 // estático
+
+game.addUpdater((dt) => world.step(dt));                       // integra en el loop
+```
+
+> **Alcance (Fase A):** rigid-body **lineal** (sin rotación por impacto). *Soft
+> body* y respuesta angular quedan para una fase posterior — ver el
+> [ROADMAP](./ROADMAP.md).
 
 ## Uso básico
 

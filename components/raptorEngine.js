@@ -61,15 +61,36 @@ function RaptorEngine() {
         this.context.clear(this.context.COLOR_BUFFER_BIT);
     };
 
+    // Per-frame update callbacks, each called as fn(deltaSeconds). Register
+    // physics, animation, input, etc. here — they run before drawing.
+    this.updaters = [];
+    this.addUpdater = (fn) => {
+        this.updaters.push(fn);
+        return fn;
+    };
+
+    this._lastTime = undefined;
+
     // Configures GL state and starts the render loop.
     this.start = () => {
         this.configure();
         requestAnimationFrame(this.renderLoop);
     };
 
-    // Single render loop for the whole engine: clear -> draw every entity ->
-    // schedule the next frame, in that order.
-    this.renderLoop = () => {
+    // Single render loop for the whole engine: update -> clear -> draw every
+    // entity -> schedule the next frame, in that order. `now` is the timestamp
+    // requestAnimationFrame passes in, used to derive delta-time.
+    this.renderLoop = (now) => {
+        // Delta-time in seconds, clamped so a background tab / long stall does
+        // not produce a huge jump that tunnels bodies through each other.
+        let dt = this._lastTime === undefined ? 0 : (now - this._lastTime) / 1000;
+        this._lastTime = now;
+        if (dt > 0.05) dt = 0.05;
+
+        for (const update of this.updaters) {
+            update(dt);
+        }
+
         this.clearScreen();
 
         for (const entity of this.entities) {
