@@ -33,6 +33,14 @@ const PHYSICS = [
     "components/physics/world.js",
 ];
 
+// Weapons / ballistics modules (bullet before weapon).
+const WEAPONS = [
+    "components/weapons/ballistics.js",
+    "components/weapons/bullet.js",
+    "components/weapons/weapon.js",
+    "components/weapons/armor.js",
+];
+
 // One entry per generated page: an explicit module list ending in a bootstrap.
 const PAGES = [
     {
@@ -49,6 +57,13 @@ const PAGES = [
         title: "Raptor Editor",
         modules: [...ENGINE, ...PHYSICS, "editor/editor.js"],
         // The editor injects its own styles from JS; the body starts empty.
+        headStyle: "",
+    },
+    {
+        out: "tanks.html",
+        title: "Raptor — Cañón vs Blindaje",
+        modules: [...ENGINE, ...WEAPONS, "weapons/tanksDemo.js"],
+        // The demo injects its own styles from JS; the body starts empty.
         headStyle: "",
     },
 ];

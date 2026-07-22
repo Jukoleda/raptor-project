@@ -6,6 +6,26 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Armas y balística)
+- **Módulo de armas** (`components/weapons/`):
+  - `ballistics.js` — balas como **raycast** (segmento barrido) contra las aristas
+    del blanco: da punto de impacto y normal de la cara, evitando *tunneling*.
+    Modelo de penetración `blindajeEfectivo = nominal / cos(θ)` con resultado
+    **penetra / rebota (≥70°) / no penetra**.
+  - `bullet.js` — proyectil con posición previa para colisión continua.
+  - `weapon.js` — arma con penetración, velocidad de boca, recarga y daño.
+  - `armor.js` — blindaje por cara (frontal/lateral/trasera) e integridad (HP);
+    helper `Armor.rectangle`.
+- **Demo `tanks.html`** (fuente `weapons/tanksDemo.js`): cañón que dispara contra
+  un blanco cuyo blindaje se puede **rotar** para ver PENETRA / REBOTE / NO PENETRA
+  según el ángulo, con HUD (cara, ángulo, blindaje efectivo, penetración) y barra
+  de integridad. Controles: Espacio / clic disparan, ←/→ rotan, sliders de
+  penetración, ángulo y blindaje frontal. Handle `window.raptorTanks`.
+- **Build:** `tools/build-standalone.mjs` genera también `tanks.html`; entrada de
+  desarrollo `tanks-dev.html`.
+- **Alcance:** balas rectas (sin gravedad) y respuesta binaria por cara plana;
+  penetración por ángulo/blindaje. Sin fragmentación ni sobrepenetración.
+
 ### Añadido (Física — Fase A: colisiones)
 - **Módulo de física** (`components/physics/`):
   - `Body` — componente que se adjunta a una forma: tipo (`static` / `dynamic`),

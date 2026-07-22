@@ -58,6 +58,18 @@ play/pausa, gravedad). Es rigid-body **lineal**.
 - [ ] **Broadphase espacial** (grid / quadtree) si crece el número de cuerpos
       (hoy es O(n²), suficiente para pocas formas).
 
+## Armas y balística
+
+**Completado:** módulo `components/weapons/` (arma, bala por raycast, blindaje por
+cara) con modelo de penetración por blindaje/ángulo (penetra / rebota / no
+penetra), y demo `tanks.html`. Mejoras posibles:
+
+- [ ] **Sobrepenetración:** tras penetrar, la bala sigue con penetración reducida.
+- [ ] **Fragmentación / HE:** proyectiles de alto explosivo con daño por área.
+- [ ] **Blindaje espaciado** y multi-capa.
+- [ ] **Balística con gravedad** (obuses en arco) además del tiro tenso.
+- [ ] **Mini-juego jugable:** mover tanque, IA enemiga, HUD, puntuación.
+
 ## Fase 4 — Infraestructura del proyecto
 
 Objetivo: preparar el repositorio para desarrollo continuo.
