@@ -1,10 +1,7 @@
-
-
-
-
-
 function RaptorEngine() {
     this.context = undefined;
+    this.square = undefined;
+
     this.createWindow = () => {
         var gameWindow = document.createElement("canvas");
 
@@ -24,52 +21,54 @@ function RaptorEngine() {
         this.context = context;
     };
 
-    this.drawClearColor = () => {
-        this.context.clearColor(0.0, 0.0, 0.0, 1.0);
-        this.context.clearDepth(1.0);
-        this.context.enable(this.context.DEPTH_TEST);
-        this.context.depthFunc(this.context.LEQUAL);
-        requestAnimationFrame(this.drawClearColor);
+    // One-time GL state configuration. Runs once, not per frame.
+    this.configure = () => {
+        const gl = this.context;
 
+        gl.clearColor(0.0, 0.0, 0.0, 1.0);
+
+        // 2D engine: depth testing is not needed. Enable alpha blending so
+        // translucent objects composite correctly.
+        gl.disable(gl.DEPTH_TEST);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     };
 
+    // Clears the framebuffer at the start of each frame.
     this.clearScreen = () => {
-        this.context.clear(this.context.COLOR_BUFFER_BIT | this.context.DEPTH_BUFFER_BIT);
-        requestAnimationFrame(this.clearScreen);
-
+        this.context.clear(this.context.COLOR_BUFFER_BIT);
     };
 
     this.draw = () => {
-        this.drawClearColor();
-        this.clearScreen();
+        this.configure();
 
-        var cuadrado = new Square(this.context);
-        cuadrado.setColor({red:0.5});
-        cuadrado.init();
-        cuadrado.rotation = 45;
-        cuadrado.setScale({x: 0.5, y: 0.5})
-        cuadrado.draw();
-        
-        // requestAnimationFrame(this.drawClearColor);
-        // requestAnimationFrame(this.clearScreen);
-        // requestAnimationFrame(cuadrado.draw);
+        this.square = new Square(this.context);
+        this.square.setColor({ red: 0.5 });
+        this.square.init();
+        this.square.rotation = 45;
+        this.square.setScale({ x: 0.5, y: 0.5 });
+
+        requestAnimationFrame(this.renderLoop);
     };
 
-   
+    // Single render loop for the whole engine: clear -> draw -> schedule next
+    // frame, in that order. This guarantees objects are drawn after the
+    // framebuffer is cleared within the same frame.
+    this.renderLoop = () => {
+        this.clearScreen();
+        this.square.draw();
 
-};
+        requestAnimationFrame(this.renderLoop);
+    };
+}
 
 function Square(context) {
 
     this.context = context;
     this.programInfo = undefined;
     this.rotation = 0.0;
-    this.then = 0;
     this.color = undefined;
     this.scale = undefined;
-    
-   
-
 
     this.vsSource = `
         attribute vec4 aVertexPosition;
@@ -88,7 +87,7 @@ function Square(context) {
     `;
 
     this.fsSource = `
-        varying lowp vec4 vColor;    
+        varying lowp vec4 vColor;
 
         void main() {
             gl_FragColor = vColor;
@@ -125,9 +124,9 @@ function Square(context) {
         this.context.bindBuffer(this.context.ARRAY_BUFFER, positionBuffer);
 
         const positions = [
-            1.0, 1.0, 
-            -1.0, 1.0, 
-            1.0, -1.0, 
+            1.0, 1.0,
+            -1.0, 1.0,
+            1.0, -1.0,
             -1.0, -1.0,
         ];
 
@@ -140,7 +139,7 @@ function Square(context) {
 
         this.context.bindBuffer(this.context.ARRAY_BUFFER, colorBuffer);
 
-        
+
         if (this.color === undefined) {
             this.setColor({red: 1, green: 1, blue: 1, alpha: 1});
         }
@@ -150,14 +149,9 @@ function Square(context) {
                         this.color.red, this.color.green, this.color.blue, this.color.alpha,
                         this.color.red, this.color.green, this.color.blue, this.color.alpha,
                     ];
-        // var colors = [ 1.0, 1.0, 1.0, 1.0, // white
-        //                 1.0, 0.0, 0.0, 1.0, // red
-        //                 0.0, 1.0, 0.0, 1.0, // green
-        //                 0.0, 0.0, 1.0, 1.0, // blue
-        //             ];
 
         this.context.bufferData(this.context.ARRAY_BUFFER, new Float32Array(colors), this.context.STATIC_DRAW);
-        
+
         const programInfo = {
             ...this.programInfo,
             buffers: {
@@ -174,9 +168,9 @@ function Square(context) {
         const shader = this.context.createShader(type);
 
         this.context.shaderSource(shader, source);
-      
+
         this.context.compileShader(shader);
-      
+
         if (!this.context.getShaderParameter(shader, this.context.COMPILE_STATUS)) {
           alert(
             "An error occurred compiling the shaders: " + this.context.getShaderInfoLog(shader)
@@ -184,7 +178,7 @@ function Square(context) {
           this.context.deleteShader(shader);
           return null;
         }
-      
+
         return shader;
     }
 
@@ -199,7 +193,6 @@ function Square(context) {
             uniformLocations: {
                 projectionMatrix: this.context.getUniformLocation(this.shaderProgram, "uProjectionMatrix"),
                 modelViewMatrix: this.context.getUniformLocation(this.shaderProgram, "uModelViewMatrix"),
-                scaleMatrix: this.context.getUniformLocation(this.shaderProgram, "uScale"),
             },
         };
 
@@ -211,11 +204,10 @@ function Square(context) {
         this.initBuffers();
     }
 
-    this.draw = (now) => {
+    this.draw = () => {
 
-        // now *= 0.001;
-        // const deltaTime = now - this.then;
-        // this.then = now;
+        // gl-matrix 3.x exposes its modules under the global `glMatrix` namespace.
+        const { mat4 } = glMatrix;
 
         const fieldOfView = (45 * Math.PI) / 180; // in radians
         const aspect = this.context.canvas.clientWidth / this.context.canvas.clientHeight;
@@ -226,7 +218,7 @@ function Square(context) {
         mat4.perspective(projectionMatrix, fieldOfView, aspect, zNear, zFar);
 
         const modelViewMatrix = mat4.create();
-      
+
         mat4.translate(
           modelViewMatrix, // destination matrix
           modelViewMatrix, // matrix to translate
@@ -249,7 +241,7 @@ function Square(context) {
             modelViewMatrix,
             [this.scale.x, this.scale.y, 1]
         );
-      
+
         {
           const numComponents = 2;
           const type = this.context.FLOAT;
@@ -285,9 +277,9 @@ function Square(context) {
             );
             this.context.enableVertexAttribArray(this.programInfo.attribLocations.vertexColor);
           }
-      
+
         this.context.useProgram(this.programInfo.program);
-      
+
         this.context.uniformMatrix4fv(
           this.programInfo.uniformLocations.projectionMatrix,
           false,
@@ -298,17 +290,11 @@ function Square(context) {
           false,
           modelViewMatrix
         );
-      
+
         {
           const offset = 0;
-        //   const vertexCount = 7;
           this.context.drawArrays(this.context.TRIANGLE_STRIP, offset, this.vCount);
         }
-
-        // this.rotation += deltaTime;
-
-
-        requestAnimationFrame(this.draw);
     }
 
     this.setColor = ({red, green, blue, alpha}) => {
