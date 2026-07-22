@@ -6,6 +6,19 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Controles)
+- **Controlador de movimiento estilo tanque** (`components/controls/`):
+  - `tankController.js` — `TankController` mueve una forma como un tanque de
+    orugas: acelerador hacia adelante/atrás según la orientación, giro del casco
+    **sobre su eje** (giro neutral), fricción al soltar y límites opcionales
+    (`bounds`). Es input-agnóstico (`setInput({forward, turn})`) y trae binding
+    de teclado **WASD + flechas** vía `bindKeys()`. Expone `forward` y
+    `velocity`. Sigue la convención del motor (rotación CCW, local +Y = adelante).
+- **Demo `drive.html`** (fuente `controls/driveDemo.js`): un tanque manejable
+  (casco + torreta + cañón) por un arena con obstáculos de referencia y HUD
+  (velocidad, rumbo, acelerador y teclas activas). Entrada de desarrollo
+  `drive-dev.html`. Handle `window.raptorDrive`.
+
 ### Añadido (Despliegue)
 - **Publicación en GitHub Pages** en <https://jukoleda.github.io/raptor-project/>
   mediante `.github/workflows/deploy.yml`, que regenera las páginas

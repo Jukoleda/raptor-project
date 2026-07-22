@@ -44,6 +44,11 @@ const WEAPONS = [
     "components/weapons/armor.js",
 ];
 
+// Input / controllers.
+const CONTROLS = [
+    "components/controls/tankController.js",
+];
+
 // One entry per generated page: an explicit module list ending in a bootstrap.
 const PAGES = [
     {
@@ -66,6 +71,13 @@ const PAGES = [
         out: "tanks.html",
         title: "Raptor — Cañón vs Blindaje",
         modules: [...ENGINE, ...WEAPONS, "weapons/tanksDemo.js"],
+        // The demo injects its own styles from JS; the body starts empty.
+        headStyle: "",
+    },
+    {
+        out: "drive.html",
+        title: "Raptor — Conducción de tanque",
+        modules: [...ENGINE, ...CONTROLS, "controls/driveDemo.js"],
         // The demo injects its own styles from JS; the body starts empty.
         headStyle: "",
     },
