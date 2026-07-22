@@ -7,9 +7,19 @@ import RaptorEngine from "../components/raptorEngine.js";
 import { Rectangle, Square, Circle } from "../components/shapes/index.js";
 import { TankController } from "../components/controls/index.js";
 
-// Arena limits (world units) — a bit inside the visible frustum so the tank
-// never drives fully off screen. The barrel offset keeps the nose visible too.
-const BOUNDS = { minX: -3.0, maxX: 3.0, minY: -2.1, maxY: 2.1 };
+// The map is much larger than the view, so the camera has to follow the tank.
+// Visible half-extents come from the engine's projection (perspective FOV 45°
+// at depth 6) and the 4:3 canvas — used to keep the camera inside the walls.
+const FOV = (45 * Math.PI) / 180;
+const VIEW_H = 6 * Math.tan(FOV / 2);   // ≈ 2.49 world units (half height)
+const VIEW_W = VIEW_H * (800 / 600);    // ≈ 3.31 world units (half width)
+
+const MAP = { minX: -9, maxX: 9, minY: -6.5, maxY: 6.5 }; // ~18 × 13 arena
+const WALL = 0.4;
+
+// Keep the tank inside the walls, and the camera inside the map edges.
+const TANK_BOUNDS = { minX: MAP.minX + 0.6, maxX: MAP.maxX - 0.6, minY: MAP.minY + 0.6, maxY: MAP.maxY - 0.6 };
+const CAM_BOUNDS = { minX: MAP.minX + VIEW_W, maxX: MAP.maxX - VIEW_W, minY: MAP.minY + VIEW_H, maxY: MAP.maxY - VIEW_H };
 
 const STYLES = `
     * { box-sizing: border-box; }
@@ -76,13 +86,35 @@ function startDemo() {
     game.createWindow(stage);
     const gl = game.context;
 
-    // --- Reference obstacles (visual only — no collision) so movement reads. ---
+    // --- Reference grid (thin lines every 2 units) so panning reads clearly. ---
+    const gridColor = { red: 0.13, green: 0.16, blue: 0.2 };
+    const mapW = MAP.maxX - MAP.minX;
+    const mapH = MAP.maxY - MAP.minY;
+    for (let x = Math.ceil(MAP.minX); x <= MAP.maxX; x += 2) {
+        game.add(new Rectangle(gl, { width: 0.03, height: mapH }).setColor(gridColor).setPosition({ x, y: 0 }).init());
+    }
+    for (let y = Math.ceil(MAP.minY); y <= MAP.maxY; y += 2) {
+        game.add(new Rectangle(gl, { width: mapW, height: 0.03 }).setColor(gridColor).setPosition({ x: 0, y }).init());
+    }
+
+    // --- Border walls around the map edges. ---
+    const wallColor = { red: 0.36, green: 0.33, blue: 0.28 };
+    const wall = (w, h, x, y) => game.add(new Rectangle(gl, { width: w, height: h }).setColor(wallColor).setPosition({ x, y }).init());
+    wall(mapW + WALL, WALL, 0, MAP.maxY); // top
+    wall(mapW + WALL, WALL, 0, MAP.minY); // bottom
+    wall(WALL, mapH + WALL, MAP.minX, 0); // left
+    wall(WALL, mapH + WALL, MAP.maxX, 0); // right
+
+    // --- Reference obstacles (visual only — no collision) spread over the map. ---
     const blocks = [
-        { x: -2.1, y: 1.3, s: 0.5, c: { red: 0.30, green: 0.33, blue: 0.40 } },
-        { x: 2.0, y: 1.1, s: 0.7, c: { red: 0.33, green: 0.30, blue: 0.38 } },
-        { x: 1.6, y: -1.4, s: 0.5, c: { red: 0.30, green: 0.36, blue: 0.40 } },
-        { x: -1.9, y: -1.2, s: 0.6, c: { red: 0.34, green: 0.32, blue: 0.30 } },
-        { x: 0.1, y: 0.2, s: 0.4, c: { red: 0.28, green: 0.34, blue: 0.30 } },
+        { x: -5.5, y: 3.2, s: 0.7, c: { red: 0.30, green: 0.33, blue: 0.40 } },
+        { x: 4.8, y: 2.4, s: 0.9, c: { red: 0.33, green: 0.30, blue: 0.38 } },
+        { x: 6.6, y: -3.1, s: 0.7, c: { red: 0.30, green: 0.36, blue: 0.40 } },
+        { x: -6.2, y: -2.6, s: 0.8, c: { red: 0.34, green: 0.32, blue: 0.30 } },
+        { x: 0.4, y: 4.6, s: 0.6, c: { red: 0.28, green: 0.34, blue: 0.30 } },
+        { x: -2.0, y: -4.4, s: 0.8, c: { red: 0.32, green: 0.30, blue: 0.36 } },
+        { x: 2.6, y: -0.6, s: 0.5, c: { red: 0.30, green: 0.35, blue: 0.38 } },
+        { x: -3.0, y: 0.8, s: 0.6, c: { red: 0.35, green: 0.33, blue: 0.30 } },
     ];
     for (const b of blocks) {
         game.add(new Square(gl, { size: b.s }).setColor(b.c).setPosition({ x: b.x, y: b.y }).init());
@@ -103,8 +135,15 @@ function startDemo() {
     game.add(barrel);
     game.add(turret);
 
-    const tank = new TankController(hull, { bounds: BOUNDS });
+    const tank = new TankController(hull, { bounds: TANK_BOUNDS });
     tank.bindKeys(window);
+
+    // Camera follows the tank, kept inside the map edges. game.camera is the
+    // engine's default Camera; we just configure and steer it.
+    const camera = game.camera;
+    camera.smoothing = 6;
+    camera.bounds = CAM_BOUNDS;
+    camera.centerOn(hull.position.x, hull.position.y);
 
     // On-screen controls overlaid on the canvas: steering on the left (for the
     // left thumb), throttle on the right. Works with touch and mouse; holding
@@ -126,7 +165,7 @@ function startDemo() {
         mkKey("left", "A"), mkKey("down", "S"), mkKey("right", "D"),
     ]);
 
-    const kSpeed = kv("Velocidad"), kHeading = kv("Rumbo"), kThrottle = kv("Acelerador");
+    const kSpeed = kv("Velocidad"), kHeading = kv("Rumbo"), kThrottle = kv("Acelerador"), kPos = kv("Posición");
     const speedFill = el("i");
     const speedBar = el("div", { className: "bar" }, [speedFill]);
     const resetBtn = el("button", { textContent: "Centrar tanque", onclick: reset });
@@ -138,9 +177,12 @@ function startDemo() {
             el("div", { className: "hint", textContent: "W/S o ↑/↓ avanzan · A/D o ←/→ giran · o usa los botones en pantalla" }),
         ]),
         el("div", { className: "card" }, [
-            el("h2", { textContent: "Telemetría" }), kSpeed.row, speedBar, kHeading.row, kThrottle.row,
+            el("h2", { textContent: "Telemetría" }), kSpeed.row, speedBar, kHeading.row, kThrottle.row, kPos.row,
         ]),
-        el("div", { className: "card" }, [resetBtn]),
+        el("div", { className: "card" }, [
+            el("div", { className: "hint", textContent: "La cámara sigue al tanque por un mapa mayor que la pantalla." }),
+            resetBtn,
+        ]),
     ]);
 
     document.body.append(el("div", { id: "app" }, [stage, panel]));
@@ -171,11 +213,13 @@ function startDemo() {
         hull.setPosition({ x: 0, y: 0 }).setRotation(0);
         tank.speed = 0;
         syncParts();
+        camera.centerOn(hull.position.x, hull.position.y);
     }
 
     function update(dt) {
         tank.update(dt);
         syncParts();
+        camera.follow(hull.position, dt); // keep the tank on screen as it roams
 
         // Highlight the active directions on both the panel keypad and the
         // on-screen buttons, whatever the input source (keyboard or touch).
@@ -197,6 +241,7 @@ function startDemo() {
         const heading = ((hull.rotation % 360) + 360) % 360;
         kHeading.v.textContent = `${heading.toFixed(0)}°`;
         kThrottle.v.textContent = tank.input.forward > 0 ? "Adelante" : tank.input.forward < 0 ? "Atrás" : "—";
+        kPos.v.textContent = `${hull.position.x.toFixed(1)}, ${hull.position.y.toFixed(1)}`;
 
         const pct = Math.min(100, (Math.abs(speed) / tank.maxSpeed) * 100);
         speedFill.style.width = `${pct}%`;

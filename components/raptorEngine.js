@@ -1,10 +1,17 @@
 // RaptorEngine owns the canvas, the WebGL context and the render loop. It is
 // shape-agnostic: anything with a `draw()` method can be added as an entity and
 // it will be drawn every frame. See components/shapes/ for the built-in shapes.
+import Camera from "./camera.js";
+
 function RaptorEngine() {
     this.context = undefined;
     this.canvas = undefined;
     this.entities = [];
+
+    // The view onto the world. Defaults to the origin with zoom 1 (a no-op), so
+    // scenes that ignore it render unchanged. Move/replace it to pan or zoom;
+    // every entity is drawn through it. See components/camera.js.
+    this.camera = new Camera();
 
     // Creates the canvas and WebGL context. Pass a `mount` element to place the
     // canvas inside it (e.g. an editor layout); defaults to document.body.
@@ -94,7 +101,7 @@ function RaptorEngine() {
         this.clearScreen();
 
         for (const entity of this.entities) {
-            entity.draw();
+            entity.draw(this.camera);
         }
 
         requestAnimationFrame(this.renderLoop);

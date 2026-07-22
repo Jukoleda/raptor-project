@@ -100,9 +100,20 @@ de teclado WASD/flechas incluido. Demo `drive.html`. Mejoras posibles:
       `components/weapons/` (torreta apuntable con el ratón).
 - [ ] **Gamepad** además del teclado.
 
+## Cámara
+
+**Completado:** `components/camera.js` — cámara 2D con paneo y zoom integrada en
+`RaptorEngine` (todas las entidades se dibujan a través de `game.camera`),
+`follow(objetivo, dt)` suave y límites de mapa (`bounds`). `drive.html` la usa
+sobre un mapa mayor que la pantalla. Mejoras posibles:
+
+- [ ] **Zoom interactivo** (rueda / pellizco) en las demos.
+- [ ] **Deadzone / adelanto** (mirar hacia donde se avanza).
+- [ ] **Sacudida de cámara** (screen shake) para impactos.
+
 ## Ideas futuras
 
-- Cámara 2D con paneo y zoom (seguir al tanque).
+- Picking en el editor teniendo en cuenta la cámara (pantalla → mundo).
 - Bucle de juego con estados (update / render separados).
 
 > **Nota sobre 3D:** el pipeline actual ya usa matrices de proyección en

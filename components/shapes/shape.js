@@ -73,6 +73,9 @@ function buildProgramInfo(gl) {
 // independent.
 const programCache = new WeakMap();
 
+// Used when draw() is called without a camera: pan 0, zoom 1 (world == screen).
+const IDENTITY_CAMERA = { x: 0, y: 0, zoom: 1 };
+
 function getProgramInfo(gl) {
     let info = programCache.get(gl);
     if (!info) {
@@ -159,7 +162,9 @@ export default class Shape {
         gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
     }
 
-    draw() {
+    // `camera` is an optional { x, y, zoom }; omitted (or the identity default)
+    // means "no camera", i.e. world space maps straight to the screen as before.
+    draw(camera = IDENTITY_CAMERA) {
         const gl = this.context;
         // gl-matrix 3.x exposes its modules under the global `glMatrix` namespace.
         const { mat4 } = glMatrix;
@@ -169,10 +174,16 @@ export default class Shape {
         const projectionMatrix = mat4.create();
         mat4.perspective(projectionMatrix, fieldOfView, aspect, 0.1, 100.0);
 
+        // View transform: pan by the camera center, then zoom about it. Depth is
+        // constant, so scaling the world coordinates scales the screen linearly.
+        const zoom = camera.zoom ?? 1;
+        const viewX = (this.position.x - (camera.x ?? 0)) * zoom;
+        const viewY = (this.position.y - (camera.y ?? 0)) * zoom;
+
         const modelViewMatrix = mat4.create();
-        mat4.translate(modelViewMatrix, modelViewMatrix, [this.position.x, this.position.y, this.depth]);
+        mat4.translate(modelViewMatrix, modelViewMatrix, [viewX, viewY, this.depth]);
         mat4.rotate(modelViewMatrix, modelViewMatrix, (this.rotation * Math.PI) / 180, [0, 0, 1]);
-        mat4.scale(modelViewMatrix, modelViewMatrix, [this.scale.x, this.scale.y, 1]);
+        mat4.scale(modelViewMatrix, modelViewMatrix, [this.scale.x * zoom, this.scale.y * zoom, 1]);
 
         const { attribLocations, uniformLocations, program } = this.programInfo;
 

@@ -38,6 +38,7 @@ controls/
   driveDemo.js             # Demo de conducción: tanque manejable + HUD
 components/
   raptorEngine.js          # RaptorEngine: canvas + lista de entidades + render loop
+  camera.js                # Camera 2D: pan/zoom, follow(target) y límites de mapa
   main.js                  # Arranque: crea el motor, añade formas y arranca
   shapes/
     shape.js               # Clase base: shaders, buffers, transform y draw()
@@ -204,8 +205,9 @@ if (hit) {
 orugas: el acelerador la impulsa hacia adelante/atrás según su orientación y el
 volante gira el casco **sobre su eje** (giro neutral). Al soltar el acelerador,
 la fricción la frena enseguida. Pruébalo en `drive.html` (W/S o ↑/↓ avanzan,
-A/D o ←/→ giran; **en móvil** hay un D-pad táctil en pantalla). Sigue la
-convención del motor: rotación en grados CCW y el eje local **+Y es «adelante»**.
+A/D o ←/→ giran; **en móvil** hay un D-pad táctil en pantalla). El mapa es mayor
+que la pantalla y la **cámara sigue al tanque** (ver abajo). Sigue la convención
+del motor: rotación en grados CCW y el eje local **+Y es «adelante»**.
 
 ```js
 import { TankController } from "./controls/index.js";
@@ -220,6 +222,29 @@ tank.bindTouch({ forward, back, left, right }); // táctil/ratón: elementos-bot
 
 // ...cada frame:
 tank.update(dt);       // mueve y rota la forma; tank.forward / tank.velocity disponibles
+```
+
+## Cámara 2D
+
+El motor tiene una **cámara** (`components/camera.js`) que es una ventana móvil
+sobre el mundo: las formas restan el centro de la cámara y multiplican por el
+zoom al dibujarse, así mover la cámara hace *paneo* de toda la escena y subir el
+zoom la amplía. `RaptorEngine` crea una por defecto en el origen con zoom 1 (un
+no-op), por lo que las escenas que no la tocan se ven igual que antes.
+
+`follow(objetivo, dt)` la lleva suavemente hacia un objetivo (frame-rate
+independiente) y `bounds` evita que la vista se salga de los bordes del mapa
+(clamp del centro). Así, con un mapa mayor que la pantalla, la cámara sigue al
+jugador y se frena en los muros — justo lo que hace `drive.html`.
+
+```js
+const camera = game.camera;         // la cámara por defecto del motor
+camera.smoothing = 6;               // mayor = más rápida en alcanzar
+camera.bounds = { minX, maxX, minY, maxY }; // límites del centro (opcional)
+camera.centerOn(player.x, player.y);
+
+// ...cada frame, tras mover al jugador:
+camera.follow(player.position, dt); // el render loop dibuja todo a través de game.camera
 ```
 
 ## Uso básico

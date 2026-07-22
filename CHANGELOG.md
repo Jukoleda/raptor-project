@@ -6,6 +6,17 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Cámara)
+- **Cámara 2D** (`components/camera.js`): ventana móvil sobre el mundo con centro
+  (x, y) y zoom. `Camera.follow(objetivo, dt)` sigue suavemente (independiente
+  del frame-rate) y `bounds` limita el centro a los bordes del mapa. Integrada en
+  `RaptorEngine` (`game.camera`, por defecto identidad → escenas existentes sin
+  cambios); todas las entidades se dibujan a través de ella. `Shape.draw(camera)`
+  aplica paneo y zoom (mundo → pantalla).
+- **Demo `drive.html`:** el mapa ahora es **mayor que la pantalla** (~18 × 13),
+  con muros perimetrales, rejilla de referencia y más obstáculos; la **cámara
+  sigue al tanque** y se frena en los bordes del mapa. HUD muestra la posición.
+
 ### Añadido (Controles)
 - **Controlador de movimiento estilo tanque** (`components/controls/`):
   - `tankController.js` — `TankController` mueve una forma como un tanque de
