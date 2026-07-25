@@ -6,6 +6,26 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Vehículos)
+- **Tanques con torreta móvil** (`components/vehicles/tank.js`): `Tank` arma un
+  vehículo con formas del motor — **casco** (lo conduce un `TankController`) más
+  **torreta y cañón que giran independientemente** del casco, con ángulo absoluto
+  del mundo y cadencia de giro (`traverse`) por diseño. API: `aimAt(punto, dt)`,
+  `traverse(dir, dt)`, `sync()`, `addTo/removeFrom(game)` y `muzzle` (boca del
+  cañón, lista para el módulo de armas).
+- **Cuatro diseños** (`TANK_DESIGNS`) que varían la **forma** y las prestaciones:
+  **Medio** (casco `Rectangle`, torreta `Circle`), **Ligero** (`Triangle` +
+  pentágono, rápido y de torreta ágil), **Pesado** (hexágono `RegularPolygon` +
+  `Circle`, lento y macizo) y **Cazacarros** (`Polygon` en cuña + `Square`, con
+  torreta lenta).
+- **`Camera.screenToWorld()`** y `viewExtents()`: convierten coordenadas de
+  puntero a mundo teniendo en cuenta paneo y zoom (base para apuntar y para el
+  *picking* del editor).
+- **Demo `drive.html`:** selector de tanque (botones y teclas 1-4), la **torreta
+  apunta con el ratón o el dedo** sobre el lienzo (Q/E la giran a mano), el
+  minimapa dibuja cañón y casco por separado, y la telemetría muestra el ángulo
+  de torreta. La colisión usa el radio de cada diseño.
+
 ### Añadido (Cámara)
 - **Cámara 2D** (`components/camera.js`): ventana móvil sobre el mundo con centro
   (x, y) y zoom. `Camera.follow(objetivo, dt)` sigue suavemente (independiente

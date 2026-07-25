@@ -473,6 +473,26 @@ class Camera {
         return this;
     }
 
+    // Half-extents of the visible world, in world units. Mirrors the projection
+    // Shape.draw uses (perspective `fov` at `depth`) and the canvas aspect, so
+    // it stays in sync with what is actually on screen.
+    viewExtents(canvas, { depth = 6, fov = 45 } = {}) {
+        const halfH = (depth * Math.tan((fov * Math.PI) / 180 / 2)) / this.zoom;
+        const aspect = canvas.clientWidth / canvas.clientHeight;
+        return { halfW: halfH * aspect, halfH };
+    }
+
+    // Converts a pointer position (clientX/clientY, as given by mouse/touch
+    // events) into world coordinates, accounting for the camera pan and zoom.
+    // Use it to aim at, pick or place things where the user clicked/tapped.
+    screenToWorld(clientX, clientY, canvas, opts) {
+        const rect = canvas.getBoundingClientRect();
+        const { halfW, halfH } = this.viewExtents(canvas, opts);
+        const nx = ((clientX - rect.left) / rect.width) * 2 - 1;  // [-1, 1]
+        const ny = 1 - ((clientY - rect.top) / rect.height) * 2;   // y grows up
+        return { x: this.x + nx * halfW, y: this.y + ny * halfH };
+    }
+
     _clamp() {
         const b = this.bounds;
         if (!b) return;
