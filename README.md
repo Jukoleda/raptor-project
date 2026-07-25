@@ -63,6 +63,9 @@ components/
   controls/
     tankController.js      # TankController: movimiento estilo tanque + input de teclado
     index.js               # Re-exporta los controladores
+  vehicles/
+    tank.js                # Tank: casco + torreta móvil; diseños (formas y stats)
+    index.js               # Re-exporta los vehículos
 ```
 
 ## Cómo verlo
@@ -206,8 +209,11 @@ orugas: el acelerador la impulsa hacia adelante/atrás según su orientación y 
 volante gira el casco **sobre su eje** (giro neutral). Al soltar el acelerador,
 la fricción la frena enseguida. Pruébalo en `drive.html` (W/S o ↑/↓ avanzan,
 A/D o ←/→ giran; **en móvil** hay un D-pad táctil en pantalla). El mapa es mayor
-que la pantalla y la **cámara sigue al tanque** (ver abajo). Sigue la convención
-del motor: rotación en grados CCW y el eje local **+Y es «adelante»**.
+que la pantalla y la **cámara sigue al tanque** (ver abajo), con un **minimapa**
+del mapa completo; el tanque **choca** con muros y obstáculos (colisión por
+expulsión círculo-AABB). Puedes **elegir entre cuatro tanques** (teclas 1-4) y la
+**torreta apunta con el ratón o el dedo** (Q/E la giran a mano). Sigue la
+convención del motor: rotación en grados CCW y el eje local **+Y es «adelante»**.
 
 ```js
 import { TankController } from "./controls/index.js";
@@ -222,6 +228,40 @@ tank.bindTouch({ forward, back, left, right }); // táctil/ratón: elementos-bot
 
 // ...cada frame:
 tank.update(dt);       // mueve y rota la forma; tank.forward / tank.velocity disponibles
+```
+
+## Tanques (casco + torreta móvil)
+
+`components/vehicles/Tank` arma un tanque con formas del motor: un **casco** que
+conduce (lo mueve un `TankController`) y una **torreta con cañón** que giran
+**independientemente** del casco. Ese es el punto: el arma mantiene la puntería
+mientras el casco maniobra. La torreta guarda un ángulo **absoluto** del mundo y
+gira a la cadencia (`traverse`) de cada diseño.
+
+`TANK_DESIGNS` trae cuatro diseños que varían la **forma** del casco y la torreta
+además de las prestaciones, así que cada uno se conduce distinto:
+
+| Diseño | Casco | Torreta | Vel. máx | Torreta °/s |
+|--------|-------|---------|:---:|:---:|
+| **Medio** | `Rectangle` | `Circle` | 3.0 | 120 |
+| **Ligero** | `Triangle` | `RegularPolygon` (5) | 4.4 | 180 |
+| **Pesado** | `RegularPolygon` (6) | `Circle` | 1.9 | 60 |
+| **Cazacarros** | `Polygon` (cuña) | `Square` | 3.4 | 45 |
+
+```js
+import { Tank, TANK_DESIGNS } from "./vehicles/index.js";
+
+const tank = new Tank(gl, { design: TANK_DESIGNS.heavy, x: 0, y: 0 });
+tank.addTo(game);
+
+// El casco se conduce con las stats del diseño:
+const driver = new TankController(tank.hull, { ...tank.design.drive });
+
+// ...cada frame:
+driver.update(dt);
+tank.aimAt(worldPoint, dt);  // o tank.traverse(±1, dt) para girarla a mano
+tank.sync();                 // coloca torreta y cañón sobre el casco
+// tank.muzzle -> boca del cañón, listo para el módulo de armas
 ```
 
 ## Cámara 2D
@@ -245,6 +285,9 @@ camera.centerOn(player.x, player.y);
 
 // ...cada frame, tras mover al jugador:
 camera.follow(player.position, dt); // el render loop dibuja todo a través de game.camera
+
+// Pantalla -> mundo (teniendo en cuenta paneo y zoom): apuntar, seleccionar...
+const p = camera.screenToWorld(event.clientX, event.clientY, game.canvas);
 ```
 
 ## Uso básico

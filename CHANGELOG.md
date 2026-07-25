@@ -6,6 +6,26 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Vehículos)
+- **Tanques con torreta móvil** (`components/vehicles/tank.js`): `Tank` arma un
+  vehículo con formas del motor — **casco** (lo conduce un `TankController`) más
+  **torreta y cañón que giran independientemente** del casco, con ángulo absoluto
+  del mundo y cadencia de giro (`traverse`) por diseño. API: `aimAt(punto, dt)`,
+  `traverse(dir, dt)`, `sync()`, `addTo/removeFrom(game)` y `muzzle` (boca del
+  cañón, lista para el módulo de armas).
+- **Cuatro diseños** (`TANK_DESIGNS`) que varían la **forma** y las prestaciones:
+  **Medio** (casco `Rectangle`, torreta `Circle`), **Ligero** (`Triangle` +
+  pentágono, rápido y de torreta ágil), **Pesado** (hexágono `RegularPolygon` +
+  `Circle`, lento y macizo) y **Cazacarros** (`Polygon` en cuña + `Square`, con
+  torreta lenta).
+- **`Camera.screenToWorld()`** y `viewExtents()`: convierten coordenadas de
+  puntero a mundo teniendo en cuenta paneo y zoom (base para apuntar y para el
+  *picking* del editor).
+- **Demo `drive.html`:** selector de tanque (botones y teclas 1-4), la **torreta
+  apunta con el ratón o el dedo** sobre el lienzo (Q/E la giran a mano), el
+  minimapa dibuja cañón y casco por separado, y la telemetría muestra el ángulo
+  de torreta. La colisión usa el radio de cada diseño.
+
 ### Añadido (Cámara)
 - **Cámara 2D** (`components/camera.js`): ventana móvil sobre el mundo con centro
   (x, y) y zoom. `Camera.follow(objetivo, dt)` sigue suavemente (independiente
@@ -16,6 +36,12 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 - **Demo `drive.html`:** el mapa ahora es **mayor que la pantalla** (~18 × 13),
   con muros perimetrales, rejilla de referencia y más obstáculos; la **cámara
   sigue al tanque** y se frena en los bordes del mapa. HUD muestra la posición.
+  - **Colisiones:** el tanque (círculo) choca con muros y obstáculos (cajas AABB)
+    mediante resolución por expulsión (*push-out*); frena en un golpe frontal
+    pero desliza al rozar. Ya no los atraviesa.
+  - **Minimapa** en el panel: mapa completo con los obstáculos, el tanque (con
+    rumbo) y el recuadro de la zona visible; rejilla más clara para percibir el
+    movimiento de la cámara.
 
 ### Añadido (Controles)
 - **Controlador de movimiento estilo tanque** (`components/controls/`):

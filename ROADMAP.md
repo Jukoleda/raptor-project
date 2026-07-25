@@ -94,10 +94,16 @@ Objetivo: preparar el repositorio para desarrollo continuo.
 estilo tanque (acelerador + giro sobre el eje, fricción y límites), con binding
 de teclado WASD/flechas incluido. Demo `drive.html`. Mejoras posibles:
 
-- [ ] **Colisión al conducir:** integrar el tanque manejable con el módulo de
-      física (`components/physics/`) para que choque con obstáculos.
-- [ ] **Disparar mientras se conduce:** combinar `TankController` con el arma de
-      `components/weapons/` (torreta apuntable con el ratón).
+- [x] **Colisión al conducir:** el tanque (círculo) choca con muros y obstáculos
+      (AABB) por expulsión en `drive.html`, con minimapa de todo el mapa. Falta
+      integrarlo con el módulo de física (`components/physics/`) para cuerpos
+      dinámicos (empujar cajas, respuesta con masa) en vez del resolver ligero.
+- [x] **Torreta apuntable:** `components/vehicles/Tank` (casco + torreta que gira
+      independiente, con cadencia por diseño) y cuatro diseños con formas
+      distintas; se apunta con ratón/dedo vía `Camera.screenToWorld()`.
+- [ ] **Disparar mientras se conduce:** enganchar `Tank.muzzle` y la dirección de
+      la torreta al arma de `components/weapons/` (ya hay tipos de proyectil).
+- [ ] **Tanques enemigos / IA:** reutilizar `Tank` con un controlador automático.
 - [ ] **Gamepad** además del teclado.
 
 ## Cámara
@@ -113,7 +119,8 @@ sobre un mapa mayor que la pantalla. Mejoras posibles:
 
 ## Ideas futuras
 
-- Picking en el editor teniendo en cuenta la cámara (pantalla → mundo).
+- Picking en el editor teniendo en cuenta la cámara (el helper
+  `Camera.screenToWorld()` ya está disponible).
 - Bucle de juego con estados (update / render separados).
 
 > **Nota sobre 3D:** el pipeline actual ya usa matrices de proyección en

@@ -50,6 +50,11 @@ const CONTROLS = [
     "components/controls/tankController.js",
 ];
 
+// Vehicles assembled from shapes (must come after ENGINE, which defines them).
+const VEHICLES = [
+    "components/vehicles/tank.js",
+];
+
 // One entry per generated page: an explicit module list ending in a bootstrap.
 const PAGES = [
     {
@@ -78,7 +83,7 @@ const PAGES = [
     {
         out: "drive.html",
         title: "Raptor — Conducción de tanque",
-        modules: [...ENGINE, ...CONTROLS, "controls/driveDemo.js"],
+        modules: [...ENGINE, ...CONTROLS, ...VEHICLES, "controls/driveDemo.js"],
         // The demo injects its own styles from JS; the body starts empty.
         headStyle: "",
     },
