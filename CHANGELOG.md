@@ -16,6 +16,12 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 - **Demo `drive.html`:** el mapa ahora es **mayor que la pantalla** (~18 × 13),
   con muros perimetrales, rejilla de referencia y más obstáculos; la **cámara
   sigue al tanque** y se frena en los bordes del mapa. HUD muestra la posición.
+  - **Colisiones:** el tanque (círculo) choca con muros y obstáculos (cajas AABB)
+    mediante resolución por expulsión (*push-out*); frena en un golpe frontal
+    pero desliza al rozar. Ya no los atraviesa.
+  - **Minimapa** en el panel: mapa completo con los obstáculos, el tanque (con
+    rumbo) y el recuadro de la zona visible; rejilla más clara para percibir el
+    movimiento de la cámara.
 
 ### Añadido (Controles)
 - **Controlador de movimiento estilo tanque** (`components/controls/`):

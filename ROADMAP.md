@@ -94,8 +94,10 @@ Objetivo: preparar el repositorio para desarrollo continuo.
 estilo tanque (acelerador + giro sobre el eje, fricción y límites), con binding
 de teclado WASD/flechas incluido. Demo `drive.html`. Mejoras posibles:
 
-- [ ] **Colisión al conducir:** integrar el tanque manejable con el módulo de
-      física (`components/physics/`) para que choque con obstáculos.
+- [x] **Colisión al conducir:** el tanque (círculo) choca con muros y obstáculos
+      (AABB) por expulsión en `drive.html`, con minimapa de todo el mapa. Falta
+      integrarlo con el módulo de física (`components/physics/`) para cuerpos
+      dinámicos (empujar cajas, respuesta con masa) en vez del resolver ligero.
 - [ ] **Disparar mientras se conduce:** combinar `TankController` con el arma de
       `components/weapons/` (torreta apuntable con el ratón).
 - [ ] **Gamepad** además del teclado.
