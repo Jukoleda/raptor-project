@@ -61,6 +61,7 @@ components/
     armor.js               # Armor: blindaje por cara + integridad (HP)
     index.js               # Re-exporta las armas
   controls/
+    gearbox.js             # Gearbox: marchas, par motor y cambio automático/manual
     tankController.js      # TankController: movimiento estilo tanque + input de teclado
     tankAI.js              # TankAI: máquina de estados enemiga (patrulla/persigue/ataca/huye)
     index.js               # Re-exporta los controladores
@@ -213,8 +214,9 @@ A/D o ←/→ giran; **en móvil** hay un D-pad táctil en pantalla). El mapa es
 que la pantalla y la **cámara sigue al tanque** (ver abajo), con un **minimapa**
 del mapa completo; el tanque **choca** con muros y obstáculos (colisión por
 expulsión círculo-AABB). Puedes **elegir entre cuatro tanques** (teclas 1-4), la
-**torreta apunta con el ratón o el dedo** (Q/E la giran a mano) y se combate
-contra **cuatro enemigos con IA** (ver abajo), todos con **barra de vida**.
+**torreta apunta con el ratón o el dedo** (Q/E la giran a mano), se conduce con
+**caja de cambios** (automática o manual, ver abajo) y se combate contra
+**cuatro enemigos con IA** (ver abajo), todos con **barra de vida**.
 Sigue la convención del motor: rotación en grados CCW y el eje local
 **+Y es «adelante»**.
 
@@ -266,6 +268,49 @@ tank.aimAt(worldPoint, dt);  // o tank.traverse(±1, dt) para girarla a mano
 tank.sync();                 // coloca torreta y cañón sobre el casco
 // tank.muzzle -> boca del cañón, listo para el módulo de armas
 ```
+
+## Caja de cambios
+
+`components/controls/Gearbox` es lo que convierte «mantener W acelera» en algo
+mecánico. Cada marcha alcanza una fracción del tope de velocidad (`ratios`): las
+**cortas tiran fuerte pero se quedan sin vueltas**, la larga apenas empuja pero
+es la única que llega al máximo. Las **revoluciones** (`rpm`, 0..1) salen de por
+dónde vas dentro de la banda de la marcha, y una curva de par hace que el motor
+se **ahogue** abajo y pierda fuerza cerca del corte. Cambiar de marcha **corta la
+transmisión** durante `shiftTime` — eso es lo que de verdad se nota al conducir.
+
+Dos modos:
+
+- **Automática** — cambia sola según las vueltas, con histéresis entre
+  `upshiftAt` y `downshiftAt` para que no vaya *saltando* entre dos marchas, y
+  mete la marcha atrás cuando pides retroceder desde parado.
+- **Manual** — eliges tú recorriendo `R · N · 1 · 2 · …`. Si la dejas larga a
+  pocas vueltas se ahoga; si la estiras, rebotas contra el limitador.
+
+Cada diseño de tanque trae su propia caja: el **Pesado** solo tiene 3 marchas y
+cambia lentísimo (0,5 s), mientras que el **Ligero** lleva 5 y cambia en 0,16 s.
+
+```js
+import { Gearbox, GEARBOX_MODE, TankController } from "./controls/index.js";
+
+const gearbox = new Gearbox({
+    ratios: [0.3, 0.52, 0.75, 1.0],  // fracción del tope por marcha
+    reverseRatio: 0.4,
+    shiftTime: 0.25,                 // segundos con la transmisión cortada
+    mode: GEARBOX_MODE.AUTO,
+});
+const driver = new TankController(hull, { ...design.drive, gearbox });
+
+// El controlador la alimenta solo; para el HUD:
+gearbox.label;   // "R" | "N" | "1" | "2" | ...
+gearbox.rpm;     // 0..1 dentro de la marcha actual
+gearbox.torque;  // multiplicador de aceleración (0 mientras cambia)
+gearbox.toggleMode();            // automática ⇄ manual
+gearbox.shiftUp() / shiftDown(); // solo tiene sentido en manual
+```
+
+En `drive.html`: **G** alterna automática/manual y **Z**/**X** cambian de marcha
+(o los botones del panel, que también valen en móvil).
 
 ## Enemigos (máquina de estados finitos)
 

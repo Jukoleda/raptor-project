@@ -11,7 +11,7 @@
 
 import RaptorEngine from "../components/raptorEngine.js";
 import { Rectangle, Square, Circle } from "../components/shapes/index.js";
-import { TankController, TankAI, AI_STATE_LABEL } from "../components/controls/index.js";
+import { TankController, TankAI, AI_STATE_LABEL, Gearbox, GEARBOX_MODE } from "../components/controls/index.js";
 import { Tank, TANK_DESIGNS } from "../components/vehicles/index.js";
 import { Weapon } from "../components/weapons/index.js";
 
@@ -113,6 +113,22 @@ const STYLES = `
     button.tankbtn.active { border-color: #4a7fb5; background: #2b3a4a; box-shadow: inset 0 0 0 1px #4a7fb5; }
     button.tankbtn b { display: block; font-size: 13px; }
     button.tankbtn small { color: #9aa0a6; font-size: 11px; }
+
+    /* Gearbox readout: big gear letter, tachometer and mode switch. */
+    .gearbox { display: flex; align-items: center; gap: 12px; }
+    .gearbox .gear {
+        width: 52px; height: 52px; flex: none; border-radius: 8px;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 25px; font-weight: 700; font-variant-numeric: tabular-nums;
+        background: #1b1d21; border: 1px solid #3a3f45; color: #e6e6e6;
+    }
+    .gearbox .gear.shifting { color: #7d838a; border-color: #4a7fb5; }
+    .gearbox .right { flex: 1; min-width: 0; }
+    .tach { height: 10px; background: #1b1d21; border-radius: 5px; overflow: hidden; border: 1px solid #3a3f45; }
+    .tach > i { display: block; height: 100%; width: 0; background: #6aa9e0; }
+    .gearbox .lbl { display: flex; justify-content: space-between; font-size: 11.5px; color: #9aa0a6; margin-bottom: 4px; }
+    .shiftrow { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+    .shiftrow button:disabled { opacity: .4; cursor: default; }
 
     /* Enemy roster with live FSM state. */
     .foe { margin: 9px 0; }
@@ -264,6 +280,7 @@ function startDemo() {
     // frame so the aim tracks the same spot on screen while the camera moves.
     let aimPixel = null;
     let manualTraverse = 0; // -1 / 0 / 1 from Q and E; overrides pointer aim
+    let gearMode = GEARBOX_MODE.AUTO; // the player's transmission mode, kept across restarts
 
     const camera = game.camera;
     camera.smoothing = 6;
@@ -306,6 +323,26 @@ function startDemo() {
     const hpBar = el("div", { className: "bar" }, [hpFill]);
     const kHp = kv("Integridad"), kSpeed = kv("Velocidad"), kTurret = kv("Torreta"), kAmmo = kv("Cañón");
 
+    // Gearbox: current gear, tachometer and the auto/manual switch.
+    const gearBox = el("div", { className: "gear", textContent: "1" });
+    const tachFill = el("i");
+    const tachLabel = el("span");
+    const gearHint = el("span", { textContent: "Revoluciones" });
+    const modeBtn = el("button", { onclick: () => setGearMode() });
+    const upBtn = el("button", { textContent: "Subir ▲ (X)", onclick: () => shift(1) });
+    const downBtn = el("button", { textContent: "Bajar ▼ (Z)", onclick: () => shift(-1) });
+    const gearWidget = el("div", {}, [
+        el("div", { className: "gearbox" }, [
+            gearBox,
+            el("div", { className: "right" }, [
+                el("div", { className: "lbl" }, [gearHint, tachLabel]),
+                el("div", { className: "tach" }, [tachFill]),
+                el("div", { style: "margin-top:8px" }, [modeBtn]),
+            ]),
+        ]),
+        el("div", { className: "shiftrow" }, [downBtn, upBtn]),
+    ]);
+
     const roster = el("div");
     const kFoes = kv("Enemigos en pie");
 
@@ -323,6 +360,10 @@ function startDemo() {
             el("div", { className: "row" }, [hpBar]),
             kHp.row, kSpeed.row, kTurret.row, kAmmo.row,
             el("div", { className: "hint", textContent: "Teclas 1-4 cambian de tanque (reinicia la batalla)" }),
+        ]),
+        el("div", { className: "card" }, [
+            el("h2", { textContent: "Caja de cambios" }), gearWidget,
+            el("div", { className: "hint", textContent: "G alterna automática/manual · Z y X cambian de marcha" }),
         ]),
         el("div", { className: "card" }, [
             el("h2", { textContent: "Enemigos (máquina de estados)" }), roster, kFoes.row,
@@ -373,6 +414,9 @@ function startDemo() {
         if (e.code === "Space") { e.preventDefault(); firePlayer(); }
         else if (k === "q") manualTraverse = 1;
         else if (k === "e") manualTraverse = -1;
+        else if (k === "g") setGearMode();
+        else if (k === "x") shift(1);
+        else if (k === "z") shift(-1);
         else if (e.code >= "Digit1" && e.code <= "Digit4") {
             const d = GARAGE[Number(e.code.slice(-1)) - 1];
             if (d) setDesign(d);
@@ -391,14 +435,34 @@ function startDemo() {
         return { row, v };
     }
 
+    // Switches the player's transmission between automatic and manual. In auto
+    // the box shifts on revs; in manual you walk it through R · N · 1 · 2 · …
+    function setGearMode(mode = null) {
+        gearMode = mode ?? (gearMode === GEARBOX_MODE.AUTO ? GEARBOX_MODE.MANUAL : GEARBOX_MODE.AUTO);
+        if (player) player.gearbox.setMode(gearMode);
+        const auto = gearMode === GEARBOX_MODE.AUTO;
+        modeBtn.textContent = auto ? "Automática ⇄ pasar a manual" : "Manual ⇄ pasar a automática";
+        upBtn.disabled = downBtn.disabled = auto;
+    }
+
+    // Manual gear change (ignored while the box is automatic).
+    function shift(dir) {
+        if (!player || gearMode !== GEARBOX_MODE.MANUAL) return;
+        if (dir > 0) player.gearbox.shiftUp();
+        else player.gearbox.shiftDown();
+    }
+
     // Builds a unit: tank + controller + gun (+ AI when it is an enemy).
     function spawn({ design: d, x, y, rotation = 0, enemy = false }) {
         const tank = new Tank(gl, { design: d, x, y, rotation, colors: enemy ? ENEMY_COLORS : d.colors });
         tank.addTo(game);
 
-        const driver = new TankController(tank.hull, { ...d.drive, bounds: TANK_BOUNDS });
+        // Every tank drives through a gearbox; only the player may switch it
+        // to manual, so the enemies always shift automatically.
+        const gearbox = new Gearbox({ ...d.gearbox, mode: enemy ? GEARBOX_MODE.AUTO : gearMode });
+        const driver = new TankController(tank.hull, { ...d.drive, bounds: TANK_BOUNDS, gearbox });
         const weapon = new Weapon({ ...d.weapon, penetration: 999 });
-        const unit = { tank, driver, weapon, ai: null, enemy };
+        const unit = { tank, driver, weapon, gearbox, ai: null, enemy };
 
         if (enemy) {
             unit.ai = new TankAI(tank, driver, { bounds: TANK_BOUNDS, isBlocked });
@@ -430,6 +494,7 @@ function startDemo() {
         enemies = SPAWNS.map((s) => spawn({ design: TANK_DESIGNS[s.design], x: s.x, y: s.y, rotation: s.rotation, enemy: true }));
 
         camera.centerOn(player.tank.position.x, player.tank.position.y);
+        setGearMode(gearMode);
         buildRoster();
         for (let i = 0; i < GARAGE.length; i++) garageBtns[i].classList.toggle("active", GARAGE[i] === design);
     }
@@ -665,6 +730,15 @@ function startDemo() {
         const pct = tank.hpRatio * 100;
         hpFill.style.width = `${pct}%`;
         hpFill.style.background = pct > 50 ? "#43c06a" : pct > 20 ? "#d8b13a" : "#d84a3a";
+
+        // Gearbox readout: gear, revs and whether the clutch is out mid-shift.
+        const gb = player.gearbox;
+        gearBox.textContent = gb.label;
+        gearBox.classList.toggle("shifting", gb.shifting);
+        const revs = gb.rpm;
+        tachFill.style.width = `${revs * 100}%`;
+        tachFill.style.background = gb.shifting ? "#7d838a" : revs > 0.88 ? "#d84a3a" : revs > 0.7 ? "#d8b13a" : "#6aa9e0";
+        tachLabel.textContent = gb.shifting ? "cambiando…" : `${Math.round(revs * 100)}%`;
 
         const deg = (a) => (((a % 360) + 360) % 360).toFixed(0);
         kHp.v.textContent = `${Math.ceil(tank.hp)} / ${tank.maxHp} HP`;

@@ -36,6 +36,7 @@ export const TANK_DESIGNS = {
         drive: { accel: 5, maxSpeed: 3, turnSpeed: 140, friction: 5 },
         traverse: 120,
         hp: 100,
+        gearbox: { ratios: [0.3, 0.52, 0.75, 1.0], reverseRatio: 0.4, shiftTime: 0.25 },
         weapon: { damage: 25, reload: 1.1, muzzleSpeed: 11 },
     },
 
@@ -55,6 +56,7 @@ export const TANK_DESIGNS = {
         drive: { accel: 7.5, maxSpeed: 4.4, turnSpeed: 200, friction: 6 },
         traverse: 180,
         hp: 65,
+        gearbox: { ratios: [0.26, 0.45, 0.63, 0.82, 1.0], reverseRatio: 0.45, shiftTime: 0.16 },
         weapon: { damage: 13, reload: 0.55, muzzleSpeed: 13 },
     },
 
@@ -74,6 +76,7 @@ export const TANK_DESIGNS = {
         drive: { accel: 3, maxSpeed: 1.9, turnSpeed: 80, friction: 4 },
         traverse: 60,
         hp: 170,
+        gearbox: { ratios: [0.36, 0.68, 1.0], reverseRatio: 0.32, shiftTime: 0.5 },
         weapon: { damage: 42, reload: 2.2, muzzleSpeed: 9 },
     },
 
@@ -102,6 +105,7 @@ export const TANK_DESIGNS = {
         drive: { accel: 5.5, maxSpeed: 3.4, turnSpeed: 105, friction: 5 },
         traverse: 45,
         hp: 90,
+        gearbox: { ratios: [0.28, 0.5, 0.74, 1.0], reverseRatio: 0.4, shiftTime: 0.32 },
         weapon: { damage: 36, reload: 1.7, muzzleSpeed: 14 },
     },
 };

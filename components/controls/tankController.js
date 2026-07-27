@@ -23,6 +23,7 @@ export default class TankController {
         friction = 5,        // how hard it decelerates while coasting
         turnSpeed = 140,     // steering rate (degrees / s)
         bounds = null,       // optional { minX, maxX, minY, maxY } to stay inside
+        gearbox = null,      // optional Gearbox; without one the drive is flat
     } = {}) {
         this.shape = shape;
         this.accel = accel;
@@ -31,6 +32,10 @@ export default class TankController {
         this.friction = friction;
         this.turnSpeed = turnSpeed;
         this.bounds = bounds;
+
+        // The gearbox needs to know the vehicle's top speed to size its gears.
+        this.gearbox = gearbox;
+        if (gearbox) gearbox.maxSpeed = maxSpeed;
 
         this.speed = 0;                       // signed scalar along the heading
         this.input = { forward: 0, turn: 0 }; // each clamped to [-1, 1]
@@ -76,22 +81,45 @@ export default class TankController {
         return this.setInput({ forward, turn });
     }
 
+    // Bleeds speed toward zero at `rate` without overshooting past it.
+    _slow(rate, dt) {
+        const drop = rate * dt;
+        this.speed = Math.abs(this.speed) <= drop ? 0 : this.speed - Math.sign(this.speed) * drop;
+    }
+
     update(dt) {
         // Steer: rotate the hull. Independent of speed so it can pivot on the spot.
         this.shape.rotation += this.input.turn * this.turnSpeed * dt;
 
-        if (this.input.forward !== 0) {
-            // Throttle: reverse pulls with less force than forward.
-            const gain = this.input.forward > 0 ? 1 : this.reverseFactor;
-            this.speed += this.accel * gain * this.input.forward * dt;
-        } else {
-            // Coast: friction pulls speed toward zero without overshooting it.
-            const drop = this.friction * dt;
-            this.speed = Math.abs(this.speed) <= drop ? 0 : this.speed - Math.sign(this.speed) * drop;
-        }
+        const throttle = this.input.forward;
 
-        // Cap the speed envelope (reverse capped lower than forward).
-        this.speed = Math.max(-this.maxSpeed * this.reverseFactor, Math.min(this.maxSpeed, this.speed));
+        if (this.gearbox) {
+            // With a gearbox the drive comes from the selected gear: how hard it
+            // pulls (torque) and how fast it can go (the gear's speed limit).
+            const gb = this.gearbox;
+            gb.update(dt, { speed: this.speed, throttle });
+            const dir = gb.direction;
+
+            if (throttle !== 0 && dir !== 0 && Math.sign(throttle) === dir) {
+                this.speed += this.accel * gb.torque * dir * dt;
+            } else if (throttle !== 0 && dir !== 0) {
+                // Asking to go the other way to the selected gear is braking.
+                this._slow(this.friction * 2.2, dt);
+            } else {
+                this._slow(this.friction, dt);
+            }
+
+            const limit = gb.speedLimit;
+            this.speed = Math.max(-limit, Math.min(limit, this.speed));
+        } else if (throttle !== 0) {
+            // Flat drive: reverse pulls with less force than forward.
+            const gain = throttle > 0 ? 1 : this.reverseFactor;
+            this.speed += this.accel * gain * throttle * dt;
+            this.speed = Math.max(-this.maxSpeed * this.reverseFactor, Math.min(this.maxSpeed, this.speed));
+        } else {
+            this._slow(this.friction, dt);
+            this.speed = Math.max(-this.maxSpeed * this.reverseFactor, Math.min(this.maxSpeed, this.speed));
+        }
 
         // Advance along the heading.
         const f = this.forward;

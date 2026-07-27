@@ -6,7 +6,7 @@
     <title>Raptor — Batalla de tanques</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/camera.js, components/raptorEngine.js, components/controls/tankController.js, components/controls/tankAI.js, components/vehicles/tank.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/armor.js, controls/driveDemo.js + vendor/gl-matrix-min.js
+        Source: components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/camera.js, components/raptorEngine.js, components/controls/gearbox.js, components/controls/tankController.js, components/controls/tankAI.js, components/vehicles/tank.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/armor.js, controls/driveDemo.js + vendor/gl-matrix-min.js
         Regenerate with: node tools/build-standalone.mjs
         This file is fully self-contained: open it directly in any browser.
     -->
@@ -614,6 +614,181 @@ function RaptorEngine() {
 
 RaptorEngine;
 
+// ===== components/controls/gearbox.js =====
+// A gearbox for the drivetrain: what turns a flat "hold W to accelerate" into
+// something that feels mechanical.
+//
+// Each forward gear reaches a fraction of the vehicle's top speed (`ratios`).
+// Short gears pull hard but run out of revs early; the top gear barely pulls but
+// is the only way to reach full speed. Engine revs (`rpm`, normalised 0..1) come
+// from how far into the current gear's speed band you are, and a torque curve
+// makes the engine bog down under load and taper off near the redline. Changing
+// gear cuts the drive for `shiftTime`, which is what you actually feel.
+//
+// Two modes:
+//   AUTO    shifts by itself on revs (with hysteresis so it does not hunt), and
+//           picks reverse when you ask to back up from a standstill.
+//   MANUAL  you pick the gear: R · N · 1 · 2 · … Leave it in too high a gear and
+//           it bogs; hold it too long and you bounce off the limiter.
+//
+// It knows nothing about the engine or input — a TankController feeds it the
+// current speed and throttle, and reads back `torque` and `speedLimit`.
+
+const GEARBOX_MODE = { AUTO: "auto", MANUAL: "manual" };
+
+// Revs below this count as "about to stall", above as "into the limiter".
+const TORQUE_PEAK = 0.65;   // revs where the engine pulls hardest
+const TORQUE_SPREAD = 1.7;  // how quickly torque falls away from the peak
+const TORQUE_FLOOR = 0.45;  // never less than this fraction of the gear's pull
+const STOPPED = 0.15;       // speed under which the vehicle counts as stopped
+
+class Gearbox {
+    constructor({
+        ratios = [0.3, 0.52, 0.75, 1.0], // fraction of top speed per forward gear
+        reverseRatio = 0.4,
+        maxSpeed = 3,          // vehicle top speed; the controller keeps this in sync
+        shiftTime = 0.25,      // seconds of cut drive while changing gear
+        upshiftAt = 0.88,      // revs that trigger an automatic upshift
+        downshiftAt = 0.35,    // revs that trigger an automatic downshift
+        mode = GEARBOX_MODE.AUTO,
+    } = {}) {
+        this.ratios = ratios;
+        this.reverseRatio = reverseRatio;
+        this.maxSpeed = maxSpeed;
+        this.shiftTime = shiftTime;
+        this.upshiftAt = upshiftAt;
+        this.downshiftAt = downshiftAt;
+        this.mode = mode;
+
+        this.gear = 1;      // -1 reverse · 0 neutral · 1..N forward
+        this.speed = 0;     // last speed the controller reported
+        this._shiftFor = 0; // seconds left of the current gear change
+        this.shifts = 0;    // how many changes so far (handy for HUDs/tests)
+    }
+
+    // Selectable gears in order, so manual shifting can walk the list.
+    get sequence() {
+        return [-1, 0, ...this.ratios.map((_, i) => i + 1)];
+    }
+
+    get topGear() {
+        return this.ratios.length;
+    }
+
+    get inReverse() {
+        return this.gear === -1;
+    }
+
+    get inNeutral() {
+        return this.gear === 0;
+    }
+
+    // Which way the current gear drives: +1 forward, -1 reverse, 0 in neutral.
+    get direction() {
+        return this.gear === 0 ? 0 : Math.sign(this.gear);
+    }
+
+    // Fraction of top speed the current gear can reach.
+    get ratio() {
+        if (this.gear === -1) return this.reverseRatio;
+        if (this.gear === 0) return 0;
+        return this.ratios[this.gear - 1];
+    }
+
+    // Fastest the vehicle can go in this gear. Neutral does not drive, but it
+    // must not brake either — coasting keeps whatever speed it had.
+    get speedLimit() {
+        return this.gear === 0 ? this.maxSpeed : this.maxSpeed * this.ratio;
+    }
+
+    // Engine revs, 0..1 across the current gear's speed band.
+    get rpm() {
+        const limit = this.maxSpeed * this.ratio;
+        if (limit <= 0) return 0;
+        return Math.min(1, Math.abs(this.speed) / limit);
+    }
+
+    get shifting() {
+        return this._shiftFor > 0;
+    }
+
+    // Multiplier the controller applies to its acceleration. Zero while the
+    // drive is cut (mid-shift or in neutral).
+    get torque() {
+        if (this.shifting || this.gear === 0) return 0;
+        // Short gears multiply the pull; the top gear barely does.
+        const gearPull = 0.5 / this.ratio;
+        const off = this.rpm - TORQUE_PEAK;
+        const curve = Math.max(TORQUE_FLOOR, 1 - TORQUE_SPREAD * off * off);
+        return gearPull * curve;
+    }
+
+    // Readable gear for a HUD: "R", "N", "1", "2", ...
+    get label() {
+        if (this.gear === -1) return "R";
+        if (this.gear === 0) return "N";
+        return String(this.gear);
+    }
+
+    setMode(mode) {
+        this.mode = mode;
+        return this;
+    }
+
+    toggleMode() {
+        return this.setMode(this.mode === GEARBOX_MODE.AUTO ? GEARBOX_MODE.MANUAL : GEARBOX_MODE.AUTO);
+    }
+
+    // Engages a gear, cutting the drive while the change happens.
+    shiftTo(gear) {
+        const target = Math.max(-1, Math.min(this.topGear, gear));
+        if (target === this.gear || this.shifting) return this;
+        this.gear = target;
+        this._shiftFor = this.shiftTime;
+        this.shifts++;
+        return this;
+    }
+
+    // Manual shifting: step through R · N · 1 · 2 · …
+    shiftUp() {
+        const seq = this.sequence;
+        const i = seq.indexOf(this.gear);
+        return i < seq.length - 1 ? this.shiftTo(seq[i + 1]) : this;
+    }
+
+    shiftDown() {
+        const seq = this.sequence;
+        const i = seq.indexOf(this.gear);
+        return i > 0 ? this.shiftTo(seq[i - 1]) : this;
+    }
+
+    // Called once per frame by the controller with the current drivetrain state.
+    // `throttle` is the driver's demand in [-1, 1].
+    update(dt, { speed = 0, throttle = 0 } = {}) {
+        this.speed = speed;
+        if (this._shiftFor > 0) {
+            this._shiftFor = Math.max(0, this._shiftFor - dt);
+            return this;
+        }
+        if (this.mode === GEARBOX_MODE.AUTO) this._autoShift(throttle);
+        return this;
+    }
+
+    // Automatic logic: pick reverse/forward from a standstill, then ride the
+    // revs. The gap between upshiftAt and downshiftAt stops it hunting.
+    _autoShift(throttle) {
+        const stopped = Math.abs(this.speed) < STOPPED;
+
+        if (throttle < 0 && stopped && !this.inReverse) return void this.shiftTo(-1);
+        if (throttle >= 0 && this.inReverse && stopped) return void this.shiftTo(1);
+        if (this.inReverse || this.inNeutral) return;
+
+        const revs = this.rpm;
+        if (revs > this.upshiftAt && this.gear < this.topGear) this.shiftTo(this.gear + 1);
+        else if (revs < this.downshiftAt && this.gear > 1) this.shiftTo(this.gear - 1);
+    }
+}
+
 // ===== components/controls/tankController.js =====
 // Tank-style movement for any shape.
 //
@@ -640,6 +815,7 @@ class TankController {
         friction = 5,        // how hard it decelerates while coasting
         turnSpeed = 140,     // steering rate (degrees / s)
         bounds = null,       // optional { minX, maxX, minY, maxY } to stay inside
+        gearbox = null,      // optional Gearbox; without one the drive is flat
     } = {}) {
         this.shape = shape;
         this.accel = accel;
@@ -648,6 +824,10 @@ class TankController {
         this.friction = friction;
         this.turnSpeed = turnSpeed;
         this.bounds = bounds;
+
+        // The gearbox needs to know the vehicle's top speed to size its gears.
+        this.gearbox = gearbox;
+        if (gearbox) gearbox.maxSpeed = maxSpeed;
 
         this.speed = 0;                       // signed scalar along the heading
         this.input = { forward: 0, turn: 0 }; // each clamped to [-1, 1]
@@ -693,22 +873,45 @@ class TankController {
         return this.setInput({ forward, turn });
     }
 
+    // Bleeds speed toward zero at `rate` without overshooting past it.
+    _slow(rate, dt) {
+        const drop = rate * dt;
+        this.speed = Math.abs(this.speed) <= drop ? 0 : this.speed - Math.sign(this.speed) * drop;
+    }
+
     update(dt) {
         // Steer: rotate the hull. Independent of speed so it can pivot on the spot.
         this.shape.rotation += this.input.turn * this.turnSpeed * dt;
 
-        if (this.input.forward !== 0) {
-            // Throttle: reverse pulls with less force than forward.
-            const gain = this.input.forward > 0 ? 1 : this.reverseFactor;
-            this.speed += this.accel * gain * this.input.forward * dt;
-        } else {
-            // Coast: friction pulls speed toward zero without overshooting it.
-            const drop = this.friction * dt;
-            this.speed = Math.abs(this.speed) <= drop ? 0 : this.speed - Math.sign(this.speed) * drop;
-        }
+        const throttle = this.input.forward;
 
-        // Cap the speed envelope (reverse capped lower than forward).
-        this.speed = Math.max(-this.maxSpeed * this.reverseFactor, Math.min(this.maxSpeed, this.speed));
+        if (this.gearbox) {
+            // With a gearbox the drive comes from the selected gear: how hard it
+            // pulls (torque) and how fast it can go (the gear's speed limit).
+            const gb = this.gearbox;
+            gb.update(dt, { speed: this.speed, throttle });
+            const dir = gb.direction;
+
+            if (throttle !== 0 && dir !== 0 && Math.sign(throttle) === dir) {
+                this.speed += this.accel * gb.torque * dir * dt;
+            } else if (throttle !== 0 && dir !== 0) {
+                // Asking to go the other way to the selected gear is braking.
+                this._slow(this.friction * 2.2, dt);
+            } else {
+                this._slow(this.friction, dt);
+            }
+
+            const limit = gb.speedLimit;
+            this.speed = Math.max(-limit, Math.min(limit, this.speed));
+        } else if (throttle !== 0) {
+            // Flat drive: reverse pulls with less force than forward.
+            const gain = throttle > 0 ? 1 : this.reverseFactor;
+            this.speed += this.accel * gain * throttle * dt;
+            this.speed = Math.max(-this.maxSpeed * this.reverseFactor, Math.min(this.maxSpeed, this.speed));
+        } else {
+            this._slow(this.friction, dt);
+            this.speed = Math.max(-this.maxSpeed * this.reverseFactor, Math.min(this.maxSpeed, this.speed));
+        }
 
         // Advance along the heading.
         const f = this.forward;
@@ -1079,6 +1282,7 @@ const TANK_DESIGNS = {
         drive: { accel: 5, maxSpeed: 3, turnSpeed: 140, friction: 5 },
         traverse: 120,
         hp: 100,
+        gearbox: { ratios: [0.3, 0.52, 0.75, 1.0], reverseRatio: 0.4, shiftTime: 0.25 },
         weapon: { damage: 25, reload: 1.1, muzzleSpeed: 11 },
     },
 
@@ -1098,6 +1302,7 @@ const TANK_DESIGNS = {
         drive: { accel: 7.5, maxSpeed: 4.4, turnSpeed: 200, friction: 6 },
         traverse: 180,
         hp: 65,
+        gearbox: { ratios: [0.26, 0.45, 0.63, 0.82, 1.0], reverseRatio: 0.45, shiftTime: 0.16 },
         weapon: { damage: 13, reload: 0.55, muzzleSpeed: 13 },
     },
 
@@ -1117,6 +1322,7 @@ const TANK_DESIGNS = {
         drive: { accel: 3, maxSpeed: 1.9, turnSpeed: 80, friction: 4 },
         traverse: 60,
         hp: 170,
+        gearbox: { ratios: [0.36, 0.68, 1.0], reverseRatio: 0.32, shiftTime: 0.5 },
         weapon: { damage: 42, reload: 2.2, muzzleSpeed: 9 },
     },
 
@@ -1145,6 +1351,7 @@ const TANK_DESIGNS = {
         drive: { accel: 5.5, maxSpeed: 3.4, turnSpeed: 105, friction: 5 },
         traverse: 45,
         hp: 90,
+        gearbox: { ratios: [0.28, 0.5, 0.74, 1.0], reverseRatio: 0.4, shiftTime: 0.32 },
         weapon: { damage: 36, reload: 1.7, muzzleSpeed: 14 },
     },
 };
@@ -1694,6 +1901,22 @@ const STYLES = `
     button.tankbtn b { display: block; font-size: 13px; }
     button.tankbtn small { color: #9aa0a6; font-size: 11px; }
 
+    /* Gearbox readout: big gear letter, tachometer and mode switch. */
+    .gearbox { display: flex; align-items: center; gap: 12px; }
+    .gearbox .gear {
+        width: 52px; height: 52px; flex: none; border-radius: 8px;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 25px; font-weight: 700; font-variant-numeric: tabular-nums;
+        background: #1b1d21; border: 1px solid #3a3f45; color: #e6e6e6;
+    }
+    .gearbox .gear.shifting { color: #7d838a; border-color: #4a7fb5; }
+    .gearbox .right { flex: 1; min-width: 0; }
+    .tach { height: 10px; background: #1b1d21; border-radius: 5px; overflow: hidden; border: 1px solid #3a3f45; }
+    .tach > i { display: block; height: 100%; width: 0; background: #6aa9e0; }
+    .gearbox .lbl { display: flex; justify-content: space-between; font-size: 11.5px; color: #9aa0a6; margin-bottom: 4px; }
+    .shiftrow { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+    .shiftrow button:disabled { opacity: .4; cursor: default; }
+
     /* Enemy roster with live FSM state. */
     .foe { margin: 9px 0; }
     .foe:first-child { margin-top: 0; }
@@ -1844,6 +2067,7 @@ function startDemo() {
     // frame so the aim tracks the same spot on screen while the camera moves.
     let aimPixel = null;
     let manualTraverse = 0; // -1 / 0 / 1 from Q and E; overrides pointer aim
+    let gearMode = GEARBOX_MODE.AUTO; // the player's transmission mode, kept across restarts
 
     const camera = game.camera;
     camera.smoothing = 6;
@@ -1886,6 +2110,26 @@ function startDemo() {
     const hpBar = el("div", { className: "bar" }, [hpFill]);
     const kHp = kv("Integridad"), kSpeed = kv("Velocidad"), kTurret = kv("Torreta"), kAmmo = kv("Cañón");
 
+    // Gearbox: current gear, tachometer and the auto/manual switch.
+    const gearBox = el("div", { className: "gear", textContent: "1" });
+    const tachFill = el("i");
+    const tachLabel = el("span");
+    const gearHint = el("span", { textContent: "Revoluciones" });
+    const modeBtn = el("button", { onclick: () => setGearMode() });
+    const upBtn = el("button", { textContent: "Subir ▲ (X)", onclick: () => shift(1) });
+    const downBtn = el("button", { textContent: "Bajar ▼ (Z)", onclick: () => shift(-1) });
+    const gearWidget = el("div", {}, [
+        el("div", { className: "gearbox" }, [
+            gearBox,
+            el("div", { className: "right" }, [
+                el("div", { className: "lbl" }, [gearHint, tachLabel]),
+                el("div", { className: "tach" }, [tachFill]),
+                el("div", { style: "margin-top:8px" }, [modeBtn]),
+            ]),
+        ]),
+        el("div", { className: "shiftrow" }, [downBtn, upBtn]),
+    ]);
+
     const roster = el("div");
     const kFoes = kv("Enemigos en pie");
 
@@ -1903,6 +2147,10 @@ function startDemo() {
             el("div", { className: "row" }, [hpBar]),
             kHp.row, kSpeed.row, kTurret.row, kAmmo.row,
             el("div", { className: "hint", textContent: "Teclas 1-4 cambian de tanque (reinicia la batalla)" }),
+        ]),
+        el("div", { className: "card" }, [
+            el("h2", { textContent: "Caja de cambios" }), gearWidget,
+            el("div", { className: "hint", textContent: "G alterna automática/manual · Z y X cambian de marcha" }),
         ]),
         el("div", { className: "card" }, [
             el("h2", { textContent: "Enemigos (máquina de estados)" }), roster, kFoes.row,
@@ -1953,6 +2201,9 @@ function startDemo() {
         if (e.code === "Space") { e.preventDefault(); firePlayer(); }
         else if (k === "q") manualTraverse = 1;
         else if (k === "e") manualTraverse = -1;
+        else if (k === "g") setGearMode();
+        else if (k === "x") shift(1);
+        else if (k === "z") shift(-1);
         else if (e.code >= "Digit1" && e.code <= "Digit4") {
             const d = GARAGE[Number(e.code.slice(-1)) - 1];
             if (d) setDesign(d);
@@ -1971,14 +2222,34 @@ function startDemo() {
         return { row, v };
     }
 
+    // Switches the player's transmission between automatic and manual. In auto
+    // the box shifts on revs; in manual you walk it through R · N · 1 · 2 · …
+    function setGearMode(mode = null) {
+        gearMode = mode ?? (gearMode === GEARBOX_MODE.AUTO ? GEARBOX_MODE.MANUAL : GEARBOX_MODE.AUTO);
+        if (player) player.gearbox.setMode(gearMode);
+        const auto = gearMode === GEARBOX_MODE.AUTO;
+        modeBtn.textContent = auto ? "Automática ⇄ pasar a manual" : "Manual ⇄ pasar a automática";
+        upBtn.disabled = downBtn.disabled = auto;
+    }
+
+    // Manual gear change (ignored while the box is automatic).
+    function shift(dir) {
+        if (!player || gearMode !== GEARBOX_MODE.MANUAL) return;
+        if (dir > 0) player.gearbox.shiftUp();
+        else player.gearbox.shiftDown();
+    }
+
     // Builds a unit: tank + controller + gun (+ AI when it is an enemy).
     function spawn({ design: d, x, y, rotation = 0, enemy = false }) {
         const tank = new Tank(gl, { design: d, x, y, rotation, colors: enemy ? ENEMY_COLORS : d.colors });
         tank.addTo(game);
 
-        const driver = new TankController(tank.hull, { ...d.drive, bounds: TANK_BOUNDS });
+        // Every tank drives through a gearbox; only the player may switch it
+        // to manual, so the enemies always shift automatically.
+        const gearbox = new Gearbox({ ...d.gearbox, mode: enemy ? GEARBOX_MODE.AUTO : gearMode });
+        const driver = new TankController(tank.hull, { ...d.drive, bounds: TANK_BOUNDS, gearbox });
         const weapon = new Weapon({ ...d.weapon, penetration: 999 });
-        const unit = { tank, driver, weapon, ai: null, enemy };
+        const unit = { tank, driver, weapon, gearbox, ai: null, enemy };
 
         if (enemy) {
             unit.ai = new TankAI(tank, driver, { bounds: TANK_BOUNDS, isBlocked });
@@ -2010,6 +2281,7 @@ function startDemo() {
         enemies = SPAWNS.map((s) => spawn({ design: TANK_DESIGNS[s.design], x: s.x, y: s.y, rotation: s.rotation, enemy: true }));
 
         camera.centerOn(player.tank.position.x, player.tank.position.y);
+        setGearMode(gearMode);
         buildRoster();
         for (let i = 0; i < GARAGE.length; i++) garageBtns[i].classList.toggle("active", GARAGE[i] === design);
     }
@@ -2245,6 +2517,15 @@ function startDemo() {
         const pct = tank.hpRatio * 100;
         hpFill.style.width = `${pct}%`;
         hpFill.style.background = pct > 50 ? "#43c06a" : pct > 20 ? "#d8b13a" : "#d84a3a";
+
+        // Gearbox readout: gear, revs and whether the clutch is out mid-shift.
+        const gb = player.gearbox;
+        gearBox.textContent = gb.label;
+        gearBox.classList.toggle("shifting", gb.shifting);
+        const revs = gb.rpm;
+        tachFill.style.width = `${revs * 100}%`;
+        tachFill.style.background = gb.shifting ? "#7d838a" : revs > 0.88 ? "#d84a3a" : revs > 0.7 ? "#d8b13a" : "#6aa9e0";
+        tachLabel.textContent = gb.shifting ? "cambiando…" : `${Math.round(revs * 100)}%`;
 
         const deg = (a) => (((a % 360) + 360) % 360).toFixed(0);
         kHp.v.textContent = `${Math.ceil(tank.hp)} / ${tank.maxHp} HP`;

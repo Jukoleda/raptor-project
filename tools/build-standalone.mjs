@@ -47,6 +47,7 @@ const WEAPONS = [
 
 // Input / controllers (the AI writes into a controller, so it comes after it).
 const CONTROLS = [
+    "components/controls/gearbox.js",
     "components/controls/tankController.js",
     "components/controls/tankAI.js",
 ];

@@ -108,6 +108,9 @@ de teclado WASD/flechas incluido. Demo `drive.html`. Mejoras posibles:
 - [x] **Tanques enemigos / IA:** `components/controls/TankAI`, máquina de estados
       (patrulla → persigue → ataca → se retira) con línea de tiro y detección de
       atasco. Cuatro enemigos en `drive.html`.
+- [x] **Caja de cambios:** `components/controls/Gearbox` con marchas, curva de
+      par, corte de transmisión al cambiar y modos **automático/manual**; una
+      caja distinta por diseño de tanque.
 - [ ] **Gamepad** además del teclado.
 - [ ] **Oleadas / puntuación:** hoy es una batalla única; falta progresión.
 - [ ] **IA con cobertura:** usar los obstáculos para cubrirse, no solo para

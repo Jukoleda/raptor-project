@@ -6,6 +6,29 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Transmisión)
+- **Caja de cambios** (`components/controls/gearbox.js`): `Gearbox` da al
+  vehículo una transmisión real. Cada marcha alcanza una fracción del tope de
+  velocidad (`ratios`): las cortas dan **más par** pero se quedan sin vueltas y
+  la larga es la única que llega al máximo. Las **revoluciones** (0..1) salen de
+  la banda de la marcha y una **curva de par** ahoga el motor abajo y lo hace
+  perder fuerza cerca del corte; cambiar **corta la transmisión** durante
+  `shiftTime`.
+  - **Automática:** cambia sola por revoluciones, con histéresis
+    (`upshiftAt`/`downshiftAt`) para no saltar entre dos marchas, y engrana la
+    **marcha atrás** al pedir retroceso desde parado.
+  - **Manual:** el jugador recorre `R · N · 1 · 2 · …`; dejar una marcha larga a
+    pocas vueltas ahoga el motor y estirarla topa con el limitador.
+- **`TankController` acepta una caja** (`gearbox`): la acelera con el par de la
+  marcha y limita la velocidad a la de esa marcha; pedir el sentido contrario al
+  engranado **frena**. Sin caja, el comportamiento anterior no cambia.
+- **Una caja por diseño de tanque**: el Pesado lleva 3 marchas y cambia en 0,5 s;
+  el Ligero, 5 marchas y 0,16 s.
+- **Demo `drive.html`:** panel de caja de cambios con **marcha engranada**,
+  **cuentavueltas** (amarillo/rojo al acercarse al corte) e interruptor
+  **automática/manual**; **G** alterna el modo y **Z**/**X** cambian de marcha
+  (también con botones, útiles en móvil). Los enemigos usan caja automática.
+
 ### Añadido (Enemigos y combate)
 - **IA por máquina de estados finitos** (`components/controls/tankAI.js`):
   `TankAI` gobierna un tanque enemigo con cuatro estados —
