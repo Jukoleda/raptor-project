@@ -6,6 +6,30 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Enemigos y combate)
+- **IA por máquina de estados finitos** (`components/controls/tankAI.js`):
+  `TankAI` gobierna un tanque enemigo con cuatro estados —
+  **PATROL** (deambula entre puntos al azar) → **CHASE** (persigue al objetivo) →
+  **ATTACK** (mantiene la distancia, apunta y dispara al estar alineado) →
+  **RETREAT** (rompe el contacto al bajar del umbral de vida, sin dejar de
+  apuntar). Incluye **línea de tiro** opcional (`isBlocked`) para no disparar a
+  través del escenario y **detección de atasco** que da marcha atrás y gira. No
+  toca el motor ni las armas: escribe en un `TankController`, apunta la torreta y
+  levanta `wantsToFire`. Etiquetas legibles en `AI_STATE_LABEL`.
+- **Salud y barra de vida en `Tank`**: integridad (`hp` / `maxHp` por diseño),
+  `takeDamage()` y una **barra flotante sobre el casco** que no rota con él y
+  pasa de verde a amarillo y rojo (solo se recolorea al cruzar umbral, para no
+  re-subir el buffer cada frame). La lleva **tanto el jugador como los enemigos**.
+- **Stats de combate por diseño**: Medio 100 HP / 25 daño, Ligero 65 / 13 (rápido
+  de recarga), Pesado 170 / 42 (lento) y Cazacarros 90 / 36.
+- **Demo `drive.html` convertida en batalla**: cuatro enemigos con IA sobre el
+  mapa, **combate real** enganchando `Tank.muzzle` y la torreta a
+  `components/weapons/` (proyectiles que impactan contra tanques y escenario,
+  con fuego amigo), separación entre tanques, pecios al ser destruidos, banner de
+  **victoria/derrota**, botón de nueva batalla, **botón de disparo táctil** para
+  móvil y panel que muestra **el estado vivo de la FSM de cada enemigo** con su
+  barra de vida. El minimapa dibuja aliados y enemigos.
+
 ### Añadido (Vehículos)
 - **Tanques con torreta móvil** (`components/vehicles/tank.js`): `Tank` arma un
   vehículo con formas del motor — **casco** (lo conduce un `TankController`) más

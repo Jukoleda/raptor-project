@@ -45,9 +45,10 @@ const WEAPONS = [
     "components/weapons/armor.js",
 ];
 
-// Input / controllers.
+// Input / controllers (the AI writes into a controller, so it comes after it).
 const CONTROLS = [
     "components/controls/tankController.js",
+    "components/controls/tankAI.js",
 ];
 
 // Vehicles assembled from shapes (must come after ENGINE, which defines them).
@@ -82,8 +83,8 @@ const PAGES = [
     },
     {
         out: "drive.html",
-        title: "Raptor — Conducción de tanque",
-        modules: [...ENGINE, ...CONTROLS, ...VEHICLES, "controls/driveDemo.js"],
+        title: "Raptor — Batalla de tanques",
+        modules: [...ENGINE, ...CONTROLS, ...VEHICLES, ...WEAPONS, "controls/driveDemo.js"],
         // The demo injects its own styles from JS; the body starts empty.
         headStyle: "",
     },

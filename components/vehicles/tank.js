@@ -35,6 +35,8 @@ export const TANK_DESIGNS = {
         },
         drive: { accel: 5, maxSpeed: 3, turnSpeed: 140, friction: 5 },
         traverse: 120,
+        hp: 100,
+        weapon: { damage: 25, reload: 1.1, muzzleSpeed: 11 },
     },
 
     light: {
@@ -52,6 +54,8 @@ export const TANK_DESIGNS = {
         },
         drive: { accel: 7.5, maxSpeed: 4.4, turnSpeed: 200, friction: 6 },
         traverse: 180,
+        hp: 65,
+        weapon: { damage: 13, reload: 0.55, muzzleSpeed: 13 },
     },
 
     heavy: {
@@ -69,6 +73,8 @@ export const TANK_DESIGNS = {
         },
         drive: { accel: 3, maxSpeed: 1.9, turnSpeed: 80, friction: 4 },
         traverse: 60,
+        hp: 170,
+        weapon: { damage: 42, reload: 2.2, muzzleSpeed: 9 },
     },
 
     hunter: {
@@ -95,6 +101,8 @@ export const TANK_DESIGNS = {
         },
         drive: { accel: 5.5, maxSpeed: 3.4, turnSpeed: 105, friction: 5 },
         traverse: 45,
+        hp: 90,
+        weapon: { damage: 36, reload: 1.7, muzzleSpeed: 14 },
     },
 };
 
@@ -105,22 +113,63 @@ function angleDelta(from, to) {
     return (((to - from + 180) % 360) + 360) % 360 - 180;
 }
 
+// Health bar geometry, in world units. The bar floats above the hull and never
+// rotates with it, so it stays readable however the tank is facing.
+const BAR_HEIGHT = 0.11;
+const BAR_GAP = 0.3;
+const BAR_BACK_COLOR = { red: 0.1, green: 0.11, blue: 0.13 };
+// Fill color by remaining health: healthy, hurt, critical.
+const BAR_FILL_COLORS = [
+    { at: 0.5, color: { red: 0.26, green: 0.75, blue: 0.41 } },
+    { at: 0.2, color: { red: 0.85, green: 0.69, blue: 0.23 } },
+    { at: 0, color: { red: 0.85, green: 0.29, blue: 0.24 } },
+];
+
 export default class Tank {
-    constructor(gl, { design = DEFAULT_DESIGN, x = 0, y = 0, rotation = 0, turretAngle = null } = {}) {
+    constructor(gl, { design = DEFAULT_DESIGN, x = 0, y = 0, rotation = 0, turretAngle = null, colors = design.colors } = {}) {
         this.design = design;
 
-        this.hull = design.hull(gl).setColor(design.colors.hull)
+        this.hull = design.hull(gl).setColor(colors.hull)
             .setPosition({ x, y }).setRotation(rotation).init();
         this.barrel = new Rectangle(gl, { width: design.barrel.width, height: design.barrel.length })
-            .setColor(design.colors.barrel).init();
-        this.turret = design.turret(gl).setColor(design.colors.turret).init();
+            .setColor(colors.barrel).init();
+        this.turret = design.turret(gl).setColor(colors.turret).init();
 
         // Absolute world angle of the gun; starts aligned with the hull.
         this.turretAngle = turretAngle ?? rotation;
 
-        // Draw order: hull, then barrel, then turret on top of both.
-        this.parts = [this.hull, this.barrel, this.turret];
+        // Health. `maxHp` comes from the design; the bar reflects the ratio.
+        this.maxHp = design.hp ?? 100;
+        this.hp = this.maxHp;
+        this.alive = true;
+
+        // Health bar: a dark backing plate with a colored fill on top. The fill
+        // is scaled horizontally (and nudged left) so it empties from the right.
+        this.barWidth = Math.max(0.62, design.radius * 1.9);
+        this.barBack = new Rectangle(gl, { width: this.barWidth + 0.04, height: BAR_HEIGHT + 0.04 })
+            .setColor(BAR_BACK_COLOR).init();
+        this.barFill = new Rectangle(gl, { width: this.barWidth, height: BAR_HEIGHT })
+            .setColor(BAR_FILL_COLORS[0].color).init();
+        this._barBucket = 0; // index into BAR_FILL_COLORS, to avoid re-uploading
+
+        // Draw order: hull, barrel, turret, then the bar on top of everything.
+        this.parts = [this.hull, this.barrel, this.turret, this.barBack, this.barFill];
         this.sync();
+    }
+
+    get hpRatio() {
+        return this.maxHp > 0 ? Math.max(0, this.hp) / this.maxHp : 0;
+    }
+
+    // Applies damage. Returns true while the tank is still alive.
+    takeDamage(amount) {
+        if (!this.alive) return false;
+        this.hp -= amount;
+        if (this.hp <= 0) {
+            this.hp = 0;
+            this.alive = false;
+        }
+        return this.alive;
     }
 
     // The hull carries the tank's transform — drive it with a TankController.
@@ -183,6 +232,22 @@ export default class Tank {
         this.barrel
             .setPosition({ x: p.x + f.x * this.design.barrel.offset, y: p.y + f.y * this.design.barrel.offset })
             .setRotation(this.turretAngle);
+
+        // Health bar, level above the hull whatever way the tank points.
+        const ratio = this.hpRatio;
+        const barY = p.y + this.design.radius + BAR_GAP;
+        this.barBack.setPosition({ x: p.x, y: barY });
+        this.barFill
+            .setScale({ x: ratio, y: 1 })
+            .setPosition({ x: p.x - (this.barWidth * (1 - ratio)) / 2, y: barY });
+
+        // Recolor only when crossing a threshold — setColor re-uploads a buffer.
+        const bucket = BAR_FILL_COLORS.findIndex((b) => ratio > b.at);
+        const next = bucket === -1 ? BAR_FILL_COLORS.length - 1 : bucket;
+        if (next !== this._barBucket) {
+            this._barBucket = next;
+            this.barFill.setColor(BAR_FILL_COLORS[next].color);
+        }
         return this;
     }
 }
