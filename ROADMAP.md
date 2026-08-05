@@ -114,6 +114,8 @@ de teclado WASD/flechas incluido. Demo `drive.html`. Mejoras posibles:
 - [x] **Auto-apuntado:** `components/controls/AutoAim` con políticas en ciclo
       (más cercano → menos vida → más vida → más fuerte → off), retícula sobre el
       objetivo y marca en el minimapa.
+- [x] **Fuego automático:** botón/tecla que mantiene el gatillo, espera a que la
+      torreta esté alineada y no dispara a través de la cobertura.
 - [ ] **Gamepad** además del teclado.
 - [ ] **Oleadas / puntuación:** hoy es una batalla única; falta progresión.
 - [ ] **Zonas / puntos de interés** en el mapa grande (hoy es una llanura con

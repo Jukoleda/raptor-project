@@ -216,7 +216,8 @@ que la pantalla y la **cámara sigue al tanque** (ver abajo), con un **minimapa*
 del mapa completo; el tanque **choca** con muros y obstáculos (colisión por
 expulsión círculo-AABB). Puedes **elegir entre cuatro tanques** (teclas 1-4), la
 **torreta apunta con el ratón o el dedo** (Q/E la giran a mano) o con
-**auto-apuntado** por modos (ver abajo), se conduce con **caja de cambios**
+**auto-apuntado** por modos y **fuego automático** (ver abajo), se conduce con
+**caja de cambios**
 (automática o manual) y se combate contra **doce enemigos con IA** repartidos por
 una arena de **57 × 41** unidades, todos con **barra de vida**.
 Sigue la convención del motor: rotación en grados CCW y el eje local
@@ -308,6 +309,17 @@ autoAim.label;   // "Más cercano" | "Menos vida" | ...
 En `drive.html` la prioridad es: giro manual (Q/E) **>** auto-apuntado **>**
 puntero, y el objetivo enganchado se marca con una **retícula** en el mundo y un
 círculo en el minimapa.
+
+### Fuego automático
+
+El botón **AUTO** (tecla **F**) mantiene el gatillo por ti: dispara en cuanto el
+cañón ha recargado. Cuando hay un objetivo enganchado no malgasta proyectiles —
+**espera a que la torreta esté alineada** (4° de margen) y **no dispara si hay
+cobertura por medio**. Sin objetivo se comporta como tener el gatillo apretado.
+Se combina con el auto-apuntado: 🎯 elige a quién, AUTO aprieta el gatillo.
+
+`Tank.aimErrorTo(punto)` devuelve los grados que le faltan al cañón para estar
+sobre un punto — lo usan tanto el fuego automático como la IA enemiga.
 
 ## Caja de cambios
 

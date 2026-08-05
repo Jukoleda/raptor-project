@@ -122,8 +122,7 @@ export default class TankAI {
 
     // True when the gun is lined up on `point` closely enough to shoot.
     _onTarget(point) {
-        const desired = angleToward(this.tank.position, point);
-        return Math.abs(angleDiff(this.tank.turretAngle, desired)) <= this.fireArc;
+        return this.tank.aimErrorTo(point) <= this.fireArc;
     }
 
     _canSee(target) {

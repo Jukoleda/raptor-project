@@ -18,6 +18,13 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
   objetivo actual gana el empate exacto, para que el cañón no oscile.
 - **`Tank.power`**: amenaza de diseño (resistencia × daño por segundo), que es lo
   que ordena el modo «más fuerte».
+- **Fuego automático**: botón **AUTO** (tecla **F**, también en móvil) que
+  mantiene el gatillo. Con un objetivo enganchado no malgasta proyectiles —
+  espera a que la torreta esté **alineada** (4° de margen) y **no dispara si hay
+  cobertura por medio**; sin objetivo equivale a tener el gatillo apretado.
+- **`Tank.aimErrorTo(punto)`**: grados que le faltan al cañón para estar sobre un
+  punto. Lo usan el fuego automático y la IA enemiga (que deja de duplicar el
+  cálculo de ángulos).
 - **Demo:** tecla **T** (o botón 🎯, también en móvil) cicla el modo; el objetivo
   enganchado se marca con una **retícula** en el mundo y un círculo en el
   minimapa, y el panel muestra el modo, el enemigo fijado, su vida y la

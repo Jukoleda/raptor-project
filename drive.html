@@ -1140,8 +1140,7 @@ class TankAI {
 
     // True when the gun is lined up on `point` closely enough to shoot.
     _onTarget(point) {
-        const desired = angleToward(this.tank.position, point);
-        return Math.abs(angleDiff(this.tank.turretAngle, desired)) <= this.fireArc;
+        return this.tank.aimErrorTo(point) <= this.fireArc;
     }
 
     _canSee(target) {
@@ -1581,6 +1580,16 @@ class Tank {
         return this;
     }
 
+    // How far off the gun is from a world point, in degrees (0 = dead on).
+    // Lets callers decide whether it is worth pulling the trigger yet.
+    aimErrorTo(point) {
+        const dx = point.x - this.position.x;
+        const dy = point.y - this.position.y;
+        if (dx === 0 && dy === 0) return 0;
+        const bearing = (Math.atan2(-dx, dy) * 180) / Math.PI;
+        return Math.abs(angleDelta(this.turretAngle, bearing));
+    }
+
     // Aims the gun at a world point (the mouse, a target, ...).
     aimAt(point, dt) {
         const dx = point.x - this.position.x;
@@ -1978,6 +1987,10 @@ const SPAWNS = Array.from({ length: ENEMY_COUNT }, (_, i) => {
 
 const WRECK_COLOR = { red: 0.17, green: 0.17, blue: 0.19 };
 
+// Auto-fire holds off until the gun is this close to the locked target, so it
+// spends shells on the target instead of spraying while the turret swings.
+const AUTO_FIRE_ARC = 4; // degrees
+
 const STYLES = `
     * { box-sizing: border-box; }
     body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #e6e6e6; background: #1b1d21; }
@@ -2045,6 +2058,9 @@ const STYLES = `
 
     .tbtn.aim { background: rgba(30, 74, 92, .6); border-color: rgba(120, 210, 240, .45); font-size: 20px; }
     .tbtn.aim.on { background: rgba(60, 150, 190, .8); border-color: #7fe0ff; }
+
+    .tbtn.autofire { background: rgba(92, 48, 30, .6); border-color: rgba(240, 170, 120, .45); font-size: 12px; font-weight: 700; letter-spacing: .04em; }
+    .tbtn.autofire.on { background: rgba(190, 95, 45, .85); border-color: #ffbe86; }
 
     /* Auto-aim card. */
     .aimrow { display: flex; align-items: center; gap: 10px; }
@@ -2231,6 +2247,7 @@ function startDemo() {
     let aimMode = AIM_MODE.OFF;       // the player's auto-aim policy, kept across restarts
     let autoAim = null;               // AutoAim bound to the player's tank
     let lockedOn = null;              // the tank the reticle is currently drawn on
+    let autoFire = false;             // holds the trigger for you when on
 
     const camera = game.camera;
     camera.smoothing = 6;
@@ -2246,14 +2263,19 @@ function startDemo() {
     const tbtn = (label, cls = "") => el("div", { className: `tbtn ${cls}`.trim(), textContent: label });
     const btn = {
         up: tbtn("▲"), down: tbtn("▼"), left: tbtn("◀"), right: tbtn("▶"),
-        fire: tbtn("🔥", "fire"), aim: tbtn("🎯", "aim"),
+        fire: tbtn("🔥", "fire"), aim: tbtn("🎯", "aim"), auto: tbtn("AUTO", "autofire"),
     };
     stage.append(
         el("div", { className: "pad left" }, [btn.left, btn.right]),
-        el("div", { className: "pad right" }, [btn.aim, btn.fire, el("div", { className: "col" }, [btn.up, btn.down])]),
+        el("div", { className: "pad right" }, [
+            el("div", { className: "col" }, [btn.aim, btn.auto]),
+            btn.fire,
+            el("div", { className: "col" }, [btn.up, btn.down]),
+        ]),
     );
     btn.fire.addEventListener("pointerdown", (e) => { e.preventDefault(); firePlayer(); });
     btn.aim.addEventListener("pointerdown", (e) => { e.preventDefault(); cycleAim(); });
+    btn.auto.addEventListener("pointerdown", (e) => { e.preventDefault(); toggleAutoFire(); });
 
     // --- Banner shown when the battle ends. ---
     const bannerText = el("b");
@@ -2317,10 +2339,15 @@ function startDemo() {
     const aimName = el("b", { textContent: "Desactivado" });
     const aimBtn = el("button", { textContent: "Cambiar modo (T)", onclick: () => cycleAim() });
     const aimTarget = el("div", { className: "target", textContent: "Sin objetivo" });
+    const autoFireDot = el("span", { className: "dot" });
+    const autoFireName = el("b", { textContent: "Fuego manual" });
+    const autoFireBtn = el("button", { textContent: "Fuego automático (F)", onclick: () => toggleAutoFire() });
     const aimWidget = el("div", {}, [
         el("div", { className: "aimrow" }, [aimDot, aimName]),
         aimTarget,
         el("div", { style: "margin-top:10px" }, [aimBtn]),
+        el("div", { className: "aimrow", style: "margin-top:14px" }, [autoFireDot, autoFireName]),
+        el("div", { style: "margin-top:8px" }, [autoFireBtn]),
     ]);
 
     const panel = el("div", { id: "panel" }, [
@@ -2334,7 +2361,7 @@ function startDemo() {
         ]),
         el("div", { className: "card" }, [
             el("h2", { textContent: "Auto-apuntado" }), aimWidget,
-            el("div", { className: "hint", textContent: "T (o 🎯) cicla: cercano → menos vida → más vida → más fuerte → off" }),
+            el("div", { className: "hint", textContent: "T (o 🎯) cicla el objetivo · F (o AUTO) mantiene el gatillo" }),
         ]),
         el("div", { className: "card" }, [
             el("h2", { textContent: "Caja de cambios" }), gearWidget,
@@ -2362,6 +2389,10 @@ function startDemo() {
     window.raptorDrive = {
         game, camera, TANK_DESIGNS, setDesign, startBattle,
         get autoAim() { return autoAim; },
+        get autoFire() { return autoFire; },
+        get blocks() { return blocks; },
+        get colliders() { return colliders; },
+        toggleAutoFire,
         get lockedOn() { return lockedOn; },
         cycleAim,
         get player() { return player; },
@@ -2393,6 +2424,7 @@ function startDemo() {
         else if (k === "q") manualTraverse = 1;
         else if (k === "e") manualTraverse = -1;
         else if (k === "t") cycleAim();
+        else if (k === "f") toggleAutoFire();
         else if (k === "g") setGearMode();
         else if (k === "x") shift(1);
         else if (k === "z") shift(-1);
@@ -2422,11 +2454,35 @@ function startDemo() {
         refreshAimUi();
     }
 
+    // Holds the trigger: while on, the gun goes off by itself as soon as it has
+    // reloaded (and, when auto-aim has a target, as soon as it is lined up).
+    function toggleAutoFire(on = !autoFire) {
+        autoFire = on;
+        refreshAimUi();
+    }
+
     function refreshAimUi() {
         const on = autoAim && autoAim.enabled;
         aimName.textContent = autoAim ? autoAim.label : "Desactivado";
         aimDot.classList.toggle("on", !!on);
         btn.aim.classList.toggle("on", !!on);
+
+        autoFireName.textContent = autoFire ? "Fuego automático" : "Fuego manual";
+        autoFireDot.classList.toggle("on", autoFire);
+        autoFireBtn.textContent = autoFire ? "Desactivar auto (F)" : "Fuego automático (F)";
+        btn.auto.classList.toggle("on", autoFire);
+    }
+
+    // One frame of auto-fire: only spend a shell when it can actually land.
+    function autoFireTick() {
+        if (!autoFire || !player.weapon.ready) return;
+        const target = autoAim.target;
+        if (target) {
+            // Wait for the turret to line up, and do not shoot into cover.
+            if (player.tank.aimErrorTo(target.position) > AUTO_FIRE_ARC) return;
+            if (isBlocked(player.tank.muzzle, target.position)) return;
+        }
+        fire(player);
     }
 
     // Switches the player's transmission between automatic and manual. In auto
@@ -2710,6 +2766,7 @@ function startDemo() {
                 player.tank.aimAt(camera.screenToWorld(aimPixel.x, aimPixel.y, canvas), dt);
             }
             setLock(locked);
+            autoFireTick();
         }
 
         // Enemies: the FSM writes their input, then they drive and shoot.

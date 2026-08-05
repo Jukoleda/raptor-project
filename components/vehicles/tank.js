@@ -219,6 +219,16 @@ export default class Tank {
         return this;
     }
 
+    // How far off the gun is from a world point, in degrees (0 = dead on).
+    // Lets callers decide whether it is worth pulling the trigger yet.
+    aimErrorTo(point) {
+        const dx = point.x - this.position.x;
+        const dy = point.y - this.position.y;
+        if (dx === 0 && dy === 0) return 0;
+        const bearing = (Math.atan2(-dx, dy) * 180) / Math.PI;
+        return Math.abs(angleDelta(this.turretAngle, bearing));
+    }
+
     // Aims the gun at a world point (the mouse, a target, ...).
     aimAt(point, dt) {
         const dx = point.x - this.position.x;
