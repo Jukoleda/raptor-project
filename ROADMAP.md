@@ -116,6 +116,9 @@ de teclado WASD/flechas incluido. Demo `drive.html`. Mejoras posibles:
       objetivo y marca en el minimapa.
 - [x] **Fuego automático:** botón/tecla que mantiene el gatillo, espera a que la
       torreta esté alineada y no dispara a través de la cobertura.
+- [x] **Balística en la batalla:** `drive.html` usa el modelo de penetración por
+      cara y ángulo, con tipos de proyectil (AP/APCR/HEAT/HE) y rebote, en vez de
+      daño plano. Blindaje por cara derivado de la silueta (`Armor.forHull`).
 - [ ] **Gamepad** además del teclado.
 - [ ] **Oleadas / puntuación:** hoy es una batalla única; falta progresión.
 - [ ] **Zonas / puntos de interés** en el mapa grande (hoy es una llanura con

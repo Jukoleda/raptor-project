@@ -6,7 +6,7 @@
     <title>Raptor — Batalla de tanques</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/camera.js, components/raptorEngine.js, components/controls/gearbox.js, components/controls/tankController.js, components/controls/tankAI.js, components/controls/autoAim.js, components/vehicles/tank.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/armor.js, controls/driveDemo.js + vendor/gl-matrix-min.js
+        Source: components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/camera.js, components/raptorEngine.js, components/controls/gearbox.js, components/controls/tankController.js, components/controls/tankAI.js, components/controls/autoAim.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/armor.js, components/vehicles/tank.js, controls/driveDemo.js + vendor/gl-matrix-min.js
         Regenerate with: node tools/build-standalone.mjs
         This file is fully self-contained: open it directly in any browser.
     -->
@@ -1363,277 +1363,6 @@ class AutoAim {
     }
 }
 
-// ===== components/vehicles/tank.js =====
-// A tank built out of engine shapes: a hull that drives, plus a turret and a
-// barrel that rotate on top of it *independently* of the hull. That split is
-// the point — a real tank can keep its aim while the hull turns away.
-//
-// Angles follow the engine convention: degrees, counter-clockwise, and local
-// +Y is "forward", so 0° faces up the screen. The turret stores an absolute
-// world angle (not one relative to the hull), which is what you want for
-// aiming: the gun keeps pointing at a target while the hull manoeuvres.
-//
-// Designs (TANK_DESIGNS) vary the *shape* of the hull and turret — rectangle,
-// triangle, hexagon, wedge — along with the driving and traverse stats, so each
-// one handles differently. Feed `design.drive` straight into a TankController.
-
-
-// Every design: hull/turret shape factories, a collision radius, the barrel
-// geometry, driving stats (for TankController) and the turret traverse rate.
-const TANK_DESIGNS = {
-    medium: {
-        id: "medium",
-        name: "Medio",
-        hint: "Equilibrado. Casco rectangular.",
-        radius: 0.42,
-        hull: (gl) => new Rectangle(gl, { width: 0.55, height: 0.8 }),
-        turret: (gl) => new Circle(gl, { radius: 0.22 }),
-        barrel: { width: 0.1, length: 0.5, offset: 0.42 },
-        colors: {
-            hull: { red: 0.27, green: 0.5, blue: 0.32 },
-            turret: { red: 0.22, green: 0.42, blue: 0.28 },
-            barrel: { red: 0.16, green: 0.3, blue: 0.2 },
-        },
-        drive: { accel: 5, maxSpeed: 3, turnSpeed: 140, friction: 5 },
-        traverse: 120,
-        hp: 100,
-        gearbox: { ratios: [0.3, 0.52, 0.75, 1.0], reverseRatio: 0.4, shiftTime: 0.25 },
-        weapon: { damage: 25, reload: 1.1, muzzleSpeed: 11 },
-    },
-
-    light: {
-        id: "light",
-        name: "Ligero",
-        hint: "Rápido y ágil. Casco triangular.",
-        radius: 0.34,
-        hull: (gl) => new Triangle(gl, { width: 0.6, height: 0.85 }),
-        turret: (gl) => new RegularPolygon(gl, { sides: 5, radius: 0.17 }),
-        barrel: { width: 0.08, length: 0.42, offset: 0.36 },
-        colors: {
-            hull: { red: 0.85, green: 0.66, blue: 0.24 },
-            turret: { red: 0.7, green: 0.53, blue: 0.18 },
-            barrel: { red: 0.5, green: 0.38, blue: 0.14 },
-        },
-        drive: { accel: 7.5, maxSpeed: 4.4, turnSpeed: 200, friction: 6 },
-        traverse: 180,
-        hp: 65,
-        gearbox: { ratios: [0.26, 0.45, 0.63, 0.82, 1.0], reverseRatio: 0.45, shiftTime: 0.16 },
-        weapon: { damage: 13, reload: 0.55, muzzleSpeed: 13 },
-    },
-
-    heavy: {
-        id: "heavy",
-        name: "Pesado",
-        hint: "Lento y macizo. Casco hexagonal.",
-        radius: 0.52,
-        hull: (gl) => new RegularPolygon(gl, { sides: 6, radius: 0.56 }),
-        turret: (gl) => new Circle(gl, { radius: 0.3 }),
-        barrel: { width: 0.13, length: 0.62, offset: 0.54 },
-        colors: {
-            hull: { red: 0.42, green: 0.3, blue: 0.34 },
-            turret: { red: 0.34, green: 0.24, blue: 0.28 },
-            barrel: { red: 0.24, green: 0.17, blue: 0.2 },
-        },
-        drive: { accel: 3, maxSpeed: 1.9, turnSpeed: 80, friction: 4 },
-        traverse: 60,
-        hp: 170,
-        gearbox: { ratios: [0.36, 0.68, 1.0], reverseRatio: 0.32, shiftTime: 0.5 },
-        weapon: { damage: 42, reload: 2.2, muzzleSpeed: 9 },
-    },
-
-    hunter: {
-        id: "hunter",
-        name: "Cazacarros",
-        hint: "Nariz en cuña, torreta lenta.",
-        radius: 0.44,
-        // A convex wedge: pointed nose, wide tail. Drawn as a TRIANGLE_FAN.
-        hull: (gl) => new Polygon(gl, {
-            points: [
-                { x: 0, y: 0.52 },
-                { x: 0.36, y: 0.06 },
-                { x: 0.3, y: -0.46 },
-                { x: -0.3, y: -0.46 },
-                { x: -0.36, y: 0.06 },
-            ],
-        }),
-        turret: (gl) => new Square(gl, { size: 0.34 }),
-        barrel: { width: 0.11, length: 0.7, offset: 0.5 },
-        colors: {
-            hull: { red: 0.29, green: 0.38, blue: 0.5 },
-            turret: { red: 0.23, green: 0.31, blue: 0.42 },
-            barrel: { red: 0.16, green: 0.22, blue: 0.31 },
-        },
-        drive: { accel: 5.5, maxSpeed: 3.4, turnSpeed: 105, friction: 5 },
-        traverse: 45,
-        hp: 90,
-        gearbox: { ratios: [0.28, 0.5, 0.74, 1.0], reverseRatio: 0.4, shiftTime: 0.32 },
-        weapon: { damage: 36, reload: 1.7, muzzleSpeed: 14 },
-    },
-};
-
-const DEFAULT_DESIGN = TANK_DESIGNS.medium;
-
-// Shortest signed difference between two angles, in degrees, within (-180, 180].
-function angleDelta(from, to) {
-    return (((to - from + 180) % 360) + 360) % 360 - 180;
-}
-
-// Health bar geometry, in world units. The bar floats above the hull and never
-// rotates with it, so it stays readable however the tank is facing.
-const BAR_HEIGHT = 0.11;
-const BAR_GAP = 0.3;
-const BAR_BACK_COLOR = { red: 0.1, green: 0.11, blue: 0.13 };
-// Fill color by remaining health: healthy, hurt, critical.
-const BAR_FILL_COLORS = [
-    { at: 0.5, color: { red: 0.26, green: 0.75, blue: 0.41 } },
-    { at: 0.2, color: { red: 0.85, green: 0.69, blue: 0.23 } },
-    { at: 0, color: { red: 0.85, green: 0.29, blue: 0.24 } },
-];
-
-class Tank {
-    constructor(gl, { design = DEFAULT_DESIGN, x = 0, y = 0, rotation = 0, turretAngle = null, colors = design.colors } = {}) {
-        this.design = design;
-
-        this.hull = design.hull(gl).setColor(colors.hull)
-            .setPosition({ x, y }).setRotation(rotation).init();
-        this.barrel = new Rectangle(gl, { width: design.barrel.width, height: design.barrel.length })
-            .setColor(colors.barrel).init();
-        this.turret = design.turret(gl).setColor(colors.turret).init();
-
-        // Absolute world angle of the gun; starts aligned with the hull.
-        this.turretAngle = turretAngle ?? rotation;
-
-        // Health. `maxHp` comes from the design; the bar reflects the ratio.
-        this.maxHp = design.hp ?? 100;
-        this.hp = this.maxHp;
-        this.alive = true;
-
-        // Health bar: a dark backing plate with a colored fill on top. The fill
-        // is scaled horizontally (and nudged left) so it empties from the right.
-        this.barWidth = Math.max(0.62, design.radius * 1.9);
-        this.barBack = new Rectangle(gl, { width: this.barWidth + 0.04, height: BAR_HEIGHT + 0.04 })
-            .setColor(BAR_BACK_COLOR).init();
-        this.barFill = new Rectangle(gl, { width: this.barWidth, height: BAR_HEIGHT })
-            .setColor(BAR_FILL_COLORS[0].color).init();
-        this._barBucket = 0; // index into BAR_FILL_COLORS, to avoid re-uploading
-
-        // Draw order: hull, barrel, turret, then the bar on top of everything.
-        this.parts = [this.hull, this.barrel, this.turret, this.barBack, this.barFill];
-        this.sync();
-    }
-
-    get hpRatio() {
-        return this.maxHp > 0 ? Math.max(0, this.hp) / this.maxHp : 0;
-    }
-
-    // Applies damage. Returns true while the tank is still alive.
-    takeDamage(amount) {
-        if (!this.alive) return false;
-        this.hp -= amount;
-        if (this.hp <= 0) {
-            this.hp = 0;
-            this.alive = false;
-        }
-        return this.alive;
-    }
-
-    // How dangerous this design is, regardless of current damage: durability
-    // times sustained damage output. Used by auto-aim to rank threats.
-    get power() {
-        const w = this.design.weapon;
-        return w ? (this.maxHp * w.damage) / w.reload : this.maxHp;
-    }
-
-    // The hull carries the tank's transform — drive it with a TankController.
-    get position() { return this.hull.position; }
-    get rotation() { return this.hull.rotation; }
-    get radius() { return this.design.radius; }
-
-    // Unit vector the gun points along.
-    get turretForward() {
-        const a = (this.turretAngle * Math.PI) / 180;
-        return { x: -Math.sin(a), y: Math.cos(a) };
-    }
-
-    // Where a shell would leave the gun, for wiring up the weapons module.
-    get muzzle() {
-        const f = this.turretForward;
-        const d = this.design.barrel.offset + this.design.barrel.length / 2;
-        return { x: this.position.x + f.x * d, y: this.position.y + f.y * d };
-    }
-
-    addTo(game) {
-        for (const part of this.parts) game.add(part);
-        return this;
-    }
-
-    removeFrom(game) {
-        for (const part of this.parts) game.remove(part);
-        return this;
-    }
-
-    // Rotates the gun toward an absolute angle, capped by the traverse rate.
-    turnTurretTo(angle, dt) {
-        const diff = angleDelta(this.turretAngle, angle);
-        const max = this.design.traverse * dt;
-        this.turretAngle += Math.abs(diff) <= max ? diff : Math.sign(diff) * max;
-        return this;
-    }
-
-    // How far off the gun is from a world point, in degrees (0 = dead on).
-    // Lets callers decide whether it is worth pulling the trigger yet.
-    aimErrorTo(point) {
-        const dx = point.x - this.position.x;
-        const dy = point.y - this.position.y;
-        if (dx === 0 && dy === 0) return 0;
-        const bearing = (Math.atan2(-dx, dy) * 180) / Math.PI;
-        return Math.abs(angleDelta(this.turretAngle, bearing));
-    }
-
-    // Aims the gun at a world point (the mouse, a target, ...).
-    aimAt(point, dt) {
-        const dx = point.x - this.position.x;
-        const dy = point.y - this.position.y;
-        if (dx === 0 && dy === 0) return this;
-        // Inverse of turretForward: the angle whose (-sin, cos) points at (dx, dy).
-        return this.turnTurretTo((Math.atan2(-dx, dy) * 180) / Math.PI, dt);
-    }
-
-    // Manual traverse: dir > 0 turns the gun left (CCW), dir < 0 right.
-    traverse(dir, dt) {
-        this.turretAngle += dir * this.design.traverse * dt;
-        return this;
-    }
-
-    // Places the turret and barrel on the hull, following the gun's own angle.
-    // Call once per frame, after the hull has moved.
-    sync() {
-        const p = this.position;
-        const f = this.turretForward;
-        this.turret.setPosition({ x: p.x, y: p.y }).setRotation(this.turretAngle);
-        this.barrel
-            .setPosition({ x: p.x + f.x * this.design.barrel.offset, y: p.y + f.y * this.design.barrel.offset })
-            .setRotation(this.turretAngle);
-
-        // Health bar, level above the hull whatever way the tank points.
-        const ratio = this.hpRatio;
-        const barY = p.y + this.design.radius + BAR_GAP;
-        this.barBack.setPosition({ x: p.x, y: barY });
-        this.barFill
-            .setScale({ x: ratio, y: 1 })
-            .setPosition({ x: p.x - (this.barWidth * (1 - ratio)) / 2, y: barY });
-
-        // Recolor only when crossing a threshold — setColor re-uploads a buffer.
-        const bucket = BAR_FILL_COLORS.findIndex((b) => ratio > b.at);
-        const next = bucket === -1 ? BAR_FILL_COLORS.length - 1 : bucket;
-        if (next !== this._barBucket) {
-            this._barBucket = next;
-            this.barFill.setColor(BAR_FILL_COLORS[next].color);
-        }
-        return this;
-    }
-}
-
 // ===== components/weapons/ballistics.js =====
 // Ballistics: where bullets meet armor.
 //
@@ -1910,6 +1639,29 @@ class Armor {
         return this.hp;
     }
 
+    // Builds per-face armor for any convex hull by looking at where each face
+    // actually points in the shape's local space: faces within `frontArc` of
+    // local +Y (forward) are frontal, those as far from it are the rear, and the
+    // rest are sides. Works for a rectangle, a wedge, a hexagon — anything with
+    // a counter-clockwise collider outline, which is what the raycast assumes.
+    static forHull(shape, { front, side, rear, hp = 100, frontArc = 75 } = {}) {
+        const points = shape.getColliderVertices();
+        const faces = points.map((p, i) => {
+            const q = points[(i + 1) % points.length];
+            const dx = q.x - p.x;
+            const dy = q.y - p.y;
+            const len = Math.hypot(dx, dy) || 1;
+            // Outward normal of a CCW edge is (dy, -dx); we only need its Y to
+            // know how far the face is turned away from "forward".
+            const ny = -dx / len;
+            const angle = (Math.acos(Math.max(-1, Math.min(1, ny))) * 180) / Math.PI;
+            if (angle <= frontArc) return { armor: front, name: "Frontal" };
+            if (angle >= 180 - frontArc) return { armor: rear, name: "Trasera" };
+            return { armor: side, name: "Lateral" };
+        });
+        return new Armor(shape, faces, { hp });
+    }
+
     // Convenience for a rectangular hull. `frontEdge` is the collider edge that
     // faces the enemy; its opposite becomes the rear, the other two the sides.
     static rectangle(shape, { front, side, rear, frontEdge = 3, hp = 100 } = {}) {
@@ -1918,6 +1670,295 @@ class Armor {
         faces[frontEdge % 4] = { armor: front, name: "Frontal" };
         faces[(frontEdge + 2) % 4] = { armor: rear, name: "Trasera" };
         return new Armor(shape, faces, { hp });
+    }
+}
+
+// ===== components/vehicles/tank.js =====
+// A tank built out of engine shapes: a hull that drives, plus a turret and a
+// barrel that rotate on top of it *independently* of the hull. That split is
+// the point — a real tank can keep its aim while the hull turns away.
+//
+// Angles follow the engine convention: degrees, counter-clockwise, and local
+// +Y is "forward", so 0° faces up the screen. The turret stores an absolute
+// world angle (not one relative to the hull), which is what you want for
+// aiming: the gun keeps pointing at a target while the hull manoeuvres.
+//
+// Designs (TANK_DESIGNS) vary the *shape* of the hull and turret — rectangle,
+// triangle, hexagon, wedge — along with the driving and traverse stats, so each
+// one handles differently. Feed `design.drive` straight into a TankController.
+
+
+// Every design: hull/turret shape factories, a collision radius, the barrel
+// geometry, driving stats (for TankController) and the turret traverse rate.
+const TANK_DESIGNS = {
+    medium: {
+        id: "medium",
+        name: "Medio",
+        hint: "Equilibrado. Casco rectangular.",
+        radius: 0.42,
+        hull: (gl) => new Rectangle(gl, { width: 0.55, height: 0.8 }),
+        turret: (gl) => new Circle(gl, { radius: 0.22 }),
+        barrel: { width: 0.1, length: 0.5, offset: 0.42 },
+        colors: {
+            hull: { red: 0.27, green: 0.5, blue: 0.32 },
+            turret: { red: 0.22, green: 0.42, blue: 0.28 },
+            barrel: { red: 0.16, green: 0.3, blue: 0.2 },
+        },
+        drive: { accel: 5, maxSpeed: 3, turnSpeed: 140, friction: 5 },
+        traverse: 120,
+        hp: 100,
+        gearbox: { ratios: [0.3, 0.52, 0.75, 1.0], reverseRatio: 0.4, shiftTime: 0.25 },
+        armor: { front: 65, side: 38, rear: 28 },
+        weapon: { damage: 25, reload: 1.1, muzzleSpeed: 11, penetration: 95 },
+        ammo: "AP",
+    },
+
+    light: {
+        id: "light",
+        name: "Ligero",
+        hint: "Rápido y ágil. Casco triangular.",
+        radius: 0.34,
+        hull: (gl) => new Triangle(gl, { width: 0.6, height: 0.85 }),
+        turret: (gl) => new RegularPolygon(gl, { sides: 5, radius: 0.17 }),
+        barrel: { width: 0.08, length: 0.42, offset: 0.36 },
+        colors: {
+            hull: { red: 0.85, green: 0.66, blue: 0.24 },
+            turret: { red: 0.7, green: 0.53, blue: 0.18 },
+            barrel: { red: 0.5, green: 0.38, blue: 0.14 },
+        },
+        drive: { accel: 7.5, maxSpeed: 4.4, turnSpeed: 200, friction: 6 },
+        traverse: 180,
+        hp: 65,
+        gearbox: { ratios: [0.26, 0.45, 0.63, 0.82, 1.0], reverseRatio: 0.45, shiftTime: 0.16 },
+        armor: { front: 30, side: 18, rear: 14 },
+        weapon: { damage: 13, reload: 0.55, muzzleSpeed: 13, penetration: 55 },
+        ammo: "APCR",
+    },
+
+    heavy: {
+        id: "heavy",
+        name: "Pesado",
+        hint: "Lento y macizo. Casco hexagonal.",
+        radius: 0.52,
+        hull: (gl) => new RegularPolygon(gl, { sides: 6, radius: 0.56 }),
+        turret: (gl) => new Circle(gl, { radius: 0.3 }),
+        barrel: { width: 0.13, length: 0.62, offset: 0.54 },
+        colors: {
+            hull: { red: 0.42, green: 0.3, blue: 0.34 },
+            turret: { red: 0.34, green: 0.24, blue: 0.28 },
+            barrel: { red: 0.24, green: 0.17, blue: 0.2 },
+        },
+        drive: { accel: 3, maxSpeed: 1.9, turnSpeed: 80, friction: 4 },
+        traverse: 60,
+        hp: 170,
+        gearbox: { ratios: [0.36, 0.68, 1.0], reverseRatio: 0.32, shiftTime: 0.5 },
+        armor: { front: 105, side: 62, rear: 45 },
+        weapon: { damage: 42, reload: 2.2, muzzleSpeed: 9, penetration: 145 },
+        ammo: "AP",
+    },
+
+    hunter: {
+        id: "hunter",
+        name: "Cazacarros",
+        hint: "Nariz en cuña, torreta lenta.",
+        radius: 0.44,
+        // A convex wedge: pointed nose, wide tail. Wound counter-clockwise so the
+        // ballistics layer derives outward face normals (it assumes CCW).
+        hull: (gl) => new Polygon(gl, {
+            points: [
+                { x: -0.36, y: 0.06 },
+                { x: -0.3, y: -0.46 },
+                { x: 0.3, y: -0.46 },
+                { x: 0.36, y: 0.06 },
+                { x: 0, y: 0.52 },
+            ],
+        }),
+        turret: (gl) => new Square(gl, { size: 0.34 }),
+        barrel: { width: 0.11, length: 0.7, offset: 0.5 },
+        colors: {
+            hull: { red: 0.29, green: 0.38, blue: 0.5 },
+            turret: { red: 0.23, green: 0.31, blue: 0.42 },
+            barrel: { red: 0.16, green: 0.22, blue: 0.31 },
+        },
+        drive: { accel: 5.5, maxSpeed: 3.4, turnSpeed: 105, friction: 5 },
+        traverse: 45,
+        hp: 90,
+        gearbox: { ratios: [0.28, 0.5, 0.74, 1.0], reverseRatio: 0.4, shiftTime: 0.32 },
+        armor: { front: 85, side: 42, rear: 30 },
+        weapon: { damage: 36, reload: 1.7, muzzleSpeed: 14, penetration: 125 },
+        ammo: "APCR",
+    },
+};
+
+const DEFAULT_DESIGN = TANK_DESIGNS.medium;
+
+// Shortest signed difference between two angles, in degrees, within (-180, 180].
+function angleDelta(from, to) {
+    return (((to - from + 180) % 360) + 360) % 360 - 180;
+}
+
+// Health bar geometry, in world units. The bar floats above the hull and never
+// rotates with it, so it stays readable however the tank is facing.
+const BAR_HEIGHT = 0.11;
+const BAR_GAP = 0.3;
+const BAR_BACK_COLOR = { red: 0.1, green: 0.11, blue: 0.13 };
+// Fill color by remaining health: healthy, hurt, critical.
+const BAR_FILL_COLORS = [
+    { at: 0.5, color: { red: 0.26, green: 0.75, blue: 0.41 } },
+    { at: 0.2, color: { red: 0.85, green: 0.69, blue: 0.23 } },
+    { at: 0, color: { red: 0.85, green: 0.29, blue: 0.24 } },
+];
+
+class Tank {
+    constructor(gl, { design = DEFAULT_DESIGN, x = 0, y = 0, rotation = 0, turretAngle = null, colors = design.colors } = {}) {
+        this.design = design;
+
+        this.hull = design.hull(gl).setColor(colors.hull)
+            .setPosition({ x, y }).setRotation(rotation).init();
+        this.barrel = new Rectangle(gl, { width: design.barrel.width, height: design.barrel.length })
+            .setColor(colors.barrel).init();
+        this.turret = design.turret(gl).setColor(colors.turret).init();
+
+        // Absolute world angle of the gun; starts aligned with the hull.
+        this.turretAngle = turretAngle ?? rotation;
+
+        // Health. `maxHp` comes from the design; the bar reflects the ratio.
+        this.maxHp = design.hp ?? 100;
+        this.hp = this.maxHp;
+        this.alive = true;
+
+        // Per-face armor derived from the hull's own outline, so angling the
+        // hull changes which plate a shell meets. See Armor.forHull.
+        this.armor = design.armor ? Armor.forHull(this.hull, design.armor) : null;
+
+        // Health bar: a dark backing plate with a colored fill on top. The fill
+        // is scaled horizontally (and nudged left) so it empties from the right.
+        this.barWidth = Math.max(0.62, design.radius * 1.9);
+        this.barBack = new Rectangle(gl, { width: this.barWidth + 0.04, height: BAR_HEIGHT + 0.04 })
+            .setColor(BAR_BACK_COLOR).init();
+        this.barFill = new Rectangle(gl, { width: this.barWidth, height: BAR_HEIGHT })
+            .setColor(BAR_FILL_COLORS[0].color).init();
+        this._barBucket = 0; // index into BAR_FILL_COLORS, to avoid re-uploading
+
+        // Draw order: hull, barrel, turret, then the bar on top of everything.
+        this.parts = [this.hull, this.barrel, this.turret, this.barBack, this.barFill];
+        this.sync();
+    }
+
+    get hpRatio() {
+        return this.maxHp > 0 ? Math.max(0, this.hp) / this.maxHp : 0;
+    }
+
+    // Applies damage. Returns true while the tank is still alive.
+    takeDamage(amount) {
+        if (!this.alive) return false;
+        this.hp -= amount;
+        if (this.hp <= 0) {
+            this.hp = 0;
+            this.alive = false;
+        }
+        return this.alive;
+    }
+
+    // How dangerous this design is, regardless of current damage: durability
+    // times sustained damage output. Used by auto-aim to rank threats.
+    get power() {
+        const w = this.design.weapon;
+        return w ? (this.maxHp * w.damage) / w.reload : this.maxHp;
+    }
+
+    // The hull carries the tank's transform — drive it with a TankController.
+    get position() { return this.hull.position; }
+    get rotation() { return this.hull.rotation; }
+    get radius() { return this.design.radius; }
+
+    // Unit vector the gun points along.
+    get turretForward() {
+        const a = (this.turretAngle * Math.PI) / 180;
+        return { x: -Math.sin(a), y: Math.cos(a) };
+    }
+
+    // Where a shell would leave the gun, for wiring up the weapons module.
+    get muzzle() {
+        const f = this.turretForward;
+        const d = this.design.barrel.offset + this.design.barrel.length / 2;
+        return { x: this.position.x + f.x * d, y: this.position.y + f.y * d };
+    }
+
+    addTo(game) {
+        for (const part of this.parts) game.add(part);
+        return this;
+    }
+
+    removeFrom(game) {
+        for (const part of this.parts) game.remove(part);
+        return this;
+    }
+
+    // Rotates the gun toward an absolute angle, capped by the traverse rate.
+    turnTurretTo(angle, dt) {
+        const diff = angleDelta(this.turretAngle, angle);
+        const max = this.design.traverse * dt;
+        this.turretAngle += Math.abs(diff) <= max ? diff : Math.sign(diff) * max;
+        return this;
+    }
+
+    // Nominal armor of the hull face a shell came through (by collider edge).
+    faceForEdge(index) {
+        return this.armor ? this.armor.faceForEdge(index) : null;
+    }
+
+    // How far off the gun is from a world point, in degrees (0 = dead on).
+    // Lets callers decide whether it is worth pulling the trigger yet.
+    aimErrorTo(point) {
+        const dx = point.x - this.position.x;
+        const dy = point.y - this.position.y;
+        if (dx === 0 && dy === 0) return 0;
+        const bearing = (Math.atan2(-dx, dy) * 180) / Math.PI;
+        return Math.abs(angleDelta(this.turretAngle, bearing));
+    }
+
+    // Aims the gun at a world point (the mouse, a target, ...).
+    aimAt(point, dt) {
+        const dx = point.x - this.position.x;
+        const dy = point.y - this.position.y;
+        if (dx === 0 && dy === 0) return this;
+        // Inverse of turretForward: the angle whose (-sin, cos) points at (dx, dy).
+        return this.turnTurretTo((Math.atan2(-dx, dy) * 180) / Math.PI, dt);
+    }
+
+    // Manual traverse: dir > 0 turns the gun left (CCW), dir < 0 right.
+    traverse(dir, dt) {
+        this.turretAngle += dir * this.design.traverse * dt;
+        return this;
+    }
+
+    // Places the turret and barrel on the hull, following the gun's own angle.
+    // Call once per frame, after the hull has moved.
+    sync() {
+        const p = this.position;
+        const f = this.turretForward;
+        this.turret.setPosition({ x: p.x, y: p.y }).setRotation(this.turretAngle);
+        this.barrel
+            .setPosition({ x: p.x + f.x * this.design.barrel.offset, y: p.y + f.y * this.design.barrel.offset })
+            .setRotation(this.turretAngle);
+
+        // Health bar, level above the hull whatever way the tank points.
+        const ratio = this.hpRatio;
+        const barY = p.y + this.design.radius + BAR_GAP;
+        this.barBack.setPosition({ x: p.x, y: barY });
+        this.barFill
+            .setScale({ x: ratio, y: 1 })
+            .setPosition({ x: p.x - (this.barWidth * (1 - ratio)) / 2, y: barY });
+
+        // Recolor only when crossing a threshold — setColor re-uploads a buffer.
+        const bucket = BAR_FILL_COLORS.findIndex((b) => ratio > b.at);
+        const next = bucket === -1 ? BAR_FILL_COLORS.length - 1 : bucket;
+        if (next !== this._barBucket) {
+            this._barBucket = next;
+            this.barFill.setColor(BAR_FILL_COLORS[next].color);
+        }
+        return this;
     }
 }
 
@@ -1986,6 +2027,15 @@ const SPAWNS = Array.from({ length: ENEMY_COUNT }, (_, i) => {
 });
 
 const WRECK_COLOR = { red: 0.17, green: 0.17, blue: 0.19 };
+
+// Shells the player can load, and how each impact reads on screen.
+const AMMO = [PROJECTILES.AP, PROJECTILES.APCR, PROJECTILES.HEAT, PROJECTILES.HE];
+const IMPACT = {
+    penetration: { label: "PENETRA", color: { red: 0.2, green: 0.9, blue: 0.35 } },
+    splash: { label: "ESQUIRLAS", color: { red: 0.95, green: 0.55, blue: 0.2 } },
+    ricochet: { label: "REBOTE", color: { red: 0.95, green: 0.85, blue: 0.2 } },
+    block: { label: "NO PENETRA", color: { red: 0.9, green: 0.25, blue: 0.2 } },
+};
 
 // Auto-fire holds off until the gun is this close to the locked target, so it
 // spends shells on the target instead of spraying while the turret swings.
@@ -2061,6 +2111,14 @@ const STYLES = `
 
     .tbtn.autofire { background: rgba(92, 48, 30, .6); border-color: rgba(240, 170, 120, .45); font-size: 12px; font-weight: 700; letter-spacing: .04em; }
     .tbtn.autofire.on { background: rgba(190, 95, 45, .85); border-color: #ffbe86; }
+
+    /* Ammo picker + last-impact readout. */
+    .ammo { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    button.shell { text-align: left; line-height: 1.3; padding: 8px 9px; }
+    button.shell.active { border-color: #4a7fb5; background: #2b3a4a; box-shadow: inset 0 0 0 1px #4a7fb5; }
+    button.shell b { display: block; font-size: 13px; }
+    button.shell small { color: #9aa0a6; font-size: 11px; }
+    #impact { font-size: 15px; font-weight: 700; letter-spacing: .03em; margin-top: 12px; }
 
     /* Auto-aim card. */
     .aimrow { display: flex; align-items: center; gap: 10px; }
@@ -2155,23 +2213,6 @@ function segmentHitsBox(a, b, box) {
     return true;
 }
 
-// Segment a→b against a circle — how a shell finds out it hit a tank.
-function segmentHitsCircle(a, b, c, r) {
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const fx = a.x - c.x, fy = a.y - c.y;
-    const A = dx * dx + dy * dy;
-    if (A < 1e-12) return fx * fx + fy * fy <= r * r;
-    const B = 2 * (fx * dx + fy * dy);
-    const C = fx * fx + fy * fy - r * r;
-    if (C <= 0) return true; // started inside
-    const disc = B * B - 4 * A * C;
-    if (disc < 0) return false;
-    const root = Math.sqrt(disc);
-    const t1 = (-B - root) / (2 * A);
-    const t2 = (-B + root) / (2 * A);
-    return (t1 >= 0 && t1 <= 1) || (t2 >= 0 && t2 <= 1);
-}
-
 function startDemo() {
     document.head.append(el("style", { textContent: STYLES }));
 
@@ -2248,6 +2289,8 @@ function startDemo() {
     let autoAim = null;               // AutoAim bound to the player's tank
     let lockedOn = null;              // the tank the reticle is currently drawn on
     let autoFire = false;             // holds the trigger for you when on
+    let ammo = PROJECTILES.AP;        // the shell the player has loaded
+    const markers = [];               // fading impact dots
 
     const camera = game.camera;
     camera.smoothing = 6;
@@ -2339,6 +2382,16 @@ function startDemo() {
     const aimName = el("b", { textContent: "Desactivado" });
     const aimBtn = el("button", { textContent: "Cambiar modo (T)", onclick: () => cycleAim() });
     const aimTarget = el("div", { className: "target", textContent: "Sin objetivo" });
+    // Ammo picker: each shell bends the penetration model differently.
+    const ammoBtns = AMMO.map((type) =>
+        el("button", { className: "shell", onclick: () => setAmmo(type) }, [
+            el("b", { textContent: type.name }),
+            el("small", { textContent: "" }),
+        ]),
+    );
+    const impactLine = el("div", { id: "impact", textContent: "—" });
+    const kFace = kv("Cara"), kAngle = kv("Ángulo"), kEff = kv("Blindaje efectivo"), kPen = kv("Penetración");
+
     const autoFireDot = el("span", { className: "dot" });
     const autoFireName = el("b", { textContent: "Fuego manual" });
     const autoFireBtn = el("button", { textContent: "Fuego automático (F)", onclick: () => toggleAutoFire() });
@@ -2358,6 +2411,12 @@ function startDemo() {
             el("div", { className: "row" }, [hpBar]),
             kHp.row, kSpeed.row, kTurret.row, kAmmo.row,
             el("div", { className: "hint", textContent: "Teclas 1-4 cambian de tanque (reinicia la batalla)" }),
+        ]),
+        el("div", { className: "card" }, [
+            el("h2", { textContent: "Munición y blindaje" }),
+            el("div", { className: "ammo" }, ammoBtns),
+            impactLine, kFace.row, kAngle.row, kEff.row, kPen.row,
+            el("div", { className: "hint", textContent: "C cambia de proyectil · el blindaje efectivo crece con el ángulo" }),
         ]),
         el("div", { className: "card" }, [
             el("h2", { textContent: "Auto-apuntado" }), aimWidget,
@@ -2391,6 +2450,8 @@ function startDemo() {
         get autoAim() { return autoAim; },
         get autoFire() { return autoFire; },
         get blocks() { return blocks; },
+        ammoId: () => ammo.id,
+        cycleAmmo, firePlayer,
         get colliders() { return colliders; },
         toggleAutoFire,
         get lockedOn() { return lockedOn; },
@@ -2425,6 +2486,7 @@ function startDemo() {
         else if (k === "e") manualTraverse = -1;
         else if (k === "t") cycleAim();
         else if (k === "f") toggleAutoFire();
+        else if (k === "c") cycleAmmo();
         else if (k === "g") setGearMode();
         else if (k === "x") shift(1);
         else if (k === "z") shift(-1);
@@ -2444,6 +2506,37 @@ function startDemo() {
         const v = el("span", { className: "v", textContent: "—" });
         const row = el("div", { className: "kv" }, [el("span", { className: "k", textContent: label }), v]);
         return { row, v };
+    }
+
+    // Loads a shell type and refreshes the picker's stat line.
+    function setAmmo(type) {
+        ammo = type;
+        refreshAmmo();
+    }
+
+    function cycleAmmo() {
+        setAmmo(AMMO[(AMMO.indexOf(ammo) + 1) % AMMO.length]);
+    }
+
+    function refreshAmmo() {
+        const gun = player ? player.tank.design.weapon : null;
+        AMMO.forEach((type, i) => {
+            ammoBtns[i].classList.toggle("active", type === ammo);
+            ammoBtns[i].querySelector("small").textContent = gun
+                ? `${Math.round(gun.penetration * type.penMultiplier)} mm · ${Math.round(gun.damage * type.damageMultiplier)} daño`
+                : "";
+        });
+    }
+
+    // Panel readout for the player's own shots.
+    function showImpact(key, unit, face, shot, penetration) {
+        const info = IMPACT[key];
+        impactLine.textContent = `${info.label} · ${shot.type.name}`;
+        impactLine.style.color = `rgb(${[info.color.red, info.color.green, info.color.blue].map((c) => Math.round(c * 255)).join(",")})`;
+        kFace.v.textContent = `${face.name} de ${unit.tank.design.name} (${face.armor} mm)`;
+        kAngle.v.textContent = `${shot.angle.toFixed(0)}°`;
+        kEff.v.textContent = Number.isFinite(shot.effectiveArmor) ? `${shot.effectiveArmor.toFixed(0)} mm` : "∞";
+        kPen.v.textContent = `${Math.round(penetration)} mm`;
     }
 
     // Steps the auto-aim policy: off → nearest → weakest → toughest → strongest.
@@ -2511,7 +2604,7 @@ function startDemo() {
         // to manual, so the enemies always shift automatically.
         const gearbox = new Gearbox({ ...d.gearbox, mode: enemy ? GEARBOX_MODE.AUTO : gearMode });
         const driver = new TankController(tank.hull, { ...d.drive, bounds: TANK_BOUNDS, gearbox });
-        const weapon = new Weapon({ ...d.weapon, penetration: 999 });
+        const weapon = new Weapon({ ...d.weapon });
         const unit = { tank, driver, weapon, gearbox, ai: null, enemy };
 
         if (enemy) {
@@ -2533,6 +2626,8 @@ function startDemo() {
         shells = [];
         for (const tick of reticle) game.remove(tick);
         lockedOn = null;
+        for (const m of markers) game.remove(m.shape);
+        markers.length = 0;
         enemies = [];
         player = null;
     }
@@ -2552,6 +2647,10 @@ function startDemo() {
         camera.centerOn(player.tank.position.x, player.tank.position.y);
         setGearMode(gearMode);
         refreshAimUi();
+        refreshAmmo();
+        impactLine.textContent = "—";
+        impactLine.style.color = "";
+        kFace.v.textContent = kAngle.v.textContent = kEff.v.textContent = kPen.v.textContent = "—";
         buildRoster();
         for (let i = 0; i < GARAGE.length; i++) garageBtns[i].classList.toggle("active", GARAGE[i] === design);
     }
@@ -2586,7 +2685,8 @@ function startDemo() {
         if (over || !unit.tank.alive || !unit.weapon.ready) return;
         const muzzle = unit.tank.muzzle;
         const dir = unit.tank.turretForward;
-        const bullet = unit.weapon.fire(muzzle.x, muzzle.y, dir.x, dir.y, unit);
+        const shell = unit.enemy ? (PROJECTILES[unit.tank.design.ammo] ?? PROJECTILES.AP) : ammo;
+        const bullet = unit.weapon.fire(muzzle.x, muzzle.y, dir.x, dir.y, unit, shell);
         if (!bullet) return;
         const entity = new Circle(gl, { radius: 0.075 })
             .setColor(unit.enemy ? { red: 1, green: 0.55, blue: 0.35 } : { red: 1, green: 0.85, blue: 0.3 })
@@ -2609,23 +2709,62 @@ function startDemo() {
         unit.driver.speed = 0;
     }
 
+    // A shell that hit armor: run the penetration model for its type against the
+    // face it actually struck, then apply what that means.
+    function resolveImpact(shell, unit, hit) {
+        const b = shell.bullet;
+        const face = unit.tank.faceForEdge(hit.edgeIndex);
+        const shot = resolveShot({
+            type: b.type,
+            penetration: b.penetration,
+            damage: b.damage,
+            direction: b.direction,
+            normal: hit.normal,
+            armor: face.armor,
+        });
+
+        const key = shot.result === "block" && shot.damage > 0 ? "splash" : shot.result;
+        spawnMarker(hit.point, key);
+        if (b.owner === player) showImpact(key, unit, face, shot, b.penetration);
+
+        if (shot.damage > 0) {
+            unit.tank.takeDamage(shot.damage);
+            if (!unit.tank.alive) destroy(unit);
+        }
+
+        if (shot.result === "ricochet") {
+            // Skips off and keeps flying, slower and with less punch left.
+            b.velocity = reflect(b.velocity, hit.normal);
+            b.velocity.x *= 0.7;
+            b.velocity.y *= 0.7;
+            b.penetration *= 0.8;
+            b.position = { x: hit.point.x + hit.normal.x * 0.06, y: hit.point.y + hit.normal.y * 0.06 };
+            b.prev = { x: b.position.x, y: b.position.y };
+            return;
+        }
+        b.alive = false;
+    }
+
     function updateShells(dt) {
         for (const shell of shells.slice()) {
             const b = shell.bullet;
             b.update(dt);
 
-            // Hit the first tank on the swept segment (never its own shooter).
+            // Raycast the swept segment against every hull and take the nearest
+            // hit, so a shell cannot pass through a tank standing in front.
+            let best = null;
             for (const unit of [player, ...enemies]) {
                 if (!unit.tank.alive || unit === b.owner) continue;
-                if (!segmentHitsCircle(b.prev, b.position, unit.tank.position, unit.tank.radius)) continue;
-                unit.tank.takeDamage(b.damage);
-                if (!unit.tank.alive) destroy(unit);
-                b.alive = false;
-                break;
+                const hit = raycastShape(b.prev, b.position, unit.tank.hull);
+                if (hit && (!best || hit.t < best.hit.t)) best = { unit, hit };
             }
+            if (best) resolveImpact(shell, best.unit, best.hit);
 
             // Scenery stops shells too.
-            if (b.alive && colliders.some((box) => segmentHitsBox(b.prev, b.position, box))) b.alive = false;
+            if (b.alive && !best && colliders.some((box) => segmentHitsBox(b.prev, b.position, box))) {
+                spawnMarker(b.position, "block");
+                b.alive = false;
+            }
 
             if (!b.alive) {
                 game.remove(shell.entity);
@@ -2634,6 +2773,23 @@ function startDemo() {
                 shell.entity.setPosition(b.position);
             }
         }
+
+        // Fade out the impact dots.
+        for (const marker of markers.slice()) {
+            marker.life -= dt;
+            if (marker.life <= 0) {
+                game.remove(marker.shape);
+                markers.splice(markers.indexOf(marker), 1);
+            }
+        }
+    }
+
+    // A short-lived dot where a shell met armor, coloured by what happened.
+    function spawnMarker(point, key) {
+        const shape = new Circle(gl, { radius: 0.14 })
+            .setColor(IMPACT[key].color).setPosition(point).init();
+        game.add(shape);
+        markers.push({ shape, life: 0.45 });
     }
 
     // --- Physics-lite: keep bodies out of the scenery and out of each other ---

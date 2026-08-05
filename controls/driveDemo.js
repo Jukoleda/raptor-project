@@ -13,7 +13,7 @@ import RaptorEngine from "../components/raptorEngine.js";
 import { Rectangle, Square, Circle } from "../components/shapes/index.js";
 import { TankController, TankAI, AI_STATE_LABEL, Gearbox, GEARBOX_MODE, AutoAim, AIM_MODE } from "../components/controls/index.js";
 import { Tank, TANK_DESIGNS } from "../components/vehicles/index.js";
-import { Weapon } from "../components/weapons/index.js";
+import { Weapon, PROJECTILES, raycastShape, resolveShot, reflect } from "../components/weapons/index.js";
 
 // The map is much larger than the view, so the camera has to follow the tank.
 // Visible half-extents come from the engine's projection (perspective FOV 45°
@@ -67,6 +67,15 @@ const SPAWNS = Array.from({ length: ENEMY_COUNT }, (_, i) => {
 });
 
 const WRECK_COLOR = { red: 0.17, green: 0.17, blue: 0.19 };
+
+// Shells the player can load, and how each impact reads on screen.
+const AMMO = [PROJECTILES.AP, PROJECTILES.APCR, PROJECTILES.HEAT, PROJECTILES.HE];
+const IMPACT = {
+    penetration: { label: "PENETRA", color: { red: 0.2, green: 0.9, blue: 0.35 } },
+    splash: { label: "ESQUIRLAS", color: { red: 0.95, green: 0.55, blue: 0.2 } },
+    ricochet: { label: "REBOTE", color: { red: 0.95, green: 0.85, blue: 0.2 } },
+    block: { label: "NO PENETRA", color: { red: 0.9, green: 0.25, blue: 0.2 } },
+};
 
 // Auto-fire holds off until the gun is this close to the locked target, so it
 // spends shells on the target instead of spraying while the turret swings.
@@ -142,6 +151,14 @@ const STYLES = `
 
     .tbtn.autofire { background: rgba(92, 48, 30, .6); border-color: rgba(240, 170, 120, .45); font-size: 12px; font-weight: 700; letter-spacing: .04em; }
     .tbtn.autofire.on { background: rgba(190, 95, 45, .85); border-color: #ffbe86; }
+
+    /* Ammo picker + last-impact readout. */
+    .ammo { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    button.shell { text-align: left; line-height: 1.3; padding: 8px 9px; }
+    button.shell.active { border-color: #4a7fb5; background: #2b3a4a; box-shadow: inset 0 0 0 1px #4a7fb5; }
+    button.shell b { display: block; font-size: 13px; }
+    button.shell small { color: #9aa0a6; font-size: 11px; }
+    #impact { font-size: 15px; font-weight: 700; letter-spacing: .03em; margin-top: 12px; }
 
     /* Auto-aim card. */
     .aimrow { display: flex; align-items: center; gap: 10px; }
@@ -236,23 +253,6 @@ function segmentHitsBox(a, b, box) {
     return true;
 }
 
-// Segment a→b against a circle — how a shell finds out it hit a tank.
-function segmentHitsCircle(a, b, c, r) {
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const fx = a.x - c.x, fy = a.y - c.y;
-    const A = dx * dx + dy * dy;
-    if (A < 1e-12) return fx * fx + fy * fy <= r * r;
-    const B = 2 * (fx * dx + fy * dy);
-    const C = fx * fx + fy * fy - r * r;
-    if (C <= 0) return true; // started inside
-    const disc = B * B - 4 * A * C;
-    if (disc < 0) return false;
-    const root = Math.sqrt(disc);
-    const t1 = (-B - root) / (2 * A);
-    const t2 = (-B + root) / (2 * A);
-    return (t1 >= 0 && t1 <= 1) || (t2 >= 0 && t2 <= 1);
-}
-
 function startDemo() {
     document.head.append(el("style", { textContent: STYLES }));
 
@@ -329,6 +329,8 @@ function startDemo() {
     let autoAim = null;               // AutoAim bound to the player's tank
     let lockedOn = null;              // the tank the reticle is currently drawn on
     let autoFire = false;             // holds the trigger for you when on
+    let ammo = PROJECTILES.AP;        // the shell the player has loaded
+    const markers = [];               // fading impact dots
 
     const camera = game.camera;
     camera.smoothing = 6;
@@ -420,6 +422,16 @@ function startDemo() {
     const aimName = el("b", { textContent: "Desactivado" });
     const aimBtn = el("button", { textContent: "Cambiar modo (T)", onclick: () => cycleAim() });
     const aimTarget = el("div", { className: "target", textContent: "Sin objetivo" });
+    // Ammo picker: each shell bends the penetration model differently.
+    const ammoBtns = AMMO.map((type) =>
+        el("button", { className: "shell", onclick: () => setAmmo(type) }, [
+            el("b", { textContent: type.name }),
+            el("small", { textContent: "" }),
+        ]),
+    );
+    const impactLine = el("div", { id: "impact", textContent: "—" });
+    const kFace = kv("Cara"), kAngle = kv("Ángulo"), kEff = kv("Blindaje efectivo"), kPen = kv("Penetración");
+
     const autoFireDot = el("span", { className: "dot" });
     const autoFireName = el("b", { textContent: "Fuego manual" });
     const autoFireBtn = el("button", { textContent: "Fuego automático (F)", onclick: () => toggleAutoFire() });
@@ -439,6 +451,12 @@ function startDemo() {
             el("div", { className: "row" }, [hpBar]),
             kHp.row, kSpeed.row, kTurret.row, kAmmo.row,
             el("div", { className: "hint", textContent: "Teclas 1-4 cambian de tanque (reinicia la batalla)" }),
+        ]),
+        el("div", { className: "card" }, [
+            el("h2", { textContent: "Munición y blindaje" }),
+            el("div", { className: "ammo" }, ammoBtns),
+            impactLine, kFace.row, kAngle.row, kEff.row, kPen.row,
+            el("div", { className: "hint", textContent: "C cambia de proyectil · el blindaje efectivo crece con el ángulo" }),
         ]),
         el("div", { className: "card" }, [
             el("h2", { textContent: "Auto-apuntado" }), aimWidget,
@@ -472,6 +490,8 @@ function startDemo() {
         get autoAim() { return autoAim; },
         get autoFire() { return autoFire; },
         get blocks() { return blocks; },
+        ammoId: () => ammo.id,
+        cycleAmmo, firePlayer,
         get colliders() { return colliders; },
         toggleAutoFire,
         get lockedOn() { return lockedOn; },
@@ -506,6 +526,7 @@ function startDemo() {
         else if (k === "e") manualTraverse = -1;
         else if (k === "t") cycleAim();
         else if (k === "f") toggleAutoFire();
+        else if (k === "c") cycleAmmo();
         else if (k === "g") setGearMode();
         else if (k === "x") shift(1);
         else if (k === "z") shift(-1);
@@ -525,6 +546,37 @@ function startDemo() {
         const v = el("span", { className: "v", textContent: "—" });
         const row = el("div", { className: "kv" }, [el("span", { className: "k", textContent: label }), v]);
         return { row, v };
+    }
+
+    // Loads a shell type and refreshes the picker's stat line.
+    function setAmmo(type) {
+        ammo = type;
+        refreshAmmo();
+    }
+
+    function cycleAmmo() {
+        setAmmo(AMMO[(AMMO.indexOf(ammo) + 1) % AMMO.length]);
+    }
+
+    function refreshAmmo() {
+        const gun = player ? player.tank.design.weapon : null;
+        AMMO.forEach((type, i) => {
+            ammoBtns[i].classList.toggle("active", type === ammo);
+            ammoBtns[i].querySelector("small").textContent = gun
+                ? `${Math.round(gun.penetration * type.penMultiplier)} mm · ${Math.round(gun.damage * type.damageMultiplier)} daño`
+                : "";
+        });
+    }
+
+    // Panel readout for the player's own shots.
+    function showImpact(key, unit, face, shot, penetration) {
+        const info = IMPACT[key];
+        impactLine.textContent = `${info.label} · ${shot.type.name}`;
+        impactLine.style.color = `rgb(${[info.color.red, info.color.green, info.color.blue].map((c) => Math.round(c * 255)).join(",")})`;
+        kFace.v.textContent = `${face.name} de ${unit.tank.design.name} (${face.armor} mm)`;
+        kAngle.v.textContent = `${shot.angle.toFixed(0)}°`;
+        kEff.v.textContent = Number.isFinite(shot.effectiveArmor) ? `${shot.effectiveArmor.toFixed(0)} mm` : "∞";
+        kPen.v.textContent = `${Math.round(penetration)} mm`;
     }
 
     // Steps the auto-aim policy: off → nearest → weakest → toughest → strongest.
@@ -592,7 +644,7 @@ function startDemo() {
         // to manual, so the enemies always shift automatically.
         const gearbox = new Gearbox({ ...d.gearbox, mode: enemy ? GEARBOX_MODE.AUTO : gearMode });
         const driver = new TankController(tank.hull, { ...d.drive, bounds: TANK_BOUNDS, gearbox });
-        const weapon = new Weapon({ ...d.weapon, penetration: 999 });
+        const weapon = new Weapon({ ...d.weapon });
         const unit = { tank, driver, weapon, gearbox, ai: null, enemy };
 
         if (enemy) {
@@ -614,6 +666,8 @@ function startDemo() {
         shells = [];
         for (const tick of reticle) game.remove(tick);
         lockedOn = null;
+        for (const m of markers) game.remove(m.shape);
+        markers.length = 0;
         enemies = [];
         player = null;
     }
@@ -633,6 +687,10 @@ function startDemo() {
         camera.centerOn(player.tank.position.x, player.tank.position.y);
         setGearMode(gearMode);
         refreshAimUi();
+        refreshAmmo();
+        impactLine.textContent = "—";
+        impactLine.style.color = "";
+        kFace.v.textContent = kAngle.v.textContent = kEff.v.textContent = kPen.v.textContent = "—";
         buildRoster();
         for (let i = 0; i < GARAGE.length; i++) garageBtns[i].classList.toggle("active", GARAGE[i] === design);
     }
@@ -667,7 +725,8 @@ function startDemo() {
         if (over || !unit.tank.alive || !unit.weapon.ready) return;
         const muzzle = unit.tank.muzzle;
         const dir = unit.tank.turretForward;
-        const bullet = unit.weapon.fire(muzzle.x, muzzle.y, dir.x, dir.y, unit);
+        const shell = unit.enemy ? (PROJECTILES[unit.tank.design.ammo] ?? PROJECTILES.AP) : ammo;
+        const bullet = unit.weapon.fire(muzzle.x, muzzle.y, dir.x, dir.y, unit, shell);
         if (!bullet) return;
         const entity = new Circle(gl, { radius: 0.075 })
             .setColor(unit.enemy ? { red: 1, green: 0.55, blue: 0.35 } : { red: 1, green: 0.85, blue: 0.3 })
@@ -690,23 +749,62 @@ function startDemo() {
         unit.driver.speed = 0;
     }
 
+    // A shell that hit armor: run the penetration model for its type against the
+    // face it actually struck, then apply what that means.
+    function resolveImpact(shell, unit, hit) {
+        const b = shell.bullet;
+        const face = unit.tank.faceForEdge(hit.edgeIndex);
+        const shot = resolveShot({
+            type: b.type,
+            penetration: b.penetration,
+            damage: b.damage,
+            direction: b.direction,
+            normal: hit.normal,
+            armor: face.armor,
+        });
+
+        const key = shot.result === "block" && shot.damage > 0 ? "splash" : shot.result;
+        spawnMarker(hit.point, key);
+        if (b.owner === player) showImpact(key, unit, face, shot, b.penetration);
+
+        if (shot.damage > 0) {
+            unit.tank.takeDamage(shot.damage);
+            if (!unit.tank.alive) destroy(unit);
+        }
+
+        if (shot.result === "ricochet") {
+            // Skips off and keeps flying, slower and with less punch left.
+            b.velocity = reflect(b.velocity, hit.normal);
+            b.velocity.x *= 0.7;
+            b.velocity.y *= 0.7;
+            b.penetration *= 0.8;
+            b.position = { x: hit.point.x + hit.normal.x * 0.06, y: hit.point.y + hit.normal.y * 0.06 };
+            b.prev = { x: b.position.x, y: b.position.y };
+            return;
+        }
+        b.alive = false;
+    }
+
     function updateShells(dt) {
         for (const shell of shells.slice()) {
             const b = shell.bullet;
             b.update(dt);
 
-            // Hit the first tank on the swept segment (never its own shooter).
+            // Raycast the swept segment against every hull and take the nearest
+            // hit, so a shell cannot pass through a tank standing in front.
+            let best = null;
             for (const unit of [player, ...enemies]) {
                 if (!unit.tank.alive || unit === b.owner) continue;
-                if (!segmentHitsCircle(b.prev, b.position, unit.tank.position, unit.tank.radius)) continue;
-                unit.tank.takeDamage(b.damage);
-                if (!unit.tank.alive) destroy(unit);
-                b.alive = false;
-                break;
+                const hit = raycastShape(b.prev, b.position, unit.tank.hull);
+                if (hit && (!best || hit.t < best.hit.t)) best = { unit, hit };
             }
+            if (best) resolveImpact(shell, best.unit, best.hit);
 
             // Scenery stops shells too.
-            if (b.alive && colliders.some((box) => segmentHitsBox(b.prev, b.position, box))) b.alive = false;
+            if (b.alive && !best && colliders.some((box) => segmentHitsBox(b.prev, b.position, box))) {
+                spawnMarker(b.position, "block");
+                b.alive = false;
+            }
 
             if (!b.alive) {
                 game.remove(shell.entity);
@@ -715,6 +813,23 @@ function startDemo() {
                 shell.entity.setPosition(b.position);
             }
         }
+
+        // Fade out the impact dots.
+        for (const marker of markers.slice()) {
+            marker.life -= dt;
+            if (marker.life <= 0) {
+                game.remove(marker.shape);
+                markers.splice(markers.indexOf(marker), 1);
+            }
+        }
+    }
+
+    // A short-lived dot where a shell met armor, coloured by what happened.
+    function spawnMarker(point, key) {
+        const shape = new Circle(gl, { radius: 0.14 })
+            .setColor(IMPACT[key].color).setPosition(point).init();
+        game.add(shape);
+        markers.push({ shape, life: 0.45 });
     }
 
     // --- Physics-lite: keep bodies out of the scenery and out of each other ---

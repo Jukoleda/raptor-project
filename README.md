@@ -272,6 +272,41 @@ tank.sync();                 // coloca torreta y cañón sobre el casco
 // tank.muzzle -> boca del cañón, listo para el módulo de armas
 ```
 
+## Blindaje y balística en la batalla
+
+`drive.html` **usa el modelo de penetración completo** de
+`components/weapons/`, no daño plano: los proyectiles se lanzan por *raycast*
+contra el **casco poligonal** de cada tanque, así que importa **qué cara**
+golpean y **con qué ángulo**.
+
+- **Blindaje por cara**, deducido de la propia silueta del casco con
+  `Armor.forHull(shape, { front, side, rear })`: cada arista se clasifica según
+  hacia dónde mira en el espacio local (frontal si está a menos de 75° del
+  «adelante» local, trasera si está igual de lejos, lateral el resto). Sale
+  gratis para cualquier casco convexo — el rectángulo da 1 frontal / 2 laterales
+  / 1 trasera, el triángulo del Ligero **dos caras de nariz**, el hexágono 2/2/2
+  y la cuña del Cazacarros 2 frontales / 2 laterales / 1 trasera.
+- **Tipos de proyectil** seleccionables (**C**): AP, APCR, HEAT y HE, cada uno
+  con su penetración, daño, umbral de rebote y sensibilidad al ángulo.
+- **Rebote**: un proyectil que patina sigue volando, más lento y con menos
+  penetración — puede acabar impactando en otra cosa.
+
+| Diseño | Frontal | Lateral | Trasera | Cañón |
+|--------|:---:|:---:|:---:|:---:|
+| **Ligero** | 30 | 18 | 14 | 55 mm |
+| **Medio** | 65 | 38 | 28 | 95 mm |
+| **Cazacarros** | 85 | 42 | 30 | 125 mm |
+| **Pesado** | 105 | 62 | 45 | 145 mm |
+
+Esto le da profundidad táctica real: un Medio (95 mm) **no atraviesa** el frontal
+de un Pesado, pero sí su costado — o puede cargar **HEAT** (114 mm, que ignora la
+inclinación) para perforarlo de frente. Y la nariz triangular del Ligero
+**desvía** proyectiles perforantes que la golpean muy oblicuos.
+
+> El casco de la cuña se reorientó a sentido **antihorario** al integrarlo: el
+> raycast deduce la normal saliente asumiendo esa dirección, y con el orden
+> anterior todas sus caras habrían rebotado siempre.
+
 ## Auto-apuntado
 
 `components/controls/AutoAim` cede la torreta a una política de selección de

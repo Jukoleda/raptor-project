@@ -16,6 +16,7 @@ import Square from "../shapes/square.js";
 import Triangle from "../shapes/triangle.js";
 import Circle from "../shapes/circle.js";
 import { Polygon, RegularPolygon } from "../shapes/polygon.js";
+import Armor from "../weapons/armor.js";
 
 // Every design: hull/turret shape factories, a collision radius, the barrel
 // geometry, driving stats (for TankController) and the turret traverse rate.
@@ -37,7 +38,9 @@ export const TANK_DESIGNS = {
         traverse: 120,
         hp: 100,
         gearbox: { ratios: [0.3, 0.52, 0.75, 1.0], reverseRatio: 0.4, shiftTime: 0.25 },
-        weapon: { damage: 25, reload: 1.1, muzzleSpeed: 11 },
+        armor: { front: 65, side: 38, rear: 28 },
+        weapon: { damage: 25, reload: 1.1, muzzleSpeed: 11, penetration: 95 },
+        ammo: "AP",
     },
 
     light: {
@@ -57,7 +60,9 @@ export const TANK_DESIGNS = {
         traverse: 180,
         hp: 65,
         gearbox: { ratios: [0.26, 0.45, 0.63, 0.82, 1.0], reverseRatio: 0.45, shiftTime: 0.16 },
-        weapon: { damage: 13, reload: 0.55, muzzleSpeed: 13 },
+        armor: { front: 30, side: 18, rear: 14 },
+        weapon: { damage: 13, reload: 0.55, muzzleSpeed: 13, penetration: 55 },
+        ammo: "APCR",
     },
 
     heavy: {
@@ -77,7 +82,9 @@ export const TANK_DESIGNS = {
         traverse: 60,
         hp: 170,
         gearbox: { ratios: [0.36, 0.68, 1.0], reverseRatio: 0.32, shiftTime: 0.5 },
-        weapon: { damage: 42, reload: 2.2, muzzleSpeed: 9 },
+        armor: { front: 105, side: 62, rear: 45 },
+        weapon: { damage: 42, reload: 2.2, muzzleSpeed: 9, penetration: 145 },
+        ammo: "AP",
     },
 
     hunter: {
@@ -85,14 +92,15 @@ export const TANK_DESIGNS = {
         name: "Cazacarros",
         hint: "Nariz en cuña, torreta lenta.",
         radius: 0.44,
-        // A convex wedge: pointed nose, wide tail. Drawn as a TRIANGLE_FAN.
+        // A convex wedge: pointed nose, wide tail. Wound counter-clockwise so the
+        // ballistics layer derives outward face normals (it assumes CCW).
         hull: (gl) => new Polygon(gl, {
             points: [
-                { x: 0, y: 0.52 },
-                { x: 0.36, y: 0.06 },
-                { x: 0.3, y: -0.46 },
-                { x: -0.3, y: -0.46 },
                 { x: -0.36, y: 0.06 },
+                { x: -0.3, y: -0.46 },
+                { x: 0.3, y: -0.46 },
+                { x: 0.36, y: 0.06 },
+                { x: 0, y: 0.52 },
             ],
         }),
         turret: (gl) => new Square(gl, { size: 0.34 }),
@@ -106,7 +114,9 @@ export const TANK_DESIGNS = {
         traverse: 45,
         hp: 90,
         gearbox: { ratios: [0.28, 0.5, 0.74, 1.0], reverseRatio: 0.4, shiftTime: 0.32 },
-        weapon: { damage: 36, reload: 1.7, muzzleSpeed: 14 },
+        armor: { front: 85, side: 42, rear: 30 },
+        weapon: { damage: 36, reload: 1.7, muzzleSpeed: 14, penetration: 125 },
+        ammo: "APCR",
     },
 };
 
@@ -146,6 +156,10 @@ export default class Tank {
         this.maxHp = design.hp ?? 100;
         this.hp = this.maxHp;
         this.alive = true;
+
+        // Per-face armor derived from the hull's own outline, so angling the
+        // hull changes which plate a shell meets. See Armor.forHull.
+        this.armor = design.armor ? Armor.forHull(this.hull, design.armor) : null;
 
         // Health bar: a dark backing plate with a colored fill on top. The fill
         // is scaled horizontally (and nudged left) so it empties from the right.
@@ -217,6 +231,11 @@ export default class Tank {
         const max = this.design.traverse * dt;
         this.turretAngle += Math.abs(diff) <= max ? diff : Math.sign(diff) * max;
         return this;
+    }
+
+    // Nominal armor of the hull face a shell came through (by collider edge).
+    faceForEdge(index) {
+        return this.armor ? this.armor.faceForEdge(index) : null;
     }
 
     // How far off the gun is from a world point, in degrees (0 = dead on).

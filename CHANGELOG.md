@@ -6,6 +6,30 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Balística en la batalla)
+- **`drive.html` pasa a usar el modelo de penetración completo** en vez de daño
+  plano: los proyectiles se lanzan por *raycast* contra el **casco poligonal** de
+  cada tanque (`raycastShape`), y el impacto se resuelve con `resolveShot`, de
+  modo que importan la **cara golpeada** y el **ángulo**.
+- **`Armor.forHull(shape, {front, side, rear})`**: deriva el blindaje por cara de
+  la propia silueta del casco, clasificando cada arista según hacia dónde mira en
+  el espacio local. Funciona con cualquier casco convexo — rectángulo, triángulo,
+  hexágono y cuña reparten sus caras solos.
+- **Blindaje, penetración y munición por diseño**: Ligero 30/18/14 con cañón de
+  55 mm … Pesado 105/62/45 con 145 mm. Los enemigos cargan el proyectil de su
+  diseño; el jugador elige entre **AP, APCR, HEAT y HE** con la tecla **C**.
+- **Rebote**: un proyectil que patina **sigue volando**, más lento y con menos
+  penetración, y puede impactar en otra cosa.
+- **HUD**: marcadores de impacto de colores en el mundo (penetra / esquirlas /
+  rebote / no penetra) e informe en el panel con cara, ángulo, **blindaje
+  efectivo** y penetración.
+
+### Corregido
+- **Winding del casco en cuña** (`Cazacarros`): estaba definido en sentido
+  horario, y `raycastShape` deduce la normal saliente asumiendo **antihorario**.
+  Con el orden anterior sus normales apuntaban hacia dentro, así que todos los
+  impactos contra ese casco se habrían resuelto como rebote.
+
 ### Añadido (Mapa y puntería)
 - **Arena diez veces mayor**: `drive.html` pasa de 18 × 13 a **57 × 41** unidades
   (√10 más larga por lado, es decir **10× el área**), con **78 obstáculos**
