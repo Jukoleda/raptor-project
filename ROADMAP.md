@@ -73,7 +73,8 @@ demo `tanks.html`. Mejoras posibles:
       falta radio de explosión que afecte a varios blancos/caras.
 - [ ] **Blindaje espaciado** y multi-capa (necesario para modelar bien el HEAT).
 - [ ] **Balística con gravedad** (obuses en arco) además del tiro tenso.
-- [ ] **Mini-juego jugable:** mover tanque, IA enemiga, HUD, puntuación.
+- [x] **Mini-juego jugable:** `drive.html` es una batalla contra cuatro tanques
+      con IA, con HUD, barras de vida y victoria/derrota. Falta puntuación.
 
 ## Fase 4 — Infraestructura del proyecto
 
@@ -101,10 +102,19 @@ de teclado WASD/flechas incluido. Demo `drive.html`. Mejoras posibles:
 - [x] **Torreta apuntable:** `components/vehicles/Tank` (casco + torreta que gira
       independiente, con cadencia por diseño) y cuatro diseños con formas
       distintas; se apunta con ratón/dedo vía `Camera.screenToWorld()`.
-- [ ] **Disparar mientras se conduce:** enganchar `Tank.muzzle` y la dirección de
-      la torreta al arma de `components/weapons/` (ya hay tipos de proyectil).
-- [ ] **Tanques enemigos / IA:** reutilizar `Tank` con un controlador automático.
+- [x] **Disparar mientras se conduce:** `drive.html` engancha `Tank.muzzle` y la
+      dirección de la torreta a `components/weapons/`; los proyectiles impactan
+      contra tanques (círculo) y escenario (AABB).
+- [x] **Tanques enemigos / IA:** `components/controls/TankAI`, máquina de estados
+      (patrulla → persigue → ataca → se retira) con línea de tiro y detección de
+      atasco. Cuatro enemigos en `drive.html`.
+- [x] **Caja de cambios:** `components/controls/Gearbox` con marchas, curva de
+      par, corte de transmisión al cambiar y modos **automático/manual**; una
+      caja distinta por diseño de tanque.
 - [ ] **Gamepad** además del teclado.
+- [ ] **Oleadas / puntuación:** hoy es una batalla única; falta progresión.
+- [ ] **IA con cobertura:** usar los obstáculos para cubrirse, no solo para
+      bloquear la línea de tiro.
 
 ## Cámara
 

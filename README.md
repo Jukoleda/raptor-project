@@ -19,7 +19,7 @@ index.html                 # Portada (escrita a mano): enlaza las demos
 engine.html                # GENERADO: demo de formas autocontenido, doble clic
 editor.html                # GENERADO: editor visual autocontenido, doble clic
 tanks.html                 # GENERADO: demo cañón vs blindaje, doble clic
-drive.html                 # GENERADO: demo conducción de tanque, doble clic
+drive.html                 # GENERADO: batalla de tanques (IA + combate), doble clic
 dev.html                   # Demo en desarrollo (módulos ES + gl-matrix por CDN)
 editor-dev.html            # Editor en desarrollo (módulos ES + gl-matrix por CDN)
 tanks-dev.html             # Demo de tanques en desarrollo (módulos ES + CDN)
@@ -35,7 +35,7 @@ editor/
 weapons/
   tanksDemo.js             # Demo de armas: cañón, blanco con blindaje y HUD
 controls/
-  driveDemo.js             # Demo de conducción: tanque manejable + HUD
+  driveDemo.js             # Demo de batalla: tanque manejable, enemigos con IA y HUD
 components/
   raptorEngine.js          # RaptorEngine: canvas + lista de entidades + render loop
   camera.js                # Camera 2D: pan/zoom, follow(target) y límites de mapa
@@ -61,7 +61,9 @@ components/
     armor.js               # Armor: blindaje por cara + integridad (HP)
     index.js               # Re-exporta las armas
   controls/
+    gearbox.js             # Gearbox: marchas, par motor y cambio automático/manual
     tankController.js      # TankController: movimiento estilo tanque + input de teclado
+    tankAI.js              # TankAI: máquina de estados enemiga (patrulla/persigue/ataca/huye)
     index.js               # Re-exporta los controladores
   vehicles/
     tank.js                # Tank: casco + torreta móvil; diseños (formas y stats)
@@ -78,7 +80,7 @@ motor embebidos, funcionan incluso offline vía `file://`:
 - `engine.html` — demo con las formas.
 - `editor.html` — editor visual (ver abajo).
 - `tanks.html` — demo de armas: cañón vs blindaje (ver abajo).
-- `drive.html` — conducción de un tanque con teclado (ver abajo).
+- `drive.html` — batalla de tanques: conduces y luchas contra IA (ver abajo).
 
 **Online:** publicado con GitHub Pages en
 <https://jukoleda.github.io/raptor-project/>. El workflow
@@ -211,9 +213,12 @@ la fricción la frena enseguida. Pruébalo en `drive.html` (W/S o ↑/↓ avanza
 A/D o ←/→ giran; **en móvil** hay un D-pad táctil en pantalla). El mapa es mayor
 que la pantalla y la **cámara sigue al tanque** (ver abajo), con un **minimapa**
 del mapa completo; el tanque **choca** con muros y obstáculos (colisión por
-expulsión círculo-AABB). Puedes **elegir entre cuatro tanques** (teclas 1-4) y la
-**torreta apunta con el ratón o el dedo** (Q/E la giran a mano). Sigue la
-convención del motor: rotación en grados CCW y el eje local **+Y es «adelante»**.
+expulsión círculo-AABB). Puedes **elegir entre cuatro tanques** (teclas 1-4), la
+**torreta apunta con el ratón o el dedo** (Q/E la giran a mano), se conduce con
+**caja de cambios** (automática o manual, ver abajo) y se combate contra
+**cuatro enemigos con IA** (ver abajo), todos con **barra de vida**.
+Sigue la convención del motor: rotación en grados CCW y el eje local
+**+Y es «adelante»**.
 
 ```js
 import { TankController } from "./controls/index.js";
@@ -263,6 +268,96 @@ tank.aimAt(worldPoint, dt);  // o tank.traverse(±1, dt) para girarla a mano
 tank.sync();                 // coloca torreta y cañón sobre el casco
 // tank.muzzle -> boca del cañón, listo para el módulo de armas
 ```
+
+## Caja de cambios
+
+`components/controls/Gearbox` es lo que convierte «mantener W acelera» en algo
+mecánico. Cada marcha alcanza una fracción del tope de velocidad (`ratios`): las
+**cortas tiran fuerte pero se quedan sin vueltas**, la larga apenas empuja pero
+es la única que llega al máximo. Las **revoluciones** (`rpm`, 0..1) salen de por
+dónde vas dentro de la banda de la marcha, y una curva de par hace que el motor
+se **ahogue** abajo y pierda fuerza cerca del corte. Cambiar de marcha **corta la
+transmisión** durante `shiftTime` — eso es lo que de verdad se nota al conducir.
+
+Dos modos:
+
+- **Automática** — cambia sola según las vueltas, con histéresis entre
+  `upshiftAt` y `downshiftAt` para que no vaya *saltando* entre dos marchas, y
+  mete la marcha atrás cuando pides retroceder desde parado.
+- **Manual** — eliges tú recorriendo `R · N · 1 · 2 · …`. Si la dejas larga a
+  pocas vueltas se ahoga; si la estiras, rebotas contra el limitador.
+
+Cada diseño de tanque trae su propia caja: el **Pesado** solo tiene 3 marchas y
+cambia lentísimo (0,5 s), mientras que el **Ligero** lleva 5 y cambia en 0,16 s.
+
+```js
+import { Gearbox, GEARBOX_MODE, TankController } from "./controls/index.js";
+
+const gearbox = new Gearbox({
+    ratios: [0.3, 0.52, 0.75, 1.0],  // fracción del tope por marcha
+    reverseRatio: 0.4,
+    shiftTime: 0.25,                 // segundos con la transmisión cortada
+    mode: GEARBOX_MODE.AUTO,
+});
+const driver = new TankController(hull, { ...design.drive, gearbox });
+
+// El controlador la alimenta solo; para el HUD:
+gearbox.label;   // "R" | "N" | "1" | "2" | ...
+gearbox.rpm;     // 0..1 dentro de la marcha actual
+gearbox.torque;  // multiplicador de aceleración (0 mientras cambia)
+gearbox.toggleMode();            // automática ⇄ manual
+gearbox.shiftUp() / shiftDown(); // solo tiene sentido en manual
+```
+
+En `drive.html`: **G** alterna automática/manual y **Z**/**X** cambian de marcha
+(o los botones del panel, que también valen en móvil).
+
+## Enemigos (máquina de estados finitos)
+
+`components/controls/TankAI` gobierna un tanque enemigo con una **FSM** de cuatro
+estados. No toca el motor ni las armas: lee el mundo, escribe acelerador y giro
+en un `TankController`, apunta la torreta y levanta `wantsToFire` cuando tiene
+tiro — quien posee el tanque decide qué significa disparar.
+
+```
+PATROL   deambula entre puntos al azar, cañón al frente
+  │ objetivo a la vista (con línea de tiro)
+  ▼
+CHASE    va a por él, torreta siguiéndolo
+  │ entra en rango de tiro          ▲ se le escapa del rango
+  ▼                                 │
+ATTACK   mantiene la distancia, apunta y dispara al estar alineado
+  │ su salud baja del umbral de retirada
+  ▼
+RETREAT  rompe el contacto sin dejar de apuntarle
+```
+
+Detalles que evitan que la FSM «parezca rota»: **línea de tiro** opcional
+(`isBlocked`) para no disparar a través del escenario, y un **detector de
+atasco** que da marcha atrás y gira si el tanque no progresa contra un muro.
+
+```js
+import { TankAI, AI_STATE_LABEL } from "./controls/index.js";
+
+const ai = new TankAI(enemyTank, enemyDriver, {
+    bounds: MAPA,              // por dónde puede patrullar
+    sightRange: 6.5,           // a esta distancia empieza a perseguir
+    attackRange: 4.5,          // dentro de esto se planta y dispara
+    retreatAt: 0.3,            // se retira por debajo de este % de vida
+    isBlocked: (a, b) => hayObstaculoEntre(a, b),
+});
+
+// ...cada frame:
+ai.update(dt, playerTank);   // decide estado, conduce y apunta
+if (ai.wantsToFire) disparar(enemyTank);
+AI_STATE_LABEL[ai.state];    // "Patrulla" | "Persigue" | "Ataca" | "Se retira"
+```
+
+### Salud y barra de vida
+
+Cada `Tank` lleva **integridad** (`hp` / `maxHp`, del diseño) y dibuja su propia
+**barra de vida** flotando sobre el casco — nunca rota con él, y cambia de verde
+a amarillo y rojo según baja. `tank.takeDamage(n)` devuelve si sigue vivo.
 
 ## Cámara 2D
 
