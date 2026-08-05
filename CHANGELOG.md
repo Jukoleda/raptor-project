@@ -6,6 +6,27 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Modo por equipos: rey de la colina)
+- **Dos escuadrones enfrentados** en `drive.html`: el jugador y **5 aliados**
+  (azules) despliegan al oeste, **5 enemigos** (rojos) al este, con el objetivo
+  entre medias. El tanque del jugador conserva los colores de su diseño.
+- **Zona central** (disco translúcido) que se gana **controlándola 30 s**: un
+  bando solo suma mientras está **solo** dentro, con los dos presentes el reloj
+  **se para** («en disputa») y con la zona vacía ambos marcadores decaen. El
+  número ayuda con rendimientos decrecientes (×1,6 máximo). El disco cambia de
+  color según quién manda.
+- **Final con motivo:** victoria por control o por aniquilar al escuadrón
+  enemigo; derrota si el enemigo controla la zona o si te destruyen — el banner
+  dice cuál de las cuatro.
+- **Sin fuego amigo:** los proyectiles atraviesan a los tanques del mismo bando.
+- **IA con estado `ADVANCE`** (`tankAI.js`): toma y defiende el terreno que se le
+  asigna (`objective`, `objectiveRadius`) en vez de deambular, y cada tanque
+  recibe un punto distinto alrededor del centro para desplegarse por la zona.
+  Además ya no persigue solo al jugador: ataca al **rival vivo más cercano**.
+- **HUD:** tarjeta de objetivo al frente del panel con una barra por bando, los
+  segundos acumulados y el estado de la zona; rosters separados para tu
+  escuadrón y el enemigo; el minimapa dibuja la zona y a los aliados en azul.
+
 ### Añadido (Balística en la batalla)
 - **`drive.html` pasa a usar el modelo de penetración completo** en vez de daño
   plano: los proyectiles se lanzan por *raycast* contra el **casco poligonal** de
