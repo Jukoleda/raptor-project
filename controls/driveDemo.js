@@ -10,10 +10,11 @@
 // (gun and shells) and the engine's Camera (follows the player).
 
 import RaptorEngine from "../components/raptorEngine.js";
-import { Rectangle, Square, Circle } from "../components/shapes/index.js";
+import { Rectangle, Square, Circle, Triangle } from "../components/shapes/index.js";
 import { TankController, TankAI, AI_STATE_LABEL, Gearbox, GEARBOX_MODE, AutoAim, AIM_MODE } from "../components/controls/index.js";
 import { Tank, TANK_DESIGNS } from "../components/vehicles/index.js";
 import { Weapon, PROJECTILES, raycastShape, resolveShot, reflect } from "../components/weapons/index.js";
+import { collide, boundingRadius } from "../components/physics/index.js";
 
 // The map is much larger than the view, so the camera has to follow the tank.
 // Visible half-extents come from the engine's projection (perspective FOV 45°
@@ -37,8 +38,10 @@ function makeRng(seed) {
     return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
 }
 
-// Keep tanks inside the walls, and the camera inside the map edges.
-const TANK_BOUNDS = { minX: MAP.minX + 0.6, maxX: MAP.maxX - 0.6, minY: MAP.minY + 0.6, maxY: MAP.maxY - 0.6 };
+// The hulls now collide with the walls by their real outline, so these bounds
+// are only a last-resort net against escaping the map — keeping them tight would
+// stop every tank at the same distance and hide the shape differences.
+const TANK_BOUNDS = { minX: MAP.minX, maxX: MAP.maxX, minY: MAP.minY, maxY: MAP.maxY };
 const CAM_BOUNDS = { minX: MAP.minX + VIEW_W, maxX: MAP.maxX - VIEW_W, minY: MAP.minY + VIEW_H, maxY: MAP.maxY - VIEW_H };
 
 // Selectable player tanks, in the order shown in the panel.
@@ -218,6 +221,8 @@ const STYLES = `
     .foe .st.attack { color: #e8776a; }
     .foe .st.chase { color: #e8c24a; }
     .foe .st.retreat { color: #6aa9e0; }
+    .foe .st.advance { color: #7d9bb5; }
+    .foe .dist { color: #7d838a; font-size: 11px; }
 
     /* Stack the panel under the canvas and grow the touch buttons on phones. */
     @media (max-width: 720px) {
@@ -234,27 +239,6 @@ function el(tag, props = {}, children = []) {
 }
 
 // --- Geometry helpers (bullets and bodies against the static map) ---
-
-// Smallest vector that pushes a circle out of an AABB, or null if clear.
-function pushOut(cx, cy, r, box) {
-    const nearX = Math.max(box.minX, Math.min(cx, box.maxX));
-    const nearY = Math.max(box.minY, Math.min(cy, box.maxY));
-    const dx = cx - nearX;
-    const dy = cy - nearY;
-    const d2 = dx * dx + dy * dy;
-    if (d2 >= r * r) return null;
-    if (d2 > 1e-9) {
-        const d = Math.sqrt(d2);
-        return { x: (dx / d) * (r - d), y: (dy / d) * (r - d) };
-    }
-    // Center inside the box: eject along the nearest face.
-    const left = cx - box.minX, right = box.maxX - cx;
-    const bottom = cy - box.minY, top = box.maxY - cy;
-    const mx = Math.min(left, right), my = Math.min(bottom, top);
-    return mx < my
-        ? { x: (left < right ? -1 : 1) * (mx + r), y: 0 }
-        : { x: 0, y: (bottom < top ? -1 : 1) * (my + r) };
-}
 
 // Segment a→b against an AABB (slab method). Used for shells and line of sight.
 function segmentHitsBox(a, b, box) {
@@ -286,9 +270,15 @@ function startDemo() {
     game.createWindow(stage);
     const gl = game.context;
 
-    // Axis-aligned boxes tanks and shells collide with (walls + obstacles).
+    // Two views of the same scenery. `colliders` are axis-aligned boxes — cheap
+    // enough to test a shell or a line of sight against every frame. `solids`
+    // keeps the actual shapes, so tank bodies collide against the real outline
+    // (SAT from the physics module) instead of a bounding circle.
     const colliders = [];
+    const solids = [];
     const addBox = (cx, cy, hw, hh) => colliders.push({ minX: cx - hw, maxX: cx + hw, minY: cy - hh, maxY: cy + hh });
+    // Scenery never moves, so its bounding radius and centre are computed once.
+    const addSolid = (shape) => solids.push({ shape, r: boundingRadius(shape), x: shape.position.x, y: shape.position.y });
 
     // --- Reference grid (every 4 units) so panning reads clearly. ---
     const gridColor = { red: 0.19, green: 0.23, blue: 0.29 };
@@ -310,8 +300,10 @@ function startDemo() {
     // --- Border walls around the map edges (drawn + collidable). ---
     const wallColor = { red: 0.42, green: 0.38, blue: 0.31 };
     const wall = (w, h, x, y) => {
-        game.add(new Rectangle(gl, { width: w, height: h }).setColor(wallColor).setPosition({ x, y }).init());
+        const shape = new Rectangle(gl, { width: w, height: h }).setColor(wallColor).setPosition({ x, y }).init();
+        game.add(shape);
         addBox(x, y, w / 2, h / 2);
+        addSolid(shape);
     };
     wall(mapW + WALL, WALL, 0, MAP.maxY); // top
     wall(mapW + WALL, WALL, 0, MAP.minY); // bottom
@@ -337,8 +329,10 @@ function startDemo() {
         blocks.push({ x, y, s: size, c: palette[blocks.length % palette.length] });
     }
     for (const b of blocks) {
-        game.add(new Square(gl, { size: b.s }).setColor(b.c).setPosition({ x: b.x, y: b.y }).init());
+        const shape = new Square(gl, { size: b.s }).setColor(b.c).setPosition({ x: b.x, y: b.y }).init();
+        game.add(shape);
         addBox(b.x, b.y, b.s / 2, b.s / 2);
+        addSolid(shape);
     }
 
     // Line of sight for the AI: can it shoot without hitting the scenery?
@@ -376,6 +370,14 @@ function startDemo() {
     const RETICLE_COLOR = { red: 0.45, green: 0.85, blue: 1 };
     const reticle = Array.from({ length: 4 }, () =>
         new Rectangle(gl, { width: 0.16, height: 0.16 }).setColor(RETICLE_COLOR).init());
+
+    // Squad markers: on a map this size your allies are usually off screen, so
+    // each living one gets a small arrow pinned to the edge of the view pointing
+    // at them. They live in the world, so the camera carries them along.
+    const SQUAD_MARK_COLOR = { red: 0.35, green: 0.72, blue: 1 };
+    const squadMarks = ALLY_SPAWNS.map(() =>
+        new Triangle(gl, { width: 0.28, height: 0.34 }).setColor(SQUAD_MARK_COLOR).init());
+    const shownMarks = new Set();
 
     // --- On-screen controls: steering left, throttle + fire right. ---
     const tbtn = (label, cls = "") => el("div", { className: `tbtn ${cls}`.trim(), textContent: label });
@@ -709,7 +711,7 @@ function startDemo() {
         const gearbox = new Gearbox({ ...d.gearbox, mode: enemy ? GEARBOX_MODE.AUTO : gearMode });
         const driver = new TankController(tank.hull, { ...d.drive, bounds: TANK_BOUNDS, gearbox });
         const weapon = new Weapon({ ...d.weapon });
-        const unit = { tank, driver, weapon, gearbox, ai: null, enemy, isPlayer };
+        const unit = { tank, driver, weapon, gearbox, ai: null, enemy, isPlayer, bodyRadius: boundingRadius(tank.hull) };
 
         if (isPlayer) {
             driver.bindKeys(window);
@@ -759,6 +761,7 @@ function startDemo() {
         lockedOn = null;
         for (const m of markers) game.remove(m.shape);
         markers.length = 0;
+        hideSquadMarks();
         allies = [];
         enemies = [];
         player = null;
@@ -808,14 +811,15 @@ function startDemo() {
             for (const unit of units) {
                 const st = el("span", { className: "st" });
                 const fill = el("i");
+                const dist = el("small", { className: "dist" });
                 const row = el("div", { className: "foe" }, [
                     el("div", { className: "top" }, [
-                        el("span", { textContent: unit.tank.design.name }),
+                        el("span", {}, [document.createTextNode(unit.tank.design.name), dist]),
                         st,
                     ]),
                     el("div", { className: "bar slim" }, [fill]),
                 ]);
-                unit.hud = { row, st, fill };
+                unit.hud = { row, st, fill, dist };
                 container.append(row);
             }
         }
@@ -938,36 +942,48 @@ function startDemo() {
 
     // --- Physics-lite: keep bodies out of the scenery and out of each other ---
 
+    // Nudges a hull out along a manifold from the physics module. `sign` flips
+    // the push because collide() reports its normal pointing A -> B.
+    function push(shape, manifold, sign, share = 1) {
+        shape.setPosition({
+            x: shape.position.x + sign * manifold.normal.x * manifold.penetration * share,
+            y: shape.position.y + sign * manifold.normal.y * manifold.penetration * share,
+        });
+    }
+
+    // Tank body against the scenery, by its actual outline: a cheap radius test
+    // picks the few solids within reach, then SAT resolves the real overlap.
+    // That is why a wedge can slip past a corner a boxy hull would catch on.
     function resolveWorld(unit) {
         const hull = unit.tank.hull;
+        const reach = unit.bodyRadius;
         let pushed = 0;
         for (let pass = 0; pass < 2; pass++) {
-            for (const box of colliders) {
-                const p = pushOut(hull.position.x, hull.position.y, unit.tank.radius, box);
-                if (!p) continue;
-                hull.setPosition({ x: hull.position.x + p.x, y: hull.position.y + p.y });
-                pushed += Math.hypot(p.x, p.y);
+            for (const solid of solids) {
+                if (Math.hypot(solid.x - hull.position.x, solid.y - hull.position.y) > reach + solid.r) continue;
+                const hit = collide({ shape: hull }, { shape: solid.shape });
+                if (!hit) continue;
+                push(hull, hit, -1);
+                pushed += hit.penetration;
             }
         }
         if (pushed > 0.02) unit.driver.speed *= 0.35;
     }
 
-    // Separates overlapping tanks, each giving way by half.
+    // Separates overlapping tanks by their outlines, each giving way by half.
     function separate(units) {
         for (let i = 0; i < units.length; i++) {
             for (let j = i + 1; j < units.length; j++) {
-                const a = units[i].tank, b = units[j].tank;
-                const dx = b.position.x - a.position.x;
-                const dy = b.position.y - a.position.y;
-                const min = a.radius + b.radius;
-                const d = Math.hypot(dx, dy);
-                if (d >= min || d < 1e-6) continue;
-                const push = (min - d) / 2;
-                const nx = dx / d, ny = dy / d;
-                a.hull.setPosition({ x: a.position.x - nx * push, y: a.position.y - ny * push });
-                b.hull.setPosition({ x: b.position.x + nx * push, y: b.position.y + ny * push });
-                units[i].driver.speed *= 0.5;
-                units[j].driver.speed *= 0.5;
+                const a = units[i], b = units[j];
+                const dx = b.tank.position.x - a.tank.position.x;
+                const dy = b.tank.position.y - a.tank.position.y;
+                if (Math.hypot(dx, dy) > a.bodyRadius + b.bodyRadius) continue;
+                const hit = collide({ shape: a.tank.hull }, { shape: b.tank.hull });
+                if (!hit) continue;
+                push(a.tank.hull, hit, -1, 0.5);
+                push(b.tank.hull, hit, 1, 0.5);
+                a.driver.speed *= 0.5;
+                b.driver.speed *= 0.5;
             }
         }
     }
@@ -985,6 +1001,36 @@ function startDemo() {
         const p = lockedOn.position;
         const corners = [[-1, 1], [1, 1], [-1, -1], [1, -1]];
         reticle.forEach((tick, i) => tick.setPosition({ x: p.x + corners[i][0] * r, y: p.y + corners[i][1] * r }));
+    }
+
+    // Places (or hides) the edge arrow for each ally that is off screen.
+    function updateSquadMarks() {
+        const { halfW, halfH } = camera.viewExtents(canvas);
+        const marginX = halfW - 0.35;
+        const marginY = halfH - 0.35;
+
+        allies.forEach((mate, i) => {
+            const mark = squadMarks[i];
+            const dx = mate.tank.position.x - camera.x;
+            const dy = mate.tank.position.y - camera.y;
+            const offScreen = mate.tank.alive && (Math.abs(dx) > marginX || Math.abs(dy) > marginY);
+
+            if (!offScreen) {
+                if (shownMarks.has(i)) { game.remove(mark); shownMarks.delete(i); }
+                return;
+            }
+            if (!shownMarks.has(i)) { game.add(mark); shownMarks.add(i); }
+
+            // Slide along the direction to the ally until it meets the edge.
+            const scale = Math.min(marginX / Math.abs(dx || 1e-6), marginY / Math.abs(dy || 1e-6));
+            mark.setPosition({ x: camera.x + dx * scale, y: camera.y + dy * scale });
+            mark.setRotation((Math.atan2(-dx, dy) * 180) / Math.PI); // point outward, at them
+        });
+    }
+
+    function hideSquadMarks() {
+        for (const i of shownMarks) game.remove(squadMarks[i]);
+        shownMarks.clear();
     }
 
     // --- The objective ---
@@ -1129,6 +1175,7 @@ function startDemo() {
 
         for (const unit of allUnits()) unit.tank.sync();
         camera.follow(player.tank.position, dt);
+        updateSquadMarks();
 
         if (!over) updateCapture(dt);
 
@@ -1217,6 +1264,9 @@ function startDemo() {
             unit.hud.row.classList.toggle("down", !t.alive);
             unit.hud.fill.style.width = `${t.hpRatio * 100}%`;
             unit.hud.fill.style.background = t.hpRatio > 0.5 ? "#43c06a" : t.hpRatio > 0.2 ? "#d8b13a" : "#d84a3a";
+            unit.hud.dist.textContent = t.alive
+                ? ` · a ${Math.hypot(t.position.x - tank.position.x, t.position.y - tank.position.y).toFixed(0)} u`
+                : "";
         }
         const mineStanding = myTeam().filter((u) => u.tank.alive).length;
         kFoes.v.textContent = `${mineStanding} / ${standing}`;

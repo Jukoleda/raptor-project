@@ -86,7 +86,7 @@ const PAGES = [
     {
         out: "drive.html",
         title: "Raptor — Batalla de tanques",
-        modules: [...ENGINE, ...CONTROLS, ...WEAPONS, ...VEHICLES, "controls/driveDemo.js"],
+        modules: [...ENGINE, ...PHYSICS, ...CONTROLS, ...WEAPONS, ...VEHICLES, "controls/driveDemo.js"],
         // The demo injects its own styles from JS; the body starts empty.
         headStyle: "",
     },

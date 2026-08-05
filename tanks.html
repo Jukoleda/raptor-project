@@ -631,7 +631,9 @@ RaptorEngine;
 
 // Transforms a shape's local collider outline into world space. Mirrors the
 // transform used by Shape.draw and the physics layer (rotation is CCW degrees).
-function worldPolygon(shape) {
+// Named apart from the physics layer's equivalent: both end up as globals in the
+// standalone build, and one silently overwriting the other is a trap.
+function hullOutline(shape) {
     const angle = (shape.rotation * Math.PI) / 180;
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);
@@ -663,7 +665,7 @@ function segmentIntersect(a, b, p, q) {
 // Casts the segment a->b against a polygon shape. Returns the first face hit as
 // { point, normal, edgeIndex, t } (normal points outward), or null.
 function raycastShape(a, b, shape) {
-    const poly = worldPolygon(shape);
+    const poly = hullOutline(shape);
     let best = null;
 
     for (let i = 0; i < poly.length; i++) {
