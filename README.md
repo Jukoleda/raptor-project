@@ -61,6 +61,7 @@ components/
     armor.js               # Armor: blindaje por cara + integridad (HP)
     index.js               # Re-exporta las armas
   controls/
+    autoAim.js             # AutoAim: elige objetivo (cercano/vida/fuerza) y apunta
     gearbox.js             # Gearbox: marchas, par motor y cambio automático/manual
     tankController.js      # TankController: movimiento estilo tanque + input de teclado
     tankAI.js              # TankAI: máquina de estados enemiga (patrulla/persigue/ataca/huye)
@@ -214,9 +215,11 @@ A/D o ←/→ giran; **en móvil** hay un D-pad táctil en pantalla). El mapa es
 que la pantalla y la **cámara sigue al tanque** (ver abajo), con un **minimapa**
 del mapa completo; el tanque **choca** con muros y obstáculos (colisión por
 expulsión círculo-AABB). Puedes **elegir entre cuatro tanques** (teclas 1-4), la
-**torreta apunta con el ratón o el dedo** (Q/E la giran a mano), se conduce con
-**caja de cambios** (automática o manual, ver abajo) y se combate contra
-**cuatro enemigos con IA** (ver abajo), todos con **barra de vida**.
+**torreta apunta con el ratón o el dedo** (Q/E la giran a mano) o con
+**auto-apuntado** por modos y **fuego automático** (ver abajo), se conduce con
+**caja de cambios**
+(automática o manual) y se combate contra **doce enemigos con IA** repartidos por
+una arena de **57 × 41** unidades, todos con **barra de vida**.
 Sigue la convención del motor: rotación en grados CCW y el eje local
 **+Y es «adelante»**.
 
@@ -268,6 +271,90 @@ tank.aimAt(worldPoint, dt);  // o tank.traverse(±1, dt) para girarla a mano
 tank.sync();                 // coloca torreta y cañón sobre el casco
 // tank.muzzle -> boca del cañón, listo para el módulo de armas
 ```
+
+## Blindaje y balística en la batalla
+
+`drive.html` **usa el modelo de penetración completo** de
+`components/weapons/`, no daño plano: los proyectiles se lanzan por *raycast*
+contra el **casco poligonal** de cada tanque, así que importa **qué cara**
+golpean y **con qué ángulo**.
+
+- **Blindaje por cara**, deducido de la propia silueta del casco con
+  `Armor.forHull(shape, { front, side, rear })`: cada arista se clasifica según
+  hacia dónde mira en el espacio local (frontal si está a menos de 75° del
+  «adelante» local, trasera si está igual de lejos, lateral el resto). Sale
+  gratis para cualquier casco convexo — el rectángulo da 1 frontal / 2 laterales
+  / 1 trasera, el triángulo del Ligero **dos caras de nariz**, el hexágono 2/2/2
+  y la cuña del Cazacarros 2 frontales / 2 laterales / 1 trasera.
+- **Tipos de proyectil** seleccionables (**C**): AP, APCR, HEAT y HE, cada uno
+  con su penetración, daño, umbral de rebote y sensibilidad al ángulo.
+- **Rebote**: un proyectil que patina sigue volando, más lento y con menos
+  penetración — puede acabar impactando en otra cosa.
+
+| Diseño | Frontal | Lateral | Trasera | Cañón |
+|--------|:---:|:---:|:---:|:---:|
+| **Ligero** | 30 | 18 | 14 | 55 mm |
+| **Medio** | 65 | 38 | 28 | 95 mm |
+| **Cazacarros** | 85 | 42 | 30 | 125 mm |
+| **Pesado** | 105 | 62 | 45 | 145 mm |
+
+Esto le da profundidad táctica real: un Medio (95 mm) **no atraviesa** el frontal
+de un Pesado, pero sí su costado — o puede cargar **HEAT** (114 mm, que ignora la
+inclinación) para perforarlo de frente. Y la nariz triangular del Ligero
+**desvía** proyectiles perforantes que la golpean muy oblicuos.
+
+> El casco de la cuña se reorientó a sentido **antihorario** al integrarlo: el
+> raycast deduce la normal saliente asumiendo esa dirección, y con el orden
+> anterior todas sus caras habrían rebotado siempre.
+
+## Auto-apuntado
+
+`components/controls/AutoAim` cede la torreta a una política de selección de
+objetivo. Un solo botón (**T**, o 🎯 en móvil) recorre las políticas, así que
+puedes pasar de «apunta a lo que tengas encima» a «remata al herido» sin soltar
+el volante:
+
+```
+OFF → Más cercano → Menos vida → Más vida → Más fuerte → OFF …
+```
+
+| Modo | A quién apunta |
+|------|----------------|
+| **Más cercano** | El más próximo — el que probablemente te está disparando. |
+| **Menos vida** | El de menos HP restante: para rematarlo. |
+| **Más vida** | El de más HP restante: el que más va a durar. |
+| **Más fuerte** | El de mayor **amenaza de diseño** (`Tank.power` = resistencia × daño por segundo), esté como esté de dañado. |
+
+Solo elige objetivo y mueve el cañón: **nunca dispara**. Los empates se rompen
+por distancia y, en un empate exacto, gana el objetivo actual, para que el cañón
+no oscile entre dos candidatos iguales.
+
+```js
+import { AutoAim, AIM_MODE } from "./controls/index.js";
+
+const autoAim = new AutoAim(playerTank, { mode: AIM_MODE.OFF });
+autoAim.cycle();                       // avanza al siguiente modo
+
+// ...cada frame:
+const objetivo = autoAim.update(dt, enemigos.map((e) => e.tank));
+// objetivo === null si está desactivado o no queda nadie vivo
+autoAim.label;   // "Más cercano" | "Menos vida" | ...
+```
+
+En `drive.html` la prioridad es: giro manual (Q/E) **>** auto-apuntado **>**
+puntero, y el objetivo enganchado se marca con una **retícula** en el mundo y un
+círculo en el minimapa.
+
+### Fuego automático
+
+El botón **AUTO** (tecla **F**) mantiene el gatillo por ti: dispara en cuanto el
+cañón ha recargado. Cuando hay un objetivo enganchado no malgasta proyectiles —
+**espera a que la torreta esté alineada** (4° de margen) y **no dispara si hay
+cobertura por medio**. Sin objetivo se comporta como tener el gatillo apretado.
+Se combina con el auto-apuntado: 🎯 elige a quién, AUTO aprieta el gatillo.
+
+`Tank.aimErrorTo(punto)` devuelve los grados que le faltan al cañón para estar
+sobre un punto — lo usan tanto el fuego automático como la IA enemiga.
 
 ## Caja de cambios
 

@@ -50,6 +50,7 @@ const CONTROLS = [
     "components/controls/gearbox.js",
     "components/controls/tankController.js",
     "components/controls/tankAI.js",
+    "components/controls/autoAim.js",
 ];
 
 // Vehicles assembled from shapes (must come after ENGINE, which defines them).
@@ -85,7 +86,7 @@ const PAGES = [
     {
         out: "drive.html",
         title: "Raptor — Batalla de tanques",
-        modules: [...ENGINE, ...CONTROLS, ...VEHICLES, ...WEAPONS, "controls/driveDemo.js"],
+        modules: [...ENGINE, ...CONTROLS, ...WEAPONS, ...VEHICLES, "controls/driveDemo.js"],
         // The demo injects its own styles from JS; the body starts empty.
         headStyle: "",
     },

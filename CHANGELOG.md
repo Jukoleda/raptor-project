@@ -6,6 +6,54 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Balística en la batalla)
+- **`drive.html` pasa a usar el modelo de penetración completo** en vez de daño
+  plano: los proyectiles se lanzan por *raycast* contra el **casco poligonal** de
+  cada tanque (`raycastShape`), y el impacto se resuelve con `resolveShot`, de
+  modo que importan la **cara golpeada** y el **ángulo**.
+- **`Armor.forHull(shape, {front, side, rear})`**: deriva el blindaje por cara de
+  la propia silueta del casco, clasificando cada arista según hacia dónde mira en
+  el espacio local. Funciona con cualquier casco convexo — rectángulo, triángulo,
+  hexágono y cuña reparten sus caras solos.
+- **Blindaje, penetración y munición por diseño**: Ligero 30/18/14 con cañón de
+  55 mm … Pesado 105/62/45 con 145 mm. Los enemigos cargan el proyectil de su
+  diseño; el jugador elige entre **AP, APCR, HEAT y HE** con la tecla **C**.
+- **Rebote**: un proyectil que patina **sigue volando**, más lento y con menos
+  penetración, y puede impactar en otra cosa.
+- **HUD**: marcadores de impacto de colores en el mundo (penetra / esquirlas /
+  rebote / no penetra) e informe en el panel con cara, ángulo, **blindaje
+  efectivo** y penetración.
+
+### Corregido
+- **Winding del casco en cuña** (`Cazacarros`): estaba definido en sentido
+  horario, y `raycastShape` deduce la normal saliente asumiendo **antihorario**.
+  Con el orden anterior sus normales apuntaban hacia dentro, así que todos los
+  impactos contra ese casco se habrían resuelto como rebote.
+
+### Añadido (Mapa y puntería)
+- **Arena diez veces mayor**: `drive.html` pasa de 18 × 13 a **57 × 41** unidades
+  (√10 más larga por lado, es decir **10× el área**), con **78 obstáculos**
+  dispersos desde una semilla fija (mismo mapa en cada carga) y **12 enemigos**
+  repartidos en anillo alrededor del inicio. Rejilla cada 4 unidades.
+- **Auto-apuntado** (`components/controls/autoAim.js`): `AutoAim` cede la torreta
+  a una política de selección de objetivo, y un botón recorre el ciclo
+  **off → más cercano → menos vida → más vida → más fuerte → off**. Solo elige
+  objetivo y apunta: nunca dispara. Los empates se rompen por distancia y el
+  objetivo actual gana el empate exacto, para que el cañón no oscile.
+- **`Tank.power`**: amenaza de diseño (resistencia × daño por segundo), que es lo
+  que ordena el modo «más fuerte».
+- **Fuego automático**: botón **AUTO** (tecla **F**, también en móvil) que
+  mantiene el gatillo. Con un objetivo enganchado no malgasta proyectiles —
+  espera a que la torreta esté **alineada** (4° de margen) y **no dispara si hay
+  cobertura por medio**; sin objetivo equivale a tener el gatillo apretado.
+- **`Tank.aimErrorTo(punto)`**: grados que le faltan al cañón para estar sobre un
+  punto. Lo usan el fuego automático y la IA enemiga (que deja de duplicar el
+  cálculo de ángulos).
+- **Demo:** tecla **T** (o botón 🎯, también en móvil) cicla el modo; el objetivo
+  enganchado se marca con una **retícula** en el mundo y un círculo en el
+  minimapa, y el panel muestra el modo, el enemigo fijado, su vida y la
+  distancia. Prioridad de apuntado: giro manual (Q/E) > auto-apuntado > puntero.
+
 ### Añadido (Transmisión)
 - **Caja de cambios** (`components/controls/gearbox.js`): `Gearbox` da al
   vehículo una transmisión real. Cada marcha alcanza una fracción del tope de

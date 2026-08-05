@@ -11,9 +11,9 @@
 
 import RaptorEngine from "../components/raptorEngine.js";
 import { Rectangle, Square, Circle } from "../components/shapes/index.js";
-import { TankController, TankAI, AI_STATE_LABEL, Gearbox, GEARBOX_MODE } from "../components/controls/index.js";
+import { TankController, TankAI, AI_STATE_LABEL, Gearbox, GEARBOX_MODE, AutoAim, AIM_MODE } from "../components/controls/index.js";
 import { Tank, TANK_DESIGNS } from "../components/vehicles/index.js";
-import { Weapon } from "../components/weapons/index.js";
+import { Weapon, PROJECTILES, raycastShape, resolveShot, reflect } from "../components/weapons/index.js";
 
 // The map is much larger than the view, so the camera has to follow the tank.
 // Visible half-extents come from the engine's projection (perspective FOV 45°
@@ -22,8 +22,20 @@ const FOV = (45 * Math.PI) / 180;
 const VIEW_H = 6 * Math.tan(FOV / 2);   // ≈ 2.49 world units (half height)
 const VIEW_W = VIEW_H * (800 / 600);    // ≈ 3.31 world units (half width)
 
-const MAP = { minX: -9, maxX: 9, minY: -6.5, maxY: 6.5 }; // ~18 × 13 arena
+// The arena holds ten times the ground it used to: the old 18 × 13 became
+// 57 × 41, i.e. √10 longer on each side, so the *area* is 10×. Everything that
+// fills it (walls, cover, enemies) is derived from these bounds.
+const MAP = { minX: -28.5, maxX: 28.5, minY: -20.5, maxY: 20.5 }; // 57 × 41 arena
 const WALL = 0.4;
+const OBSTACLES = 78;   // scattered cover, scaled to the new size
+const ENEMY_COUNT = 12; // a bigger map needs more to find
+
+// Deterministic scatter: the same map every time you open the page, which keeps
+// the layout learnable (and the tests reproducible).
+function makeRng(seed) {
+    let s = seed >>> 0;
+    return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+}
 
 // Keep tanks inside the walls, and the camera inside the map edges.
 const TANK_BOUNDS = { minX: MAP.minX + 0.6, maxX: MAP.maxX - 0.6, minY: MAP.minY + 0.6, maxY: MAP.maxY - 0.6 };
@@ -40,14 +52,34 @@ const ENEMY_COLORS = {
     barrel: { red: 0.33, green: 0.13, blue: 0.12 },
 };
 
-const SPAWNS = [
-    { design: "light", x: -6.6, y: 4.3, rotation: 150 },
-    { design: "medium", x: 6.6, y: 4.3, rotation: -150 },
-    { design: "hunter", x: -6.6, y: -4.3, rotation: 30 },
-    { design: "heavy", x: 6.6, y: -4.3, rotation: -30 },
-];
+// Enemies ringed around the player's start at varying radii, so you meet them
+// gradually as you explore instead of all at once.
+const SPAWNS = Array.from({ length: ENEMY_COUNT }, (_, i) => {
+    const keys = ["light", "medium", "hunter", "heavy"];
+    const angle = (i / ENEMY_COUNT) * Math.PI * 2 + 0.35;
+    const spread = 0.45 + 0.5 * ((i % 3) / 2);
+    return {
+        design: keys[i % keys.length],
+        x: Math.cos(angle) * (MAP.maxX - 2.5) * spread,
+        y: Math.sin(angle) * (MAP.maxY - 2.5) * spread,
+        rotation: (-angle * 180) / Math.PI,
+    };
+});
 
 const WRECK_COLOR = { red: 0.17, green: 0.17, blue: 0.19 };
+
+// Shells the player can load, and how each impact reads on screen.
+const AMMO = [PROJECTILES.AP, PROJECTILES.APCR, PROJECTILES.HEAT, PROJECTILES.HE];
+const IMPACT = {
+    penetration: { label: "PENETRA", color: { red: 0.2, green: 0.9, blue: 0.35 } },
+    splash: { label: "ESQUIRLAS", color: { red: 0.95, green: 0.55, blue: 0.2 } },
+    ricochet: { label: "REBOTE", color: { red: 0.95, green: 0.85, blue: 0.2 } },
+    block: { label: "NO PENETRA", color: { red: 0.9, green: 0.25, blue: 0.2 } },
+};
+
+// Auto-fire holds off until the gun is this close to the locked target, so it
+// spends shells on the target instead of spraying while the turret swings.
+const AUTO_FIRE_ARC = 4; // degrees
 
 const STYLES = `
     * { box-sizing: border-box; }
@@ -113,6 +145,28 @@ const STYLES = `
     button.tankbtn.active { border-color: #4a7fb5; background: #2b3a4a; box-shadow: inset 0 0 0 1px #4a7fb5; }
     button.tankbtn b { display: block; font-size: 13px; }
     button.tankbtn small { color: #9aa0a6; font-size: 11px; }
+
+    .tbtn.aim { background: rgba(30, 74, 92, .6); border-color: rgba(120, 210, 240, .45); font-size: 20px; }
+    .tbtn.aim.on { background: rgba(60, 150, 190, .8); border-color: #7fe0ff; }
+
+    .tbtn.autofire { background: rgba(92, 48, 30, .6); border-color: rgba(240, 170, 120, .45); font-size: 12px; font-weight: 700; letter-spacing: .04em; }
+    .tbtn.autofire.on { background: rgba(190, 95, 45, .85); border-color: #ffbe86; }
+
+    /* Ammo picker + last-impact readout. */
+    .ammo { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    button.shell { text-align: left; line-height: 1.3; padding: 8px 9px; }
+    button.shell.active { border-color: #4a7fb5; background: #2b3a4a; box-shadow: inset 0 0 0 1px #4a7fb5; }
+    button.shell b { display: block; font-size: 13px; }
+    button.shell small { color: #9aa0a6; font-size: 11px; }
+    #impact { font-size: 15px; font-weight: 700; letter-spacing: .03em; margin-top: 12px; }
+
+    /* Auto-aim card. */
+    .aimrow { display: flex; align-items: center; gap: 10px; }
+    .aimrow .dot { width: 10px; height: 10px; border-radius: 50%; background: #4a4f57; flex: none; }
+    .aimrow .dot.on { background: #73d9ff; box-shadow: 0 0 8px #73d9ff; }
+    .aimrow b { font-size: 14px; }
+    .target { font-size: 12.5px; color: #9aa0a6; margin-top: 8px; }
+    .target b { color: #cfe4fb; }
 
     /* Gearbox readout: big gear letter, tachometer and mode switch. */
     .gearbox { display: flex; align-items: center; gap: 12px; }
@@ -199,23 +253,6 @@ function segmentHitsBox(a, b, box) {
     return true;
 }
 
-// Segment a→b against a circle — how a shell finds out it hit a tank.
-function segmentHitsCircle(a, b, c, r) {
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const fx = a.x - c.x, fy = a.y - c.y;
-    const A = dx * dx + dy * dy;
-    if (A < 1e-12) return fx * fx + fy * fy <= r * r;
-    const B = 2 * (fx * dx + fy * dy);
-    const C = fx * fx + fy * fy - r * r;
-    if (C <= 0) return true; // started inside
-    const disc = B * B - 4 * A * C;
-    if (disc < 0) return false;
-    const root = Math.sqrt(disc);
-    const t1 = (-B - root) / (2 * A);
-    const t2 = (-B + root) / (2 * A);
-    return (t1 >= 0 && t1 <= 1) || (t2 >= 0 && t2 <= 1);
-}
-
 function startDemo() {
     document.head.append(el("style", { textContent: STYLES }));
 
@@ -228,15 +265,15 @@ function startDemo() {
     const colliders = [];
     const addBox = (cx, cy, hw, hh) => colliders.push({ minX: cx - hw, maxX: cx + hw, minY: cy - hh, maxY: cy + hh });
 
-    // --- Reference grid (thin lines every 2 units) so panning reads clearly. ---
-    const gridColor = { red: 0.22, green: 0.26, blue: 0.33 };
+    // --- Reference grid (every 4 units) so panning reads clearly. ---
+    const gridColor = { red: 0.19, green: 0.23, blue: 0.29 };
     const mapW = MAP.maxX - MAP.minX;
     const mapH = MAP.maxY - MAP.minY;
-    for (let x = Math.ceil(MAP.minX); x <= MAP.maxX; x += 2) {
-        game.add(new Rectangle(gl, { width: 0.04, height: mapH }).setColor(gridColor).setPosition({ x, y: 0 }).init());
+    for (let x = Math.ceil(MAP.minX / 4) * 4; x <= MAP.maxX; x += 4) {
+        game.add(new Rectangle(gl, { width: 0.05, height: mapH }).setColor(gridColor).setPosition({ x, y: 0 }).init());
     }
-    for (let y = Math.ceil(MAP.minY); y <= MAP.maxY; y += 2) {
-        game.add(new Rectangle(gl, { width: mapW, height: 0.04 }).setColor(gridColor).setPosition({ x: 0, y }).init());
+    for (let y = Math.ceil(MAP.minY / 4) * 4; y <= MAP.maxY; y += 4) {
+        game.add(new Rectangle(gl, { width: mapW, height: 0.05 }).setColor(gridColor).setPosition({ x: 0, y }).init());
     }
 
     // --- Border walls around the map edges (drawn + collidable). ---
@@ -250,17 +287,24 @@ function startDemo() {
     wall(WALL, mapH + WALL, MAP.minX, 0); // left
     wall(WALL, mapH + WALL, MAP.maxX, 0); // right
 
-    // --- Obstacles: cover to fight around (drawn + collidable). ---
-    const blocks = [
-        { x: -5.5, y: 3.2, s: 0.7, c: { red: 0.30, green: 0.33, blue: 0.40 } },
-        { x: 4.8, y: 2.4, s: 0.9, c: { red: 0.33, green: 0.30, blue: 0.38 } },
-        { x: 6.6, y: -3.1, s: 0.7, c: { red: 0.30, green: 0.36, blue: 0.40 } },
-        { x: -6.2, y: -2.6, s: 0.8, c: { red: 0.34, green: 0.32, blue: 0.30 } },
-        { x: 0.4, y: 4.6, s: 0.6, c: { red: 0.28, green: 0.34, blue: 0.30 } },
-        { x: -2.0, y: -4.4, s: 0.8, c: { red: 0.32, green: 0.30, blue: 0.36 } },
-        { x: 2.6, y: -0.6, s: 0.5, c: { red: 0.30, green: 0.35, blue: 0.38 } },
-        { x: -3.0, y: 0.8, s: 0.6, c: { red: 0.35, green: 0.33, blue: 0.30 } },
+    // --- Obstacles: cover to fight around (drawn + collidable). Scattered from
+    // a fixed seed, kept apart from each other and clear of the player's start.
+    const rng = makeRng(20260805);
+    const palette = [
+        { red: 0.30, green: 0.33, blue: 0.40 }, { red: 0.33, green: 0.30, blue: 0.38 },
+        { red: 0.30, green: 0.36, blue: 0.40 }, { red: 0.34, green: 0.32, blue: 0.30 },
+        { red: 0.28, green: 0.34, blue: 0.30 }, { red: 0.35, green: 0.33, blue: 0.30 },
     ];
+    const blocks = [];
+    for (let tries = 0; tries < OBSTACLES * 30 && blocks.length < OBSTACLES; tries++) {
+        const size = 0.5 + rng() * 1.4;
+        const x = MAP.minX + 1.6 + rng() * (mapW - 3.2);
+        const y = MAP.minY + 1.6 + rng() * (mapH - 3.2);
+        if (Math.hypot(x, y) < 3.5) continue;                       // keep the start clear
+        const clear = blocks.every((b) => Math.hypot(b.x - x, b.y - y) > (b.s + size) / 2 + 1.6);
+        if (!clear) continue;
+        blocks.push({ x, y, s: size, c: palette[blocks.length % palette.length] });
+    }
     for (const b of blocks) {
         game.add(new Square(gl, { size: b.s }).setColor(b.c).setPosition({ x: b.x, y: b.y }).init());
         addBox(b.x, b.y, b.s / 2, b.s / 2);
@@ -281,19 +325,40 @@ function startDemo() {
     let aimPixel = null;
     let manualTraverse = 0; // -1 / 0 / 1 from Q and E; overrides pointer aim
     let gearMode = GEARBOX_MODE.AUTO; // the player's transmission mode, kept across restarts
+    let aimMode = AIM_MODE.OFF;       // the player's auto-aim policy, kept across restarts
+    let autoAim = null;               // AutoAim bound to the player's tank
+    let lockedOn = null;              // the tank the reticle is currently drawn on
+    let autoFire = false;             // holds the trigger for you when on
+    let ammo = PROJECTILES.AP;        // the shell the player has loaded
+    const markers = [];               // fading impact dots
 
     const camera = game.camera;
     camera.smoothing = 6;
     camera.bounds = CAM_BOUNDS;
 
+    // Targeting reticle: four corner ticks framing whatever auto-aim locked on.
+    // Added to the scene only while something is locked, moved every frame.
+    const RETICLE_COLOR = { red: 0.45, green: 0.85, blue: 1 };
+    const reticle = Array.from({ length: 4 }, () =>
+        new Rectangle(gl, { width: 0.16, height: 0.16 }).setColor(RETICLE_COLOR).init());
+
     // --- On-screen controls: steering left, throttle + fire right. ---
     const tbtn = (label, cls = "") => el("div", { className: `tbtn ${cls}`.trim(), textContent: label });
-    const btn = { up: tbtn("▲"), down: tbtn("▼"), left: tbtn("◀"), right: tbtn("▶"), fire: tbtn("🔥", "fire") };
+    const btn = {
+        up: tbtn("▲"), down: tbtn("▼"), left: tbtn("◀"), right: tbtn("▶"),
+        fire: tbtn("🔥", "fire"), aim: tbtn("🎯", "aim"), auto: tbtn("AUTO", "autofire"),
+    };
     stage.append(
         el("div", { className: "pad left" }, [btn.left, btn.right]),
-        el("div", { className: "pad right" }, [btn.fire, el("div", { className: "col" }, [btn.up, btn.down])]),
+        el("div", { className: "pad right" }, [
+            el("div", { className: "col" }, [btn.aim, btn.auto]),
+            btn.fire,
+            el("div", { className: "col" }, [btn.up, btn.down]),
+        ]),
     );
     btn.fire.addEventListener("pointerdown", (e) => { e.preventDefault(); firePlayer(); });
+    btn.aim.addEventListener("pointerdown", (e) => { e.preventDefault(); cycleAim(); });
+    btn.auto.addEventListener("pointerdown", (e) => { e.preventDefault(); toggleAutoFire(); });
 
     // --- Banner shown when the battle ends. ---
     const bannerText = el("b");
@@ -352,6 +417,32 @@ function startDemo() {
     const mini = el("canvas", { width: MINI_W, height: MINI_H, className: "mini" });
     const miniCtx = mini.getContext("2d");
 
+    // Auto-aim card: the mode it is on, and what it currently has locked.
+    const aimDot = el("span", { className: "dot" });
+    const aimName = el("b", { textContent: "Desactivado" });
+    const aimBtn = el("button", { textContent: "Cambiar modo (T)", onclick: () => cycleAim() });
+    const aimTarget = el("div", { className: "target", textContent: "Sin objetivo" });
+    // Ammo picker: each shell bends the penetration model differently.
+    const ammoBtns = AMMO.map((type) =>
+        el("button", { className: "shell", onclick: () => setAmmo(type) }, [
+            el("b", { textContent: type.name }),
+            el("small", { textContent: "" }),
+        ]),
+    );
+    const impactLine = el("div", { id: "impact", textContent: "—" });
+    const kFace = kv("Cara"), kAngle = kv("Ángulo"), kEff = kv("Blindaje efectivo"), kPen = kv("Penetración");
+
+    const autoFireDot = el("span", { className: "dot" });
+    const autoFireName = el("b", { textContent: "Fuego manual" });
+    const autoFireBtn = el("button", { textContent: "Fuego automático (F)", onclick: () => toggleAutoFire() });
+    const aimWidget = el("div", {}, [
+        el("div", { className: "aimrow" }, [aimDot, aimName]),
+        aimTarget,
+        el("div", { style: "margin-top:10px" }, [aimBtn]),
+        el("div", { className: "aimrow", style: "margin-top:14px" }, [autoFireDot, autoFireName]),
+        el("div", { style: "margin-top:8px" }, [autoFireBtn]),
+    ]);
+
     const panel = el("div", { id: "panel" }, [
         el("h1", { textContent: "Batalla de tanques" }),
         el("div", { className: "card" }, [
@@ -360,6 +451,16 @@ function startDemo() {
             el("div", { className: "row" }, [hpBar]),
             kHp.row, kSpeed.row, kTurret.row, kAmmo.row,
             el("div", { className: "hint", textContent: "Teclas 1-4 cambian de tanque (reinicia la batalla)" }),
+        ]),
+        el("div", { className: "card" }, [
+            el("h2", { textContent: "Munición y blindaje" }),
+            el("div", { className: "ammo" }, ammoBtns),
+            impactLine, kFace.row, kAngle.row, kEff.row, kPen.row,
+            el("div", { className: "hint", textContent: "C cambia de proyectil · el blindaje efectivo crece con el ángulo" }),
+        ]),
+        el("div", { className: "card" }, [
+            el("h2", { textContent: "Auto-apuntado" }), aimWidget,
+            el("div", { className: "hint", textContent: "T (o 🎯) cicla el objetivo · F (o AUTO) mantiene el gatillo" }),
         ]),
         el("div", { className: "card" }, [
             el("h2", { textContent: "Caja de cambios" }), gearWidget,
@@ -386,6 +487,15 @@ function startDemo() {
     // Debug / test handle.
     window.raptorDrive = {
         game, camera, TANK_DESIGNS, setDesign, startBattle,
+        get autoAim() { return autoAim; },
+        get autoFire() { return autoFire; },
+        get blocks() { return blocks; },
+        ammoId: () => ammo.id,
+        cycleAmmo, firePlayer,
+        get colliders() { return colliders; },
+        toggleAutoFire,
+        get lockedOn() { return lockedOn; },
+        cycleAim,
         get player() { return player; },
         get enemies() { return enemies; },
         get shells() { return shells; },
@@ -414,6 +524,9 @@ function startDemo() {
         if (e.code === "Space") { e.preventDefault(); firePlayer(); }
         else if (k === "q") manualTraverse = 1;
         else if (k === "e") manualTraverse = -1;
+        else if (k === "t") cycleAim();
+        else if (k === "f") toggleAutoFire();
+        else if (k === "c") cycleAmmo();
         else if (k === "g") setGearMode();
         else if (k === "x") shift(1);
         else if (k === "z") shift(-1);
@@ -433,6 +546,76 @@ function startDemo() {
         const v = el("span", { className: "v", textContent: "—" });
         const row = el("div", { className: "kv" }, [el("span", { className: "k", textContent: label }), v]);
         return { row, v };
+    }
+
+    // Loads a shell type and refreshes the picker's stat line.
+    function setAmmo(type) {
+        ammo = type;
+        refreshAmmo();
+    }
+
+    function cycleAmmo() {
+        setAmmo(AMMO[(AMMO.indexOf(ammo) + 1) % AMMO.length]);
+    }
+
+    function refreshAmmo() {
+        const gun = player ? player.tank.design.weapon : null;
+        AMMO.forEach((type, i) => {
+            ammoBtns[i].classList.toggle("active", type === ammo);
+            ammoBtns[i].querySelector("small").textContent = gun
+                ? `${Math.round(gun.penetration * type.penMultiplier)} mm · ${Math.round(gun.damage * type.damageMultiplier)} daño`
+                : "";
+        });
+    }
+
+    // Panel readout for the player's own shots.
+    function showImpact(key, unit, face, shot, penetration) {
+        const info = IMPACT[key];
+        impactLine.textContent = `${info.label} · ${shot.type.name}`;
+        impactLine.style.color = `rgb(${[info.color.red, info.color.green, info.color.blue].map((c) => Math.round(c * 255)).join(",")})`;
+        kFace.v.textContent = `${face.name} de ${unit.tank.design.name} (${face.armor} mm)`;
+        kAngle.v.textContent = `${shot.angle.toFixed(0)}°`;
+        kEff.v.textContent = Number.isFinite(shot.effectiveArmor) ? `${shot.effectiveArmor.toFixed(0)} mm` : "∞";
+        kPen.v.textContent = `${Math.round(penetration)} mm`;
+    }
+
+    // Steps the auto-aim policy: off → nearest → weakest → toughest → strongest.
+    function cycleAim() {
+        if (!autoAim) return;
+        autoAim.cycle();
+        aimMode = autoAim.mode;
+        refreshAimUi();
+    }
+
+    // Holds the trigger: while on, the gun goes off by itself as soon as it has
+    // reloaded (and, when auto-aim has a target, as soon as it is lined up).
+    function toggleAutoFire(on = !autoFire) {
+        autoFire = on;
+        refreshAimUi();
+    }
+
+    function refreshAimUi() {
+        const on = autoAim && autoAim.enabled;
+        aimName.textContent = autoAim ? autoAim.label : "Desactivado";
+        aimDot.classList.toggle("on", !!on);
+        btn.aim.classList.toggle("on", !!on);
+
+        autoFireName.textContent = autoFire ? "Fuego automático" : "Fuego manual";
+        autoFireDot.classList.toggle("on", autoFire);
+        autoFireBtn.textContent = autoFire ? "Desactivar auto (F)" : "Fuego automático (F)";
+        btn.auto.classList.toggle("on", autoFire);
+    }
+
+    // One frame of auto-fire: only spend a shell when it can actually land.
+    function autoFireTick() {
+        if (!autoFire || !player.weapon.ready) return;
+        const target = autoAim.target;
+        if (target) {
+            // Wait for the turret to line up, and do not shoot into cover.
+            if (player.tank.aimErrorTo(target.position) > AUTO_FIRE_ARC) return;
+            if (isBlocked(player.tank.muzzle, target.position)) return;
+        }
+        fire(player);
     }
 
     // Switches the player's transmission between automatic and manual. In auto
@@ -461,7 +644,7 @@ function startDemo() {
         // to manual, so the enemies always shift automatically.
         const gearbox = new Gearbox({ ...d.gearbox, mode: enemy ? GEARBOX_MODE.AUTO : gearMode });
         const driver = new TankController(tank.hull, { ...d.drive, bounds: TANK_BOUNDS, gearbox });
-        const weapon = new Weapon({ ...d.weapon, penetration: 999 });
+        const weapon = new Weapon({ ...d.weapon });
         const unit = { tank, driver, weapon, gearbox, ai: null, enemy };
 
         if (enemy) {
@@ -481,6 +664,10 @@ function startDemo() {
         }
         for (const s of shells) game.remove(s.entity);
         shells = [];
+        for (const tick of reticle) game.remove(tick);
+        lockedOn = null;
+        for (const m of markers) game.remove(m.shape);
+        markers.length = 0;
         enemies = [];
         player = null;
     }
@@ -493,8 +680,17 @@ function startDemo() {
         player = spawn({ design, x: 0, y: 0, rotation: 0 });
         enemies = SPAWNS.map((s) => spawn({ design: TANK_DESIGNS[s.design], x: s.x, y: s.y, rotation: s.rotation, enemy: true }));
 
+        autoAim = new AutoAim(player.tank, { mode: aimMode });
+        lockedOn = null;
+        for (const tick of reticle) game.remove(tick);
+
         camera.centerOn(player.tank.position.x, player.tank.position.y);
         setGearMode(gearMode);
+        refreshAimUi();
+        refreshAmmo();
+        impactLine.textContent = "—";
+        impactLine.style.color = "";
+        kFace.v.textContent = kAngle.v.textContent = kEff.v.textContent = kPen.v.textContent = "—";
         buildRoster();
         for (let i = 0; i < GARAGE.length; i++) garageBtns[i].classList.toggle("active", GARAGE[i] === design);
     }
@@ -529,7 +725,8 @@ function startDemo() {
         if (over || !unit.tank.alive || !unit.weapon.ready) return;
         const muzzle = unit.tank.muzzle;
         const dir = unit.tank.turretForward;
-        const bullet = unit.weapon.fire(muzzle.x, muzzle.y, dir.x, dir.y, unit);
+        const shell = unit.enemy ? (PROJECTILES[unit.tank.design.ammo] ?? PROJECTILES.AP) : ammo;
+        const bullet = unit.weapon.fire(muzzle.x, muzzle.y, dir.x, dir.y, unit, shell);
         if (!bullet) return;
         const entity = new Circle(gl, { radius: 0.075 })
             .setColor(unit.enemy ? { red: 1, green: 0.55, blue: 0.35 } : { red: 1, green: 0.85, blue: 0.3 })
@@ -552,23 +749,62 @@ function startDemo() {
         unit.driver.speed = 0;
     }
 
+    // A shell that hit armor: run the penetration model for its type against the
+    // face it actually struck, then apply what that means.
+    function resolveImpact(shell, unit, hit) {
+        const b = shell.bullet;
+        const face = unit.tank.faceForEdge(hit.edgeIndex);
+        const shot = resolveShot({
+            type: b.type,
+            penetration: b.penetration,
+            damage: b.damage,
+            direction: b.direction,
+            normal: hit.normal,
+            armor: face.armor,
+        });
+
+        const key = shot.result === "block" && shot.damage > 0 ? "splash" : shot.result;
+        spawnMarker(hit.point, key);
+        if (b.owner === player) showImpact(key, unit, face, shot, b.penetration);
+
+        if (shot.damage > 0) {
+            unit.tank.takeDamage(shot.damage);
+            if (!unit.tank.alive) destroy(unit);
+        }
+
+        if (shot.result === "ricochet") {
+            // Skips off and keeps flying, slower and with less punch left.
+            b.velocity = reflect(b.velocity, hit.normal);
+            b.velocity.x *= 0.7;
+            b.velocity.y *= 0.7;
+            b.penetration *= 0.8;
+            b.position = { x: hit.point.x + hit.normal.x * 0.06, y: hit.point.y + hit.normal.y * 0.06 };
+            b.prev = { x: b.position.x, y: b.position.y };
+            return;
+        }
+        b.alive = false;
+    }
+
     function updateShells(dt) {
         for (const shell of shells.slice()) {
             const b = shell.bullet;
             b.update(dt);
 
-            // Hit the first tank on the swept segment (never its own shooter).
+            // Raycast the swept segment against every hull and take the nearest
+            // hit, so a shell cannot pass through a tank standing in front.
+            let best = null;
             for (const unit of [player, ...enemies]) {
                 if (!unit.tank.alive || unit === b.owner) continue;
-                if (!segmentHitsCircle(b.prev, b.position, unit.tank.position, unit.tank.radius)) continue;
-                unit.tank.takeDamage(b.damage);
-                if (!unit.tank.alive) destroy(unit);
-                b.alive = false;
-                break;
+                const hit = raycastShape(b.prev, b.position, unit.tank.hull);
+                if (hit && (!best || hit.t < best.hit.t)) best = { unit, hit };
             }
+            if (best) resolveImpact(shell, best.unit, best.hit);
 
             // Scenery stops shells too.
-            if (b.alive && colliders.some((box) => segmentHitsBox(b.prev, b.position, box))) b.alive = false;
+            if (b.alive && !best && colliders.some((box) => segmentHitsBox(b.prev, b.position, box))) {
+                spawnMarker(b.position, "block");
+                b.alive = false;
+            }
 
             if (!b.alive) {
                 game.remove(shell.entity);
@@ -577,6 +813,23 @@ function startDemo() {
                 shell.entity.setPosition(b.position);
             }
         }
+
+        // Fade out the impact dots.
+        for (const marker of markers.slice()) {
+            marker.life -= dt;
+            if (marker.life <= 0) {
+                game.remove(marker.shape);
+                markers.splice(markers.indexOf(marker), 1);
+            }
+        }
+    }
+
+    // A short-lived dot where a shell met armor, coloured by what happened.
+    function spawnMarker(point, key) {
+        const shape = new Circle(gl, { radius: 0.14 })
+            .setColor(IMPACT[key].color).setPosition(point).init();
+        game.add(shape);
+        markers.push({ shape, life: 0.45 });
     }
 
     // --- Physics-lite: keep bodies out of the scenery and out of each other ---
@@ -615,6 +868,21 @@ function startDemo() {
         }
     }
 
+    // Frames the locked target with the reticle, adding it to the scene only
+    // while something is actually locked.
+    function setLock(target) {
+        if (target !== lockedOn) {
+            if (target && !lockedOn) for (const tick of reticle) game.add(tick);
+            else if (!target && lockedOn) for (const tick of reticle) game.remove(tick);
+            lockedOn = target;
+        }
+        if (!lockedOn) return;
+        const r = lockedOn.radius + 0.34;
+        const p = lockedOn.position;
+        const corners = [[-1, 1], [1, 1], [-1, -1], [1, -1]];
+        reticle.forEach((tick, i) => tick.setPosition({ x: p.x + corners[i][0] * r, y: p.y + corners[i][1] * r }));
+    }
+
     // --- Minimap ---
 
     const miniX = (x) => ((x - MAP.minX) / mapW) * MINI_W;
@@ -627,6 +895,13 @@ function startDemo() {
             miniCtx.fillStyle = "#4a4a52";
             miniCtx.fillRect(x - 2, y - 2, 4, 4);
             return;
+        }
+        if (t === lockedOn) {
+            miniCtx.strokeStyle = "#73d9ff";
+            miniCtx.lineWidth = 1.5;
+            miniCtx.beginPath();
+            miniCtx.arc(x, y, 6, 0, Math.PI * 2);
+            miniCtx.stroke();
         }
         const g = t.turretForward;
         miniCtx.strokeStyle = color;
@@ -678,11 +953,16 @@ function startDemo() {
         player.weapon.update(dt);
         if (player.tank.alive && !over) {
             player.driver.update(dt);
+            // Aiming priority: hand traverse beats auto-aim, which beats the
+            // pointer. Auto-aim only picks a target and swings the gun onto it.
+            const locked = autoAim.update(manualTraverse !== 0 ? 0 : dt, enemies.map((e) => e.tank));
             if (manualTraverse !== 0) {
                 player.tank.traverse(manualTraverse, dt);
-            } else if (aimPixel) {
+            } else if (!locked && aimPixel) {
                 player.tank.aimAt(camera.screenToWorld(aimPixel.x, aimPixel.y, canvas), dt);
             }
+            setLock(locked);
+            autoFireTick();
         }
 
         // Enemies: the FSM writes their input, then they drive and shoot.
@@ -745,6 +1025,18 @@ function startDemo() {
         kSpeed.v.textContent = `${driver.speed.toFixed(2)} u/s`;
         kTurret.v.textContent = `${deg(tank.turretAngle)}°`;
         kAmmo.v.textContent = player.weapon.ready ? "Listo" : `Recargando ${(player.weapon.reloadProgress * 100).toFixed(0)}%`;
+
+        if (!autoAim.enabled) {
+            aimTarget.textContent = "Sin objetivo";
+        } else if (!lockedOn) {
+            aimTarget.textContent = "Buscando…";
+        } else {
+            const d = Math.hypot(lockedOn.position.x - tank.position.x, lockedOn.position.y - tank.position.y);
+            aimTarget.replaceChildren(
+                el("b", { textContent: lockedOn.design.name }),
+                document.createTextNode(` · ${Math.ceil(lockedOn.hp)} HP · a ${d.toFixed(1)} u`),
+            );
+        }
 
         let standing = 0;
         for (const foe of enemies) {
