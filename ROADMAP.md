@@ -125,6 +125,8 @@ de teclado WASD/flechas incluido. Demo `drive.html`. Mejoras posibles:
       gana el estado `ADVANCE` para tomar y defender terreno.
 - [ ] **Oleadas / puntuación:** hoy es una batalla única; falta progresión.
 - [ ] **Más modos:** captura de banderas, escolta, dominación con varias zonas.
+- [x] **Colisiones por forma:** los cascos chocan por su contorno real (SAT de
+      `components/physics/`) con filtro por radio, no como círculos.
 - [ ] **Órdenes al escuadrón:** hoy los aliados van siempre a la zona; poder
       pedirles que defiendan o ataquen daría control táctico.
 - [ ] **Zonas / puntos de interés** en el mapa grande (hoy es una llanura con

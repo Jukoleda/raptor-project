@@ -6,6 +6,28 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Cambiado (Colisiones por la forma del vehículo)
+- **Los cuerpos dejan de chocar como círculos**: el casco colisiona por su
+  **contorno real** reutilizando `collide()` (SAT) y `boundingRadius()` de
+  `components/physics/`, tanto contra el escenario como entre tanques. Un filtro
+  por radio descarta lo lejano y solo entonces se resuelve el solapamiento.
+- Se nota en el juego: el mismo casco para a **1,348 u** de un bloque puesto de
+  morro (su semilargo, 0,400) y a **1,223 u** de costado (su semiancho, 0,275).
+- Los límites del mundo (`TANK_BOUNDS`) pasan a ser una red de seguridad en el
+  borde del mapa: antes recortaban a todos a la misma distancia y **tapaban** las
+  diferencias de forma; ahora manda la colisión del casco.
+
+### Añadido (Visualizar el escuadrón)
+- **Flechas de escuadrón**: cada aliado vivo que queda fuera de la vista tiene un
+  indicador azul fijado al borde de la pantalla apuntando hacia él, que
+  desaparece en cuanto entra en cuadro.
+- El panel de escuadrón muestra **la distancia** a cada aliado.
+
+### Corregido
+- **`worldPolygon` duplicada** en `ballistics.js` y `physics/collision.js`: en el
+  build autocontenido ambas acaban como globales y una pisaba a la otra. La de
+  balística pasa a llamarse `hullOutline`.
+
 ### Añadido (Modo por equipos: rey de la colina)
 - **Dos escuadrones enfrentados** en `drive.html`: el jugador y **5 aliados**
   (azules) despliegan al oeste, **5 enemigos** (rojos) al este, con el objetivo

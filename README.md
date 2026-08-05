@@ -289,6 +289,25 @@ tank.sync();                 // coloca torreta y cañón sobre el casco
   enemigo la controla 30 s o si te destruyen. El banner dice por qué.
 - **Sin fuego amigo:** los proyectiles atraviesan a los tuyos.
 
+### Ver a tu escuadrón
+
+En un mapa de 57 × 41 tus aliados suelen estar fuera de pantalla, así que cada
+uno vivo que quede fuera de la vista tiene una **flecha azul fijada al borde**
+apuntando hacia él (desaparece en cuanto entra en cuadro). El panel de escuadrón
+añade además **a qué distancia** está cada uno, y el minimapa los pinta en azul.
+
+### Colisiones por la forma del vehículo
+
+Los cuerpos ya **no chocan como círculos**: el casco colisiona por su **contorno
+real** usando el SAT de `components/physics/`. Un filtro barato por radio
+descarta lo que está lejos y solo entonces se resuelve el solapamiento de verdad,
+así que sigue siendo barato con 11 tanques y 82 sólidos.
+
+Se nota: el mismo casco **para a distinta distancia según cómo lo presentes** —
+el Medio se detiene a 1,348 u de un bloque puesto de morro (su semilargo, 0,400)
+y a 1,223 u de costado (su semiancho, 0,275). Y una cuña puede colarse por un
+hueco donde un casco rectangular se engancha.
+
 La IA gana un estado para esto: **`ADVANCE`**, en el que va a por el terreno que
 le asignaron (`objective`) y lo defiende, en vez de deambular. Cada tanque recibe
 un punto ligeramente distinto alrededor del centro, así el escuadrón se despliega

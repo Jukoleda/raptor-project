@@ -6,7 +6,7 @@
     <title>Raptor — Batalla de tanques</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/camera.js, components/raptorEngine.js, components/controls/gearbox.js, components/controls/tankController.js, components/controls/tankAI.js, components/controls/autoAim.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/armor.js, components/vehicles/tank.js, controls/driveDemo.js + vendor/gl-matrix-min.js
+        Source: components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/camera.js, components/raptorEngine.js, components/physics/body.js, components/physics/collision.js, components/physics/world.js, components/controls/gearbox.js, components/controls/tankController.js, components/controls/tankAI.js, components/controls/autoAim.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/armor.js, components/vehicles/tank.js, controls/driveDemo.js + vendor/gl-matrix-min.js
         Regenerate with: node tools/build-standalone.mjs
         This file is fully self-contained: open it directly in any browser.
     -->
@@ -613,6 +613,400 @@ function RaptorEngine() {
 }
 
 RaptorEngine;
+
+// ===== components/physics/body.js =====
+// A physics body attached to a shape. The shape remains the source of truth for
+// the transform (position/rotation/scale); the body adds the dynamics on top:
+// type, velocity, mass and collision filtering.
+//
+// Body types:
+//   - "static":  never moves, infinite mass. Walls, ground.
+//   - "dynamic": integrated every step and pushed by collisions (rigid body).
+//
+// Collision filtering (see World.shouldCollide):
+//   - groupIndex: bodies sharing the same non-zero group always collide (>0) or
+//     never collide (<0), overriding category/mask. 0 means "use category/mask".
+//   - category/mask: bitmasks; A and B collide only if
+//     (A.mask & B.category) && (B.mask & A.category).
+
+const STATIC = "static";
+const DYNAMIC = "dynamic";
+
+class Body {
+    constructor(shape, {
+        type = DYNAMIC,
+        mass = 1,
+        restitution = 0.4,
+        velocity = { x: 0, y: 0 },
+        groupIndex = 0,
+        category = 0x0001,
+        mask = 0xffff,
+    } = {}) {
+        this.shape = shape;
+        this.type = type;
+        this.velocity = { x: velocity.x, y: velocity.y };
+        this.restitution = restitution;
+        this.groupIndex = groupIndex;
+        this.category = category;
+        this.mask = mask;
+        this._mass = mass;
+        this._recomputeMass();
+    }
+
+    get isDynamic() {
+        return this.type === DYNAMIC;
+    }
+
+    // Convenience access to the shape transform.
+    get position() {
+        return this.shape.position;
+    }
+
+    _recomputeMass() {
+        this.invMass = this.type === DYNAMIC && this._mass > 0 ? 1 / this._mass : 0;
+    }
+
+    setType(type) {
+        this.type = type;
+        if (type === STATIC) {
+            this.velocity.x = 0;
+            this.velocity.y = 0;
+        }
+        this._recomputeMass();
+        return this;
+    }
+
+    setMass(mass) {
+        this._mass = mass;
+        this._recomputeMass();
+        return this;
+    }
+
+    setVelocity(x, y) {
+        this.velocity.x = x;
+        this.velocity.y = y;
+        return this;
+    }
+}
+
+// ===== components/physics/collision.js =====
+// Convex collision detection for the shapes the engine ships with.
+//
+// collide(bodyA, bodyB) returns null when they are apart, or a manifold
+// { normal, penetration } when they overlap. `normal` is a unit vector pointing
+// from A toward B, and `penetration` is how deep the overlap is along it.
+//
+// Physics happens in the flat 2D world plane the shapes live in (their x/y
+// before the perspective projection), so colliders are built from each shape's
+// local collider outline transformed by position/rotation/scale.
+
+function transformPoint(p, shape) {
+    const angle = (shape.rotation * Math.PI) / 180;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    const x = p.x * shape.scale.x;
+    const y = p.y * shape.scale.y;
+    return {
+        x: shape.position.x + x * cos - y * sin,
+        y: shape.position.y + x * sin + y * cos,
+    };
+}
+
+function worldPolygon(shape) {
+    return shape.getColliderVertices().map((p) => transformPoint(p, shape));
+}
+
+function worldCircle(shape) {
+    // Uniform scale is assumed for circles; scale.x drives the radius.
+    return { center: { x: shape.position.x, y: shape.position.y }, radius: shape.radius * shape.scale.x };
+}
+
+// Largest distance from the shape's origin to its outline, in world units.
+function boundingRadius(shape) {
+    if (shape.colliderShape === "circle") {
+        return shape.radius * Math.max(shape.scale.x, shape.scale.y);
+    }
+    let max = 0;
+    for (const p of shape.getColliderVertices()) {
+        max = Math.max(max, Math.hypot(p.x * shape.scale.x, p.y * shape.scale.y));
+    }
+    return max;
+}
+
+function centroid(poly) {
+    let x = 0;
+    let y = 0;
+    for (const p of poly) {
+        x += p.x;
+        y += p.y;
+    }
+    return { x: x / poly.length, y: y / poly.length };
+}
+
+function projectOntoAxis(poly, axis) {
+    let min = Infinity;
+    let max = -Infinity;
+    for (const p of poly) {
+        const dot = p.x * axis.x + p.y * axis.y;
+        min = Math.min(min, dot);
+        max = Math.max(max, dot);
+    }
+    return [min, max];
+}
+
+// Separating Axis Theorem for two convex polygons. Returns the minimum
+// translation vector as { normal (A->B), penetration } or null if separated.
+function satPolygons(a, b) {
+    let minOverlap = Infinity;
+    let smallestAxis = null;
+
+    for (const poly of [a, b]) {
+        for (let i = 0; i < poly.length; i++) {
+            const p1 = poly[i];
+            const p2 = poly[(i + 1) % poly.length];
+            const edge = { x: p2.x - p1.x, y: p2.y - p1.y };
+            const len = Math.hypot(edge.x, edge.y) || 1;
+            const axis = { x: -edge.y / len, y: edge.x / len };
+
+            const [minA, maxA] = projectOntoAxis(a, axis);
+            const [minB, maxB] = projectOntoAxis(b, axis);
+
+            if (maxA < minB || maxB < minA) {
+                return null; // found a separating axis
+            }
+
+            const overlap = Math.min(maxA, maxB) - Math.max(minA, minB);
+            if (overlap < minOverlap) {
+                minOverlap = overlap;
+                smallestAxis = axis;
+            }
+        }
+    }
+
+    // Orient the normal from A toward B.
+    const ca = centroid(a);
+    const cb = centroid(b);
+    if ((cb.x - ca.x) * smallestAxis.x + (cb.y - ca.y) * smallestAxis.y < 0) {
+        smallestAxis = { x: -smallestAxis.x, y: -smallestAxis.y };
+    }
+
+    return { normal: smallestAxis, penetration: minOverlap };
+}
+
+function circleCircle(ca, cb) {
+    const dx = cb.center.x - ca.center.x;
+    const dy = cb.center.y - ca.center.y;
+    const dist = Math.hypot(dx, dy);
+    const sum = ca.radius + cb.radius;
+    if (dist >= sum) return null;
+    const normal = dist > 1e-6 ? { x: dx / dist, y: dy / dist } : { x: 1, y: 0 };
+    return { normal, penetration: sum - dist };
+}
+
+function closestPointOnSegment(p, a, b) {
+    const abx = b.x - a.x;
+    const aby = b.y - a.y;
+    const lenSq = abx * abx + aby * aby || 1;
+    let t = ((p.x - a.x) * abx + (p.y - a.y) * aby) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    return { x: a.x + abx * t, y: a.y + aby * t };
+}
+
+function pointInPolygon(p, poly) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const a = poly[i];
+        const b = poly[j];
+        if ((a.y > p.y) !== (b.y > p.y) && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+// Returns manifold with normal pointing from the polygon toward the circle.
+function circlePolygon(circle, poly) {
+    let closest = null;
+    let minDistSq = Infinity;
+    for (let i = 0; i < poly.length; i++) {
+        const cp = closestPointOnSegment(circle.center, poly[i], poly[(i + 1) % poly.length]);
+        const dsq = (cp.x - circle.center.x) ** 2 + (cp.y - circle.center.y) ** 2;
+        if (dsq < minDistSq) {
+            minDistSq = dsq;
+            closest = cp;
+        }
+    }
+
+    const inside = pointInPolygon(circle.center, poly);
+    const dist = Math.sqrt(minDistSq);
+    if (!inside && dist >= circle.radius) return null;
+
+    let normal;
+    if (dist > 1e-6) {
+        normal = { x: (circle.center.x - closest.x) / dist, y: (circle.center.y - closest.y) / dist };
+    } else {
+        normal = { x: 0, y: 1 };
+    }
+    if (inside) {
+        return { normal, penetration: circle.radius + dist };
+    }
+    return { normal, penetration: circle.radius - dist };
+}
+
+function collide(bodyA, bodyB) {
+    const sa = bodyA.shape;
+    const sb = bodyB.shape;
+    const aCircle = sa.colliderShape === "circle";
+    const bCircle = sb.colliderShape === "circle";
+
+    if (aCircle && bCircle) {
+        return circleCircle(worldCircle(sa), worldCircle(sb));
+    }
+    if (!aCircle && !bCircle) {
+        return satPolygons(worldPolygon(sa), worldPolygon(sb));
+    }
+
+    // One circle, one polygon.
+    const circleShape = aCircle ? sa : sb;
+    const polyShape = aCircle ? sb : sa;
+    const res = circlePolygon(worldCircle(circleShape), worldPolygon(polyShape));
+    if (!res) return null;
+
+    // res.normal points polygon -> circle. Reorient to A -> B.
+    const normal = aCircle ? { x: -res.normal.x, y: -res.normal.y } : res.normal;
+    return { normal, penetration: res.penetration };
+}
+
+// ===== components/physics/world.js =====
+// The physics world: holds the bodies, integrates them and resolves collisions.
+// Call step(dt) once per frame (register it as an engine updater).
+//
+// Scope (Fase A): linear rigid-body dynamics. Bodies translate and bounce along
+// the collision normal; angular response (spin from off-center hits) is not
+// simulated yet.
+
+
+// Positional correction keeps overlapping bodies from sinking into each other.
+const CORRECTION_PERCENT = 0.8;
+const CORRECTION_SLOP = 0.001;
+const SOLVER_ITERATIONS = 2;
+
+class World {
+    constructor({ gravity = { x: 0, y: 0 }, bounds = null, linearDamping = 0 } = {}) {
+        this.bodies = [];
+        this.gravity = gravity;
+        this.bounds = bounds; // { minX, maxX, minY, maxY } or null
+        this.linearDamping = linearDamping;
+    }
+
+    add(body) {
+        this.bodies.push(body);
+        return body;
+    }
+
+    remove(body) {
+        const i = this.bodies.indexOf(body);
+        if (i !== -1) this.bodies.splice(i, 1);
+        return this;
+    }
+
+    // Whether two bodies are allowed to collide, per group/category/mask rules.
+    static shouldCollide(a, b) {
+        if (a.type === STATIC && b.type === STATIC) return false;
+        if (a.groupIndex !== 0 && a.groupIndex === b.groupIndex) {
+            return a.groupIndex > 0;
+        }
+        return (a.mask & b.category) !== 0 && (b.mask & a.category) !== 0;
+    }
+
+    step(dt) {
+        if (dt <= 0) return;
+        this.integrate(dt);
+
+        for (let iter = 0; iter < SOLVER_ITERATIONS; iter++) {
+            for (let i = 0; i < this.bodies.length; i++) {
+                for (let j = i + 1; j < this.bodies.length; j++) {
+                    const a = this.bodies[i];
+                    const b = this.bodies[j];
+                    if (!World.shouldCollide(a, b)) continue;
+
+                    const manifold = collide(a, b);
+                    if (manifold && manifold.penetration > 0) {
+                        this.resolve(a, b, manifold);
+                    }
+                }
+            }
+        }
+
+        if (this.bounds) this.applyBounds();
+    }
+
+    integrate(dt) {
+        const damp = Math.max(0, 1 - this.linearDamping * dt);
+        for (const body of this.bodies) {
+            if (!body.isDynamic) continue;
+            body.velocity.x += this.gravity.x * dt;
+            body.velocity.y += this.gravity.y * dt;
+            body.velocity.x *= damp;
+            body.velocity.y *= damp;
+            body.shape.position.x += body.velocity.x * dt;
+            body.shape.position.y += body.velocity.y * dt;
+        }
+    }
+
+    resolve(a, b, { normal, penetration }) {
+        const invSum = a.invMass + b.invMass;
+        if (invSum === 0) return;
+
+        // Positional correction so bodies stop overlapping.
+        const correction = (Math.max(penetration - CORRECTION_SLOP, 0) / invSum) * CORRECTION_PERCENT;
+        a.shape.position.x -= normal.x * correction * a.invMass;
+        a.shape.position.y -= normal.y * correction * a.invMass;
+        b.shape.position.x += normal.x * correction * b.invMass;
+        b.shape.position.y += normal.y * correction * b.invMass;
+
+        // Impulse along the normal (relative velocity is B - A).
+        const rvx = b.velocity.x - a.velocity.x;
+        const rvy = b.velocity.y - a.velocity.y;
+        const velAlongNormal = rvx * normal.x + rvy * normal.y;
+        if (velAlongNormal > 0) return; // already separating
+
+        const e = Math.min(a.restitution, b.restitution);
+        const jImpulse = (-(1 + e) * velAlongNormal) / invSum;
+        const ix = jImpulse * normal.x;
+        const iy = jImpulse * normal.y;
+
+        a.velocity.x -= ix * a.invMass;
+        a.velocity.y -= iy * a.invMass;
+        b.velocity.x += ix * b.invMass;
+        b.velocity.y += iy * b.invMass;
+    }
+
+    applyBounds() {
+        const { minX, maxX, minY, maxY } = this.bounds;
+        for (const body of this.bodies) {
+            if (!body.isDynamic) continue;
+            const r = boundingRadius(body.shape);
+            const pos = body.shape.position;
+
+            if (pos.x - r < minX) {
+                pos.x = minX + r;
+                if (body.velocity.x < 0) body.velocity.x = -body.velocity.x * body.restitution;
+            } else if (pos.x + r > maxX) {
+                pos.x = maxX - r;
+                if (body.velocity.x > 0) body.velocity.x = -body.velocity.x * body.restitution;
+            }
+
+            if (pos.y - r < minY) {
+                pos.y = minY + r;
+                if (body.velocity.y < 0) body.velocity.y = -body.velocity.y * body.restitution;
+            } else if (pos.y + r > maxY) {
+                pos.y = maxY - r;
+                if (body.velocity.y > 0) body.velocity.y = -body.velocity.y * body.restitution;
+            }
+        }
+    }
+}
 
 // ===== components/controls/gearbox.js =====
 // A gearbox for the drivetrain: what turns a flat "hold W to accelerate" into
@@ -1408,7 +1802,9 @@ class AutoAim {
 
 // Transforms a shape's local collider outline into world space. Mirrors the
 // transform used by Shape.draw and the physics layer (rotation is CCW degrees).
-function worldPolygon(shape) {
+// Named apart from the physics layer's equivalent: both end up as globals in the
+// standalone build, and one silently overwriting the other is a trap.
+function hullOutline(shape) {
     const angle = (shape.rotation * Math.PI) / 180;
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);
@@ -1440,7 +1836,7 @@ function segmentIntersect(a, b, p, q) {
 // Casts the segment a->b against a polygon shape. Returns the first face hit as
 // { point, normal, edgeIndex, t } (normal points outward), or null.
 function raycastShape(a, b, shape) {
-    const poly = worldPolygon(shape);
+    const poly = hullOutline(shape);
     let best = null;
 
     for (let i = 0; i < poly.length; i++) {
@@ -2025,8 +2421,10 @@ function makeRng(seed) {
     return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
 }
 
-// Keep tanks inside the walls, and the camera inside the map edges.
-const TANK_BOUNDS = { minX: MAP.minX + 0.6, maxX: MAP.maxX - 0.6, minY: MAP.minY + 0.6, maxY: MAP.maxY - 0.6 };
+// The hulls now collide with the walls by their real outline, so these bounds
+// are only a last-resort net against escaping the map — keeping them tight would
+// stop every tank at the same distance and hide the shape differences.
+const TANK_BOUNDS = { minX: MAP.minX, maxX: MAP.maxX, minY: MAP.minY, maxY: MAP.maxY };
 const CAM_BOUNDS = { minX: MAP.minX + VIEW_W, maxX: MAP.maxX - VIEW_W, minY: MAP.minY + VIEW_H, maxY: MAP.maxY - VIEW_H };
 
 // Selectable player tanks, in the order shown in the panel.
@@ -2206,6 +2604,8 @@ const STYLES = `
     .foe .st.attack { color: #e8776a; }
     .foe .st.chase { color: #e8c24a; }
     .foe .st.retreat { color: #6aa9e0; }
+    .foe .st.advance { color: #7d9bb5; }
+    .foe .dist { color: #7d838a; font-size: 11px; }
 
     /* Stack the panel under the canvas and grow the touch buttons on phones. */
     @media (max-width: 720px) {
@@ -2222,27 +2622,6 @@ function el(tag, props = {}, children = []) {
 }
 
 // --- Geometry helpers (bullets and bodies against the static map) ---
-
-// Smallest vector that pushes a circle out of an AABB, or null if clear.
-function pushOut(cx, cy, r, box) {
-    const nearX = Math.max(box.minX, Math.min(cx, box.maxX));
-    const nearY = Math.max(box.minY, Math.min(cy, box.maxY));
-    const dx = cx - nearX;
-    const dy = cy - nearY;
-    const d2 = dx * dx + dy * dy;
-    if (d2 >= r * r) return null;
-    if (d2 > 1e-9) {
-        const d = Math.sqrt(d2);
-        return { x: (dx / d) * (r - d), y: (dy / d) * (r - d) };
-    }
-    // Center inside the box: eject along the nearest face.
-    const left = cx - box.minX, right = box.maxX - cx;
-    const bottom = cy - box.minY, top = box.maxY - cy;
-    const mx = Math.min(left, right), my = Math.min(bottom, top);
-    return mx < my
-        ? { x: (left < right ? -1 : 1) * (mx + r), y: 0 }
-        : { x: 0, y: (bottom < top ? -1 : 1) * (my + r) };
-}
 
 // Segment a→b against an AABB (slab method). Used for shells and line of sight.
 function segmentHitsBox(a, b, box) {
@@ -2274,9 +2653,15 @@ function startDemo() {
     game.createWindow(stage);
     const gl = game.context;
 
-    // Axis-aligned boxes tanks and shells collide with (walls + obstacles).
+    // Two views of the same scenery. `colliders` are axis-aligned boxes — cheap
+    // enough to test a shell or a line of sight against every frame. `solids`
+    // keeps the actual shapes, so tank bodies collide against the real outline
+    // (SAT from the physics module) instead of a bounding circle.
     const colliders = [];
+    const solids = [];
     const addBox = (cx, cy, hw, hh) => colliders.push({ minX: cx - hw, maxX: cx + hw, minY: cy - hh, maxY: cy + hh });
+    // Scenery never moves, so its bounding radius and centre are computed once.
+    const addSolid = (shape) => solids.push({ shape, r: boundingRadius(shape), x: shape.position.x, y: shape.position.y });
 
     // --- Reference grid (every 4 units) so panning reads clearly. ---
     const gridColor = { red: 0.19, green: 0.23, blue: 0.29 };
@@ -2298,8 +2683,10 @@ function startDemo() {
     // --- Border walls around the map edges (drawn + collidable). ---
     const wallColor = { red: 0.42, green: 0.38, blue: 0.31 };
     const wall = (w, h, x, y) => {
-        game.add(new Rectangle(gl, { width: w, height: h }).setColor(wallColor).setPosition({ x, y }).init());
+        const shape = new Rectangle(gl, { width: w, height: h }).setColor(wallColor).setPosition({ x, y }).init();
+        game.add(shape);
         addBox(x, y, w / 2, h / 2);
+        addSolid(shape);
     };
     wall(mapW + WALL, WALL, 0, MAP.maxY); // top
     wall(mapW + WALL, WALL, 0, MAP.minY); // bottom
@@ -2325,8 +2712,10 @@ function startDemo() {
         blocks.push({ x, y, s: size, c: palette[blocks.length % palette.length] });
     }
     for (const b of blocks) {
-        game.add(new Square(gl, { size: b.s }).setColor(b.c).setPosition({ x: b.x, y: b.y }).init());
+        const shape = new Square(gl, { size: b.s }).setColor(b.c).setPosition({ x: b.x, y: b.y }).init();
+        game.add(shape);
         addBox(b.x, b.y, b.s / 2, b.s / 2);
+        addSolid(shape);
     }
 
     // Line of sight for the AI: can it shoot without hitting the scenery?
@@ -2364,6 +2753,14 @@ function startDemo() {
     const RETICLE_COLOR = { red: 0.45, green: 0.85, blue: 1 };
     const reticle = Array.from({ length: 4 }, () =>
         new Rectangle(gl, { width: 0.16, height: 0.16 }).setColor(RETICLE_COLOR).init());
+
+    // Squad markers: on a map this size your allies are usually off screen, so
+    // each living one gets a small arrow pinned to the edge of the view pointing
+    // at them. They live in the world, so the camera carries them along.
+    const SQUAD_MARK_COLOR = { red: 0.35, green: 0.72, blue: 1 };
+    const squadMarks = ALLY_SPAWNS.map(() =>
+        new Triangle(gl, { width: 0.28, height: 0.34 }).setColor(SQUAD_MARK_COLOR).init());
+    const shownMarks = new Set();
 
     // --- On-screen controls: steering left, throttle + fire right. ---
     const tbtn = (label, cls = "") => el("div", { className: `tbtn ${cls}`.trim(), textContent: label });
@@ -2697,7 +3094,7 @@ function startDemo() {
         const gearbox = new Gearbox({ ...d.gearbox, mode: enemy ? GEARBOX_MODE.AUTO : gearMode });
         const driver = new TankController(tank.hull, { ...d.drive, bounds: TANK_BOUNDS, gearbox });
         const weapon = new Weapon({ ...d.weapon });
-        const unit = { tank, driver, weapon, gearbox, ai: null, enemy, isPlayer };
+        const unit = { tank, driver, weapon, gearbox, ai: null, enemy, isPlayer, bodyRadius: boundingRadius(tank.hull) };
 
         if (isPlayer) {
             driver.bindKeys(window);
@@ -2747,6 +3144,7 @@ function startDemo() {
         lockedOn = null;
         for (const m of markers) game.remove(m.shape);
         markers.length = 0;
+        hideSquadMarks();
         allies = [];
         enemies = [];
         player = null;
@@ -2796,14 +3194,15 @@ function startDemo() {
             for (const unit of units) {
                 const st = el("span", { className: "st" });
                 const fill = el("i");
+                const dist = el("small", { className: "dist" });
                 const row = el("div", { className: "foe" }, [
                     el("div", { className: "top" }, [
-                        el("span", { textContent: unit.tank.design.name }),
+                        el("span", {}, [document.createTextNode(unit.tank.design.name), dist]),
                         st,
                     ]),
                     el("div", { className: "bar slim" }, [fill]),
                 ]);
-                unit.hud = { row, st, fill };
+                unit.hud = { row, st, fill, dist };
                 container.append(row);
             }
         }
@@ -2926,36 +3325,48 @@ function startDemo() {
 
     // --- Physics-lite: keep bodies out of the scenery and out of each other ---
 
+    // Nudges a hull out along a manifold from the physics module. `sign` flips
+    // the push because collide() reports its normal pointing A -> B.
+    function push(shape, manifold, sign, share = 1) {
+        shape.setPosition({
+            x: shape.position.x + sign * manifold.normal.x * manifold.penetration * share,
+            y: shape.position.y + sign * manifold.normal.y * manifold.penetration * share,
+        });
+    }
+
+    // Tank body against the scenery, by its actual outline: a cheap radius test
+    // picks the few solids within reach, then SAT resolves the real overlap.
+    // That is why a wedge can slip past a corner a boxy hull would catch on.
     function resolveWorld(unit) {
         const hull = unit.tank.hull;
+        const reach = unit.bodyRadius;
         let pushed = 0;
         for (let pass = 0; pass < 2; pass++) {
-            for (const box of colliders) {
-                const p = pushOut(hull.position.x, hull.position.y, unit.tank.radius, box);
-                if (!p) continue;
-                hull.setPosition({ x: hull.position.x + p.x, y: hull.position.y + p.y });
-                pushed += Math.hypot(p.x, p.y);
+            for (const solid of solids) {
+                if (Math.hypot(solid.x - hull.position.x, solid.y - hull.position.y) > reach + solid.r) continue;
+                const hit = collide({ shape: hull }, { shape: solid.shape });
+                if (!hit) continue;
+                push(hull, hit, -1);
+                pushed += hit.penetration;
             }
         }
         if (pushed > 0.02) unit.driver.speed *= 0.35;
     }
 
-    // Separates overlapping tanks, each giving way by half.
+    // Separates overlapping tanks by their outlines, each giving way by half.
     function separate(units) {
         for (let i = 0; i < units.length; i++) {
             for (let j = i + 1; j < units.length; j++) {
-                const a = units[i].tank, b = units[j].tank;
-                const dx = b.position.x - a.position.x;
-                const dy = b.position.y - a.position.y;
-                const min = a.radius + b.radius;
-                const d = Math.hypot(dx, dy);
-                if (d >= min || d < 1e-6) continue;
-                const push = (min - d) / 2;
-                const nx = dx / d, ny = dy / d;
-                a.hull.setPosition({ x: a.position.x - nx * push, y: a.position.y - ny * push });
-                b.hull.setPosition({ x: b.position.x + nx * push, y: b.position.y + ny * push });
-                units[i].driver.speed *= 0.5;
-                units[j].driver.speed *= 0.5;
+                const a = units[i], b = units[j];
+                const dx = b.tank.position.x - a.tank.position.x;
+                const dy = b.tank.position.y - a.tank.position.y;
+                if (Math.hypot(dx, dy) > a.bodyRadius + b.bodyRadius) continue;
+                const hit = collide({ shape: a.tank.hull }, { shape: b.tank.hull });
+                if (!hit) continue;
+                push(a.tank.hull, hit, -1, 0.5);
+                push(b.tank.hull, hit, 1, 0.5);
+                a.driver.speed *= 0.5;
+                b.driver.speed *= 0.5;
             }
         }
     }
@@ -2973,6 +3384,36 @@ function startDemo() {
         const p = lockedOn.position;
         const corners = [[-1, 1], [1, 1], [-1, -1], [1, -1]];
         reticle.forEach((tick, i) => tick.setPosition({ x: p.x + corners[i][0] * r, y: p.y + corners[i][1] * r }));
+    }
+
+    // Places (or hides) the edge arrow for each ally that is off screen.
+    function updateSquadMarks() {
+        const { halfW, halfH } = camera.viewExtents(canvas);
+        const marginX = halfW - 0.35;
+        const marginY = halfH - 0.35;
+
+        allies.forEach((mate, i) => {
+            const mark = squadMarks[i];
+            const dx = mate.tank.position.x - camera.x;
+            const dy = mate.tank.position.y - camera.y;
+            const offScreen = mate.tank.alive && (Math.abs(dx) > marginX || Math.abs(dy) > marginY);
+
+            if (!offScreen) {
+                if (shownMarks.has(i)) { game.remove(mark); shownMarks.delete(i); }
+                return;
+            }
+            if (!shownMarks.has(i)) { game.add(mark); shownMarks.add(i); }
+
+            // Slide along the direction to the ally until it meets the edge.
+            const scale = Math.min(marginX / Math.abs(dx || 1e-6), marginY / Math.abs(dy || 1e-6));
+            mark.setPosition({ x: camera.x + dx * scale, y: camera.y + dy * scale });
+            mark.setRotation((Math.atan2(-dx, dy) * 180) / Math.PI); // point outward, at them
+        });
+    }
+
+    function hideSquadMarks() {
+        for (const i of shownMarks) game.remove(squadMarks[i]);
+        shownMarks.clear();
     }
 
     // --- The objective ---
@@ -3117,6 +3558,7 @@ function startDemo() {
 
         for (const unit of allUnits()) unit.tank.sync();
         camera.follow(player.tank.position, dt);
+        updateSquadMarks();
 
         if (!over) updateCapture(dt);
 
@@ -3205,6 +3647,9 @@ function startDemo() {
             unit.hud.row.classList.toggle("down", !t.alive);
             unit.hud.fill.style.width = `${t.hpRatio * 100}%`;
             unit.hud.fill.style.background = t.hpRatio > 0.5 ? "#43c06a" : t.hpRatio > 0.2 ? "#d8b13a" : "#d84a3a";
+            unit.hud.dist.textContent = t.alive
+                ? ` · a ${Math.hypot(t.position.x - tank.position.x, t.position.y - tank.position.y).toFixed(0)} u`
+                : "";
         }
         const mineStanding = myTeam().filter((u) => u.tank.alive).length;
         kFoes.v.textContent = `${mineStanding} / ${standing}`;
