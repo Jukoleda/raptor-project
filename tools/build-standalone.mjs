@@ -50,6 +50,7 @@ const CONTROLS = [
     "components/controls/gearbox.js",
     "components/controls/tankController.js",
     "components/controls/tankAI.js",
+    "components/controls/autoAim.js",
 ];
 
 // Vehicles assembled from shapes (must come after ENGINE, which defines them).

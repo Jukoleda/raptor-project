@@ -61,6 +61,7 @@ components/
     armor.js               # Armor: blindaje por cara + integridad (HP)
     index.js               # Re-exporta las armas
   controls/
+    autoAim.js             # AutoAim: elige objetivo (cercano/vida/fuerza) y apunta
     gearbox.js             # Gearbox: marchas, par motor y cambio automático/manual
     tankController.js      # TankController: movimiento estilo tanque + input de teclado
     tankAI.js              # TankAI: máquina de estados enemiga (patrulla/persigue/ataca/huye)
@@ -214,9 +215,10 @@ A/D o ←/→ giran; **en móvil** hay un D-pad táctil en pantalla). El mapa es
 que la pantalla y la **cámara sigue al tanque** (ver abajo), con un **minimapa**
 del mapa completo; el tanque **choca** con muros y obstáculos (colisión por
 expulsión círculo-AABB). Puedes **elegir entre cuatro tanques** (teclas 1-4), la
-**torreta apunta con el ratón o el dedo** (Q/E la giran a mano), se conduce con
-**caja de cambios** (automática o manual, ver abajo) y se combate contra
-**cuatro enemigos con IA** (ver abajo), todos con **barra de vida**.
+**torreta apunta con el ratón o el dedo** (Q/E la giran a mano) o con
+**auto-apuntado** por modos (ver abajo), se conduce con **caja de cambios**
+(automática o manual) y se combate contra **doce enemigos con IA** repartidos por
+una arena de **57 × 41** unidades, todos con **barra de vida**.
 Sigue la convención del motor: rotación en grados CCW y el eje local
 **+Y es «adelante»**.
 
@@ -268,6 +270,44 @@ tank.aimAt(worldPoint, dt);  // o tank.traverse(±1, dt) para girarla a mano
 tank.sync();                 // coloca torreta y cañón sobre el casco
 // tank.muzzle -> boca del cañón, listo para el módulo de armas
 ```
+
+## Auto-apuntado
+
+`components/controls/AutoAim` cede la torreta a una política de selección de
+objetivo. Un solo botón (**T**, o 🎯 en móvil) recorre las políticas, así que
+puedes pasar de «apunta a lo que tengas encima» a «remata al herido» sin soltar
+el volante:
+
+```
+OFF → Más cercano → Menos vida → Más vida → Más fuerte → OFF …
+```
+
+| Modo | A quién apunta |
+|------|----------------|
+| **Más cercano** | El más próximo — el que probablemente te está disparando. |
+| **Menos vida** | El de menos HP restante: para rematarlo. |
+| **Más vida** | El de más HP restante: el que más va a durar. |
+| **Más fuerte** | El de mayor **amenaza de diseño** (`Tank.power` = resistencia × daño por segundo), esté como esté de dañado. |
+
+Solo elige objetivo y mueve el cañón: **nunca dispara**. Los empates se rompen
+por distancia y, en un empate exacto, gana el objetivo actual, para que el cañón
+no oscile entre dos candidatos iguales.
+
+```js
+import { AutoAim, AIM_MODE } from "./controls/index.js";
+
+const autoAim = new AutoAim(playerTank, { mode: AIM_MODE.OFF });
+autoAim.cycle();                       // avanza al siguiente modo
+
+// ...cada frame:
+const objetivo = autoAim.update(dt, enemigos.map((e) => e.tank));
+// objetivo === null si está desactivado o no queda nadie vivo
+autoAim.label;   // "Más cercano" | "Menos vida" | ...
+```
+
+En `drive.html` la prioridad es: giro manual (Q/E) **>** auto-apuntado **>**
+puntero, y el objetivo enganchado se marca con una **retícula** en el mundo y un
+círculo en el minimapa.
 
 ## Caja de cambios
 

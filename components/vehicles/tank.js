@@ -176,6 +176,13 @@ export default class Tank {
         return this.alive;
     }
 
+    // How dangerous this design is, regardless of current damage: durability
+    // times sustained damage output. Used by auto-aim to rank threats.
+    get power() {
+        const w = this.design.weapon;
+        return w ? (this.maxHp * w.damage) / w.reload : this.maxHp;
+    }
+
     // The hull carries the tank's transform — drive it with a TankController.
     get position() { return this.hull.position; }
     get rotation() { return this.hull.rotation; }

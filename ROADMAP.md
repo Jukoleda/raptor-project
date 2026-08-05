@@ -111,8 +111,13 @@ de teclado WASD/flechas incluido. Demo `drive.html`. Mejoras posibles:
 - [x] **Caja de cambios:** `components/controls/Gearbox` con marchas, curva de
       par, corte de transmisión al cambiar y modos **automático/manual**; una
       caja distinta por diseño de tanque.
+- [x] **Auto-apuntado:** `components/controls/AutoAim` con políticas en ciclo
+      (más cercano → menos vida → más vida → más fuerte → off), retícula sobre el
+      objetivo y marca en el minimapa.
 - [ ] **Gamepad** además del teclado.
 - [ ] **Oleadas / puntuación:** hoy es una batalla única; falta progresión.
+- [ ] **Zonas / puntos de interés** en el mapa grande (hoy es una llanura con
+      cobertura dispersa).
 - [ ] **IA con cobertura:** usar los obstáculos para cubrirse, no solo para
       bloquear la línea de tiro.
 

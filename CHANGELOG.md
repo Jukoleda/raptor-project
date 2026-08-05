@@ -6,6 +6,23 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Mapa y puntería)
+- **Arena diez veces mayor**: `drive.html` pasa de 18 × 13 a **57 × 41** unidades
+  (√10 más larga por lado, es decir **10× el área**), con **78 obstáculos**
+  dispersos desde una semilla fija (mismo mapa en cada carga) y **12 enemigos**
+  repartidos en anillo alrededor del inicio. Rejilla cada 4 unidades.
+- **Auto-apuntado** (`components/controls/autoAim.js`): `AutoAim` cede la torreta
+  a una política de selección de objetivo, y un botón recorre el ciclo
+  **off → más cercano → menos vida → más vida → más fuerte → off**. Solo elige
+  objetivo y apunta: nunca dispara. Los empates se rompen por distancia y el
+  objetivo actual gana el empate exacto, para que el cañón no oscile.
+- **`Tank.power`**: amenaza de diseño (resistencia × daño por segundo), que es lo
+  que ordena el modo «más fuerte».
+- **Demo:** tecla **T** (o botón 🎯, también en móvil) cicla el modo; el objetivo
+  enganchado se marca con una **retícula** en el mundo y un círculo en el
+  minimapa, y el panel muestra el modo, el enemigo fijado, su vida y la
+  distancia. Prioridad de apuntado: giro manual (Q/E) > auto-apuntado > puntero.
+
 ### Añadido (Transmisión)
 - **Caja de cambios** (`components/controls/gearbox.js`): `Gearbox` da al
   vehículo una transmisión real. Cada marcha alcanza una fracción del tope de
