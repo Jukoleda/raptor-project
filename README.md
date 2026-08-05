@@ -272,6 +272,29 @@ tank.sync();                 // coloca torreta y cañón sobre el casco
 // tank.muzzle -> boca del cañón, listo para el módulo de armas
 ```
 
+## Rey de la colina: dos escuadrones
+
+`drive.html` es una batalla **por equipos** con un objetivo en el centro del mapa.
+
+- **Despliegue enfrentado:** tú y **5 aliados** (azules) al oeste, **5 enemigos**
+  (rojos) al este, con la zona entre medias. Tu tanque conserva los colores de su
+  diseño para que siempre te encuentres.
+- **La zona** (disco translúcido, radio 4,5) cambia de color según quién la pisa:
+  neutral, tuya, del enemigo o **en disputa**.
+- **Se gana controlándola 30 s.** Un bando solo suma tiempo si está **solo**
+  dentro; con los dos bandos presentes el reloj **se para**. Con la zona vacía,
+  ambos marcadores decaen poco a poco. Ir en número ayuda, pero con rendimientos
+  decrecientes (×1,6 como mucho), así que un tanque suelto también captura.
+- **Final:** ganas por control o destruyendo al escuadrón enemigo; pierdes si el
+  enemigo la controla 30 s o si te destruyen. El banner dice por qué.
+- **Sin fuego amigo:** los proyectiles atraviesan a los tuyos.
+
+La IA gana un estado para esto: **`ADVANCE`**, en el que va a por el terreno que
+le asignaron (`objective`) y lo defiende, en vez de deambular. Cada tanque recibe
+un punto ligeramente distinto alrededor del centro, así el escuadrón se despliega
+por la zona en lugar de apilarse. Y ya no persigue solo al jugador: apunta al
+**rival vivo más cercano de su equipo**, sea quien sea.
+
 ## Blindaje y balística en la batalla
 
 `drive.html` **usa el modelo de penetración completo** de

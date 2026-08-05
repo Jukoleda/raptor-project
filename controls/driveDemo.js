@@ -44,27 +44,45 @@ const CAM_BOUNDS = { minX: MAP.minX + VIEW_W, maxX: MAP.maxX - VIEW_W, minY: MAP
 // Selectable player tanks, in the order shown in the panel.
 const GARAGE = [TANK_DESIGNS.medium, TANK_DESIGNS.light, TANK_DESIGNS.heavy, TANK_DESIGNS.hunter];
 
-// Enemies share one red palette so they read as hostile at a glance; their
-// silhouette still tells you which design (and therefore threat) you are facing.
+// Team palettes: hostile red on one side, friendly blue on the other. The
+// silhouette still tells you which design (and threat) each tank is. The player
+// keeps his design's own colours so he can always find himself.
 const ENEMY_COLORS = {
     hull: { red: 0.62, green: 0.25, blue: 0.22 },
     turret: { red: 0.5, green: 0.19, blue: 0.18 },
     barrel: { red: 0.33, green: 0.13, blue: 0.12 },
 };
+const ALLY_COLORS = {
+    hull: { red: 0.24, green: 0.45, blue: 0.62 },
+    turret: { red: 0.19, green: 0.36, blue: 0.5 },
+    barrel: { red: 0.13, green: 0.25, blue: 0.35 },
+};
 
-// Enemies ringed around the player's start at varying radii, so you meet them
-// gradually as you explore instead of all at once.
-const SPAWNS = Array.from({ length: ENEMY_COUNT }, (_, i) => {
-    const keys = ["light", "medium", "hunter", "heavy"];
-    const angle = (i / ENEMY_COUNT) * Math.PI * 2 + 0.35;
-    const spread = 0.45 + 0.5 * ((i % 3) / 2);
-    return {
-        design: keys[i % keys.length],
-        x: Math.cos(angle) * (MAP.maxX - 2.5) * spread,
-        y: Math.sin(angle) * (MAP.maxY - 2.5) * spread,
-        rotation: (-angle * 180) / Math.PI,
-    };
-});
+// King of the hill: hold the middle. A side banks time only while it has tanks
+// in the circle and the other side has none; both present freezes the clock.
+const ZONE = { x: 0, y: 0, radius: 4.5 };
+const CAPTURE_SECONDS = 30;
+const CONTEST_DECAY = 0.25;   // per second, while nobody holds the ground
+const ZONE_COLORS = {
+    neutral: { red: 0.30, green: 0.32, blue: 0.36, alpha: 0.22 },
+    ally: { red: 0.22, green: 0.55, blue: 0.85, alpha: 0.26 },
+    foe: { red: 0.75, green: 0.26, blue: 0.22, alpha: 0.26 },
+    contested: { red: 0.85, green: 0.72, blue: 0.22, alpha: 0.28 },
+};
+
+// Both squadrons deploy facing each other across the map, the objective between
+// them. Local +Y is forward, so -90 faces east and 90 faces west.
+const SQUAD = ["light", "medium", "hunter", "heavy", "medium"];
+const DEPLOY_X = 14;
+const deployment = (side) => SQUAD.map((design, i) => ({
+    design,
+    x: side * DEPLOY_X,
+    y: (i - (SQUAD.length - 1) / 2) * 4.2,
+    rotation: side < 0 ? -90 : 90,
+}));
+const ALLY_SPAWNS = deployment(-1);
+const FOE_SPAWNS = deployment(1);
+const PLAYER_SPAWN = { x: -DEPLOY_X - 2.5, y: 0, rotation: -90 };
 
 const WRECK_COLOR = { red: 0.17, green: 0.17, blue: 0.19 };
 
@@ -184,7 +202,14 @@ const STYLES = `
     .shiftrow { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
     .shiftrow button:disabled { opacity: .4; cursor: default; }
 
-    /* Enemy roster with live FSM state. */
+    /* Objective bars. */
+    .cap { margin: 10px 0; }
+    .cap .top { display: flex; justify-content: space-between; font-size: 12.5px; margin-bottom: 3px; }
+    .cap .top .t { color: #9aa0a6; }
+    .cap .top .s { font-variant-numeric: tabular-nums; }
+    .zonestate { text-align: center; font-size: 13px; font-weight: 700; margin-top: 10px; letter-spacing: .03em; }
+
+    /* Roster with live FSM state. */
     .foe { margin: 9px 0; }
     .foe:first-child { margin-top: 0; }
     .foe .top { display: flex; justify-content: space-between; font-size: 12.5px; }
@@ -276,6 +301,12 @@ function startDemo() {
         game.add(new Rectangle(gl, { width: mapW, height: 0.05 }).setColor(gridColor).setPosition({ x: 0, y }).init());
     }
 
+    // --- The objective: a translucent disc in the middle of the map. Added
+    // before the walls and tanks so everything else draws on top of it. ---
+    const zoneShape = new Circle(gl, { radius: ZONE.radius, segments: 64 })
+        .setColor(ZONE_COLORS.neutral).setPosition({ x: ZONE.x, y: ZONE.y }).init();
+    game.add(zoneShape);
+
     // --- Border walls around the map edges (drawn + collidable). ---
     const wallColor = { red: 0.42, green: 0.38, blue: 0.31 };
     const wall = (w, h, x, y) => {
@@ -316,7 +347,11 @@ function startDemo() {
     // --- Battle state ---
     let design = GARAGE[0];  // the player's chosen design
     let player = null;       // unit: { tank, driver, weapon, ai }
-    let enemies = [];        // units with an `ai`
+    let allies = [];         // friendly AI units (the player fights alongside them)
+    let enemies = [];        // hostile AI units
+    let allyHold = 0;        // seconds of the objective banked by each side
+    let foeHold = 0;
+    let zoneState = "neutral";
     let shells = [];         // { bullet, entity }
     let over = false;
 
@@ -408,8 +443,23 @@ function startDemo() {
         el("div", { className: "shiftrow" }, [downBtn, upBtn]),
     ]);
 
+    // Objective: one bar per side toward the 30 s hold.
+    const capBar = (color) => {
+        const fill = el("i");
+        fill.style.background = color;
+        const secs = el("span", { className: "s", textContent: "0 s" });
+        return { fill, secs, node: (label) => el("div", { className: "cap" }, [
+            el("div", { className: "top" }, [el("span", { className: "t", textContent: label }), secs]),
+            el("div", { className: "bar" }, [fill]),
+        ]) };
+    };
+    const allyCap = capBar("#4a9fe0");
+    const foeCap = capBar("#d84a3a");
+    const zoneStateLine = el("div", { className: "zonestate", textContent: "Zona neutral" });
+
+    const allyRoster = el("div");
     const roster = el("div");
-    const kFoes = kv("Enemigos en pie");
+    const kFoes = kv("En pie (tuyos / enemigos)");
 
     // Minimap: the whole map at a glance, with every tank and the viewport.
     const MINI_W = 252;
@@ -446,6 +496,12 @@ function startDemo() {
     const panel = el("div", { id: "panel" }, [
         el("h1", { textContent: "Batalla de tanques" }),
         el("div", { className: "card" }, [
+            el("h2", { textContent: "Objetivo · zona central" }),
+            allyCap.node("Tu escuadrón"), foeCap.node("Enemigo"),
+            zoneStateLine,
+            el("div", { className: "hint", textContent: `Controla la zona ${CAPTURE_SECONDS} s para ganar · si están los dos bandos, el reloj se para` }),
+        ]),
+        el("div", { className: "card" }, [
             el("h2", { textContent: "Tu tanque" }),
             el("div", { className: "garage" }, garageBtns),
             el("div", { className: "row" }, [hpBar]),
@@ -465,6 +521,9 @@ function startDemo() {
         el("div", { className: "card" }, [
             el("h2", { textContent: "Caja de cambios" }), gearWidget,
             el("div", { className: "hint", textContent: "G alterna automática/manual · Z y X cambian de marcha" }),
+        ]),
+        el("div", { className: "card" }, [
+            el("h2", { textContent: "Tu escuadrón" }), allyRoster,
         ]),
         el("div", { className: "card" }, [
             el("h2", { textContent: "Enemigos (máquina de estados)" }), roster, kFoes.row,
@@ -498,6 +557,10 @@ function startDemo() {
         cycleAim,
         get player() { return player; },
         get enemies() { return enemies; },
+        get allies() { return allies; },
+        get hold() { return { ally: allyHold, foe: foeHold, state: zoneState }; },
+        setHold: (a, f) => { allyHold = a; foeHold = f; },
+        ZONE, CAPTURE_SECONDS,
         get shells() { return shells; },
         get over() { return over; },
         get tank() { return player.tank; },
@@ -636,8 +699,9 @@ function startDemo() {
     }
 
     // Builds a unit: tank + controller + gun (+ AI when it is an enemy).
-    function spawn({ design: d, x, y, rotation = 0, enemy = false }) {
-        const tank = new Tank(gl, { design: d, x, y, rotation, colors: enemy ? ENEMY_COLORS : d.colors });
+    function spawn({ design: d, x, y, rotation = 0, enemy = false, isPlayer = false, slot = 0 }) {
+        const colors = isPlayer ? d.colors : enemy ? ENEMY_COLORS : ALLY_COLORS;
+        const tank = new Tank(gl, { design: d, x, y, rotation, colors });
         tank.addTo(game);
 
         // Every tank drives through a gearbox; only the player may switch it
@@ -645,19 +709,46 @@ function startDemo() {
         const gearbox = new Gearbox({ ...d.gearbox, mode: enemy ? GEARBOX_MODE.AUTO : gearMode });
         const driver = new TankController(tank.hull, { ...d.drive, bounds: TANK_BOUNDS, gearbox });
         const weapon = new Weapon({ ...d.weapon });
-        const unit = { tank, driver, weapon, gearbox, ai: null, enemy };
+        const unit = { tank, driver, weapon, gearbox, ai: null, enemy, isPlayer };
 
-        if (enemy) {
-            unit.ai = new TankAI(tank, driver, { bounds: TANK_BOUNDS, isBlocked });
-        } else {
+        if (isPlayer) {
             driver.bindKeys(window);
             driver.bindTouch({ forward: btn.up, back: btn.down, left: btn.left, right: btn.right });
+        } else {
+            // Every AI tank is sent to the objective, fanned out around it so a
+            // squadron spreads across the circle instead of stacking on a point.
+            const angle = (slot / SQUAD.length) * Math.PI * 2 + (enemy ? 0 : Math.PI);
+            unit.ai = new TankAI(tank, driver, {
+                bounds: TANK_BOUNDS,
+                isBlocked,
+                objective: {
+                    x: ZONE.x + Math.cos(angle) * ZONE.radius * 0.55,
+                    y: ZONE.y + Math.sin(angle) * ZONE.radius * 0.55,
+                },
+            });
         }
         return unit;
     }
 
+    // Everyone on the field, and just the player's side.
+    const allUnits = () => [player, ...allies, ...enemies];
+    const myTeam = () => [player, ...allies];
+
+    // Closest living opponent of `unit`, which is who its AI goes after.
+    function nearestFoe(unit) {
+        const pool = unit.enemy ? myTeam() : enemies;
+        let best = null;
+        let bestDist = Infinity;
+        for (const other of pool) {
+            if (!other.tank.alive) continue;
+            const d = Math.hypot(other.tank.position.x - unit.tank.position.x, other.tank.position.y - unit.tank.position.y);
+            if (d < bestDist) { bestDist = d; best = other; }
+        }
+        return best ? best.tank : null;
+    }
+
     function clearBattle() {
-        for (const u of [player, ...enemies]) {
+        for (const u of [player, ...allies, ...enemies]) {
             if (!u) continue;
             u.tank.removeFrom(game);
             u.driver.unbind();
@@ -668,6 +759,7 @@ function startDemo() {
         lockedOn = null;
         for (const m of markers) game.remove(m.shape);
         markers.length = 0;
+        allies = [];
         enemies = [];
         player = null;
     }
@@ -677,8 +769,15 @@ function startDemo() {
         over = false;
         banner.classList.remove("show");
 
-        player = spawn({ design, x: 0, y: 0, rotation: 0 });
-        enemies = SPAWNS.map((s) => spawn({ design: TANK_DESIGNS[s.design], x: s.x, y: s.y, rotation: s.rotation, enemy: true }));
+        allyHold = 0;
+        foeHold = 0;
+        setZoneState("neutral");
+
+        player = spawn({ design, ...PLAYER_SPAWN, isPlayer: true });
+        allies = ALLY_SPAWNS.map((s, i) =>
+            spawn({ design: TANK_DESIGNS[s.design], x: s.x, y: s.y, rotation: s.rotation, slot: i }));
+        enemies = FOE_SPAWNS.map((s, i) =>
+            spawn({ design: TANK_DESIGNS[s.design], x: s.x, y: s.y, rotation: s.rotation, enemy: true, slot: i }));
 
         autoAim = new AutoAim(player.tank, { mode: aimMode });
         lockedOn = null;
@@ -702,20 +801,23 @@ function startDemo() {
     }
 
     // One row per enemy: name, live FSM state and a slim health bar.
+    // One row per AI tank: name, live FSM state and a slim health bar.
     function buildRoster() {
-        roster.replaceChildren();
-        for (const foe of enemies) {
-            const st = el("span", { className: "st" });
-            const fill = el("i");
-            const row = el("div", { className: "foe" }, [
-                el("div", { className: "top" }, [
-                    el("span", { textContent: foe.tank.design.name }),
-                    st,
-                ]),
-                el("div", { className: "bar slim" }, [fill]),
-            ]);
-            foe.hud = { row, st, fill };
-            roster.append(row);
+        for (const [container, units] of [[allyRoster, allies], [roster, enemies]]) {
+            container.replaceChildren();
+            for (const unit of units) {
+                const st = el("span", { className: "st" });
+                const fill = el("i");
+                const row = el("div", { className: "foe" }, [
+                    el("div", { className: "top" }, [
+                        el("span", { textContent: unit.tank.design.name }),
+                        st,
+                    ]),
+                    el("div", { className: "bar slim" }, [fill]),
+                ]);
+                unit.hud = { row, st, fill };
+                container.append(row);
+            }
         }
     }
 
@@ -793,8 +895,10 @@ function startDemo() {
             // Raycast the swept segment against every hull and take the nearest
             // hit, so a shell cannot pass through a tank standing in front.
             let best = null;
-            for (const unit of [player, ...enemies]) {
+            for (const unit of allUnits()) {
                 if (!unit.tank.alive || unit === b.owner) continue;
+                // Shells pass through your own squadron: no friendly fire.
+                if (unit.enemy === b.owner.enemy) continue;
                 const hit = raycastShape(b.prev, b.position, unit.tank.hull);
                 if (hit && (!best || hit.t < best.hit.t)) best = { unit, hit };
             }
@@ -883,6 +987,42 @@ function startDemo() {
         reticle.forEach((tick, i) => tick.setPosition({ x: p.x + corners[i][0] * r, y: p.y + corners[i][1] * r }));
     }
 
+    // --- The objective ---
+
+    const inZone = (unit) =>
+        unit.tank.alive && Math.hypot(unit.tank.position.x - ZONE.x, unit.tank.position.y - ZONE.y) <= ZONE.radius;
+
+    // Numbers help, but with diminishing returns — a lone tank still captures.
+    const captureRate = (n) => Math.min(1.6, 1 + 0.2 * (n - 1));
+
+    function setZoneState(state) {
+        if (state === zoneState) return;   // recolouring re-uploads a buffer
+        zoneState = state;
+        zoneShape.setColor(ZONE_COLORS[state]);
+    }
+
+    // Banks time for whichever side holds the middle alone. Returns nothing;
+    // the win check reads allyHold / foeHold.
+    function updateCapture(dt) {
+        const mine = myTeam().filter(inZone).length;
+        const theirs = enemies.filter(inZone).length;
+
+        if (mine > 0 && theirs > 0) {
+            setZoneState("contested");
+        } else if (mine > 0) {
+            setZoneState("ally");
+            allyHold = Math.min(CAPTURE_SECONDS, allyHold + dt * captureRate(mine));
+        } else if (theirs > 0) {
+            setZoneState("foe");
+            foeHold = Math.min(CAPTURE_SECONDS, foeHold + dt * captureRate(theirs));
+        } else {
+            // Nobody on the ground: both sides slowly bleed their progress.
+            setZoneState("neutral");
+            allyHold = Math.max(0, allyHold - dt * CONTEST_DECAY);
+            foeHold = Math.max(0, foeHold - dt * CONTEST_DECAY);
+        }
+    }
+
     // --- Minimap ---
 
     const miniX = (x) => ((x - MAP.minX) / mapW) * MINI_W;
@@ -927,6 +1067,14 @@ function startDemo() {
             ctx.fillRect(miniX(b.x) - w / 2, miniY(b.y) - h / 2, w, h);
         }
 
+        // The objective.
+        const zr = (ZONE.radius / mapW) * MINI_W;
+        ctx.fillStyle = { neutral: "rgba(150,155,165,.16)", ally: "rgba(74,159,224,.24)",
+                          foe: "rgba(216,74,58,.24)", contested: "rgba(232,194,74,.26)" }[zoneState];
+        ctx.beginPath();
+        ctx.arc(miniX(ZONE.x), miniY(ZONE.y), zr, 0, Math.PI * 2);
+        ctx.fill();
+
         ctx.strokeStyle = "rgba(106,169,224,.9)";
         ctx.lineWidth = 1.5;
         const vw = (2 * VIEW_W / mapW) * MINI_W;
@@ -934,20 +1082,21 @@ function startDemo() {
         ctx.strokeRect(miniX(camera.x) - vw / 2, miniY(camera.y) - vh / 2, vw, vh);
 
         for (const foe of enemies) miniTank(foe, "#e06a5f");
+        for (const mate of allies) miniTank(mate, "#4a9fe0");
         miniTank(player, "#5fe08a");
     }
 
     // --- Frame ---
 
-    function finish(won) {
+    function finish(won, reason = "") {
         over = true;
-        bannerText.textContent = won ? "¡Victoria!" : "Tanque destruido";
+        bannerText.textContent = (won ? "¡Victoria!" : "Derrota") + (reason ? ` — ${reason}` : "");
         bannerText.style.color = won ? "#5fe08a" : "#e06a5f";
         banner.classList.add("show");
     }
 
     function update(dt) {
-        const alive = [player, ...enemies].filter((u) => u.tank.alive);
+        const alive = allUnits().filter((u) => u.tank.alive);
 
         // Player: driving comes from the controller's own key/touch bindings.
         player.weapon.update(dt);
@@ -965,26 +1114,30 @@ function startDemo() {
             autoFireTick();
         }
 
-        // Enemies: the FSM writes their input, then they drive and shoot.
-        for (const foe of enemies) {
-            foe.weapon.update(dt);
-            if (!foe.tank.alive || over) continue;
-            foe.ai.update(dt, player.tank);
-            foe.driver.update(dt);
-            if (foe.ai.wantsToFire) fire(foe);
+        // Both squadrons: the FSM writes their input, then they drive and shoot.
+        for (const unit of [...allies, ...enemies]) {
+            unit.weapon.update(dt);
+            if (!unit.tank.alive || over) continue;
+            unit.ai.update(dt, nearestFoe(unit));
+            unit.driver.update(dt);
+            if (unit.ai.wantsToFire) fire(unit);
         }
 
         for (const unit of alive) resolveWorld(unit);
         separate(alive);
         updateShells(dt);
 
-        for (const unit of [player, ...enemies]) unit.tank.sync();
+        for (const unit of allUnits()) unit.tank.sync();
         camera.follow(player.tank.position, dt);
 
-        // Win / lose.
+        if (!over) updateCapture(dt);
+
+        // Win / lose: hold the middle for long enough, or wipe the other side.
         if (!over) {
-            if (!player.tank.alive) finish(false);
-            else if (enemies.every((f) => !f.tank.alive)) finish(true);
+            if (allyHold >= CAPTURE_SECONDS) finish(true, "Zona controlada 30 s");
+            else if (foeHold >= CAPTURE_SECONDS) finish(false, "El enemigo controló la zona");
+            else if (enemies.every((f) => !f.tank.alive)) finish(true, "Escuadrón enemigo destruido");
+            else if (!player.tank.alive) finish(false, "Tu tanque fue destruido");
         }
 
         drawHud();
@@ -1038,18 +1191,35 @@ function startDemo() {
             );
         }
 
+        // Objective progress.
+        allyCap.fill.style.width = `${(allyHold / CAPTURE_SECONDS) * 100}%`;
+        foeCap.fill.style.width = `${(foeHold / CAPTURE_SECONDS) * 100}%`;
+        allyCap.secs.textContent = `${allyHold.toFixed(1)} s`;
+        foeCap.secs.textContent = `${foeHold.toFixed(1)} s`;
+        const zoneLabels = {
+            neutral: ["Zona neutral", "#9aa0a6"],
+            ally: ["Capturando", "#6aa9e0"],
+            foe: ["El enemigo captura", "#e06a5f"],
+            contested: ["En disputa", "#e8c24a"],
+        };
+        const [zoneText, zoneColor] = zoneLabels[zoneState];
+        zoneStateLine.textContent = zoneText;
+        zoneStateLine.style.color = zoneColor;
+
+        // Both rosters.
         let standing = 0;
-        for (const foe of enemies) {
-            const t = foe.tank;
-            if (t.alive) standing++;
-            const state = foe.ai.state;
-            foe.hud.st.textContent = AI_STATE_LABEL[state];
-            foe.hud.st.className = `st ${state}`;
-            foe.hud.row.classList.toggle("down", !t.alive);
-            foe.hud.fill.style.width = `${t.hpRatio * 100}%`;
-            foe.hud.fill.style.background = t.hpRatio > 0.5 ? "#43c06a" : t.hpRatio > 0.2 ? "#d8b13a" : "#d84a3a";
+        for (const unit of [...allies, ...enemies]) {
+            const t = unit.tank;
+            if (t.alive && unit.enemy) standing++;
+            const state = unit.ai.state;
+            unit.hud.st.textContent = AI_STATE_LABEL[state];
+            unit.hud.st.className = `st ${state}`;
+            unit.hud.row.classList.toggle("down", !t.alive);
+            unit.hud.fill.style.width = `${t.hpRatio * 100}%`;
+            unit.hud.fill.style.background = t.hpRatio > 0.5 ? "#43c06a" : t.hpRatio > 0.2 ? "#d8b13a" : "#d84a3a";
         }
-        kFoes.v.textContent = `${standing} / ${enemies.length}`;
+        const mineStanding = myTeam().filter((u) => u.tank.alive).length;
+        kFoes.v.textContent = `${mineStanding} / ${standing}`;
     }
 }
 

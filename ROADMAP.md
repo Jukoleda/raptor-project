@@ -120,7 +120,13 @@ de teclado WASD/flechas incluido. Demo `drive.html`. Mejoras posibles:
       cara y ángulo, con tipos de proyectil (AP/APCR/HEAT/HE) y rebote, en vez de
       daño plano. Blindaje por cara derivado de la silueta (`Armor.forHull`).
 - [ ] **Gamepad** además del teclado.
+- [x] **Modo con objetivo:** rey de la colina por equipos (5 aliados + jugador
+      contra 5 enemigos) con zona central y 30 s de control para ganar; la IA
+      gana el estado `ADVANCE` para tomar y defender terreno.
 - [ ] **Oleadas / puntuación:** hoy es una batalla única; falta progresión.
+- [ ] **Más modos:** captura de banderas, escolta, dominación con varias zonas.
+- [ ] **Órdenes al escuadrón:** hoy los aliados van siempre a la zona; poder
+      pedirles que defiendan o ataquen daría control táctico.
 - [ ] **Zonas / puntos de interés** en el mapa grande (hoy es una llanura con
       cobertura dispersa).
 - [ ] **IA con cobertura:** usar los obstáculos para cubrirse, no solo para

@@ -6,6 +6,8 @@
 // firing actually means, which keeps this file about behaviour only.
 //
 //   PATROL  wander between random waypoints, gun forward
+//   ADVANCE take the ground it was given (`objective`) and hold it — this is
+//           what replaces aimless patrolling once there is something to contest
 //     │  target within sight
 //     ▼
 //   CHASE   drive at the target, gun tracking it
@@ -21,6 +23,7 @@
 
 export const AI_STATE = {
     PATROL: "patrol",
+    ADVANCE: "advance",
     CHASE: "chase",
     ATTACK: "attack",
     RETREAT: "retreat",
@@ -30,6 +33,7 @@ export const AI_STATE = {
 // Readable Spanish labels, handy for HUDs.
 export const AI_STATE_LABEL = {
     patrol: "Patrulla",
+    advance: "Avanza",
     chase: "Persigue",
     attack: "Ataca",
     retreat: "Se retira",
@@ -62,6 +66,8 @@ export default class TankAI {
         retreatAt = 0.3,        // retreats under this fraction of health
         fireArc = 7,            // degrees of aim error it will still fire within
         isBlocked = null,       // optional (from, to) => bool line-of-sight test
+        objective = null,       // optional ground to take and hold: { x, y }
+        objectiveRadius = 1.2,  // how close counts as "holding" it
     } = {}) {
         this.tank = tank;
         this.driver = driver;
@@ -72,6 +78,8 @@ export default class TankAI {
         this.retreatAt = retreatAt;
         this.fireArc = fireArc;
         this.isBlocked = isBlocked;
+        this.objective = objective;
+        this.objectiveRadius = objectiveRadius;
 
         this.state = AI_STATE.PATROL;
         this.wantsToFire = false;
@@ -130,29 +138,37 @@ export default class TankAI {
         return !this.isBlocked(this.tank.position, target.position);
     }
 
+    // What it does with nobody to shoot at: take the ground it was given, or
+    // wander if it was given none.
+    get _idleState() {
+        return this.objective ? AI_STATE.ADVANCE : AI_STATE.PATROL;
+    }
+
     // Picks the state for this frame from distance, health and visibility.
     _transition(target, dist) {
         if (!this.tank.alive) return AI_STATE.DEAD;
-        if (!target || !target.alive) return AI_STATE.PATROL;
+        const idle = this._idleState;
+        if (!target || !target.alive) return idle;
 
         // Wounded tanks disengage, whatever else is going on.
         if (this.tank.hpRatio < this.retreatAt) {
-            return dist > this.sightRange ? AI_STATE.PATROL : AI_STATE.RETREAT;
+            return dist > this.sightRange ? idle : AI_STATE.RETREAT;
         }
 
         switch (this.state) {
             case AI_STATE.PATROL:
-                return dist <= this.sightRange && this._canSee(target) ? AI_STATE.CHASE : AI_STATE.PATROL;
+            case AI_STATE.ADVANCE:
+                return dist <= this.sightRange && this._canSee(target) ? AI_STATE.CHASE : idle;
             case AI_STATE.CHASE:
-                if (dist > this.sightRange * 1.35) return AI_STATE.PATROL;
+                if (dist > this.sightRange * 1.35) return idle;
                 return dist <= this.attackRange ? AI_STATE.ATTACK : AI_STATE.CHASE;
             case AI_STATE.ATTACK:
                 return dist > this.attackRange * 1.25 ? AI_STATE.CHASE : AI_STATE.ATTACK;
             case AI_STATE.RETREAT:
-                // Recovered range (health cannot go back up) — resume patrolling.
-                return dist > this.sightRange ? AI_STATE.PATROL : AI_STATE.RETREAT;
+                // Recovered range (health cannot go back up) — back to the job.
+                return dist > this.sightRange ? idle : AI_STATE.RETREAT;
             default:
-                return AI_STATE.PATROL;
+                return idle;
         }
     }
 
@@ -176,7 +192,8 @@ export default class TankAI {
         if (this._unstickFor > 0) {
             this._unstickFor -= dt;
             this.driver.setInput({ forward: -1, turn: 1 });
-            if (this.state !== AI_STATE.PATROL && target) this.tank.aimAt(target.position, dt);
+            const idling = this.state === AI_STATE.PATROL || this.state === AI_STATE.ADVANCE;
+            if (!idling && target) this.tank.aimAt(target.position, dt);
             return this;
         }
         if (this.driver.input.forward !== 0 && moved < 0.004) {
@@ -196,6 +213,17 @@ export default class TankAI {
                 if (distance(pos, this.waypoint) < 0.6) this.waypoint = this._randomWaypoint();
                 this.driver.setInput(this._driveTo(this.waypoint));
                 // Gun rests forward while nothing is in sight.
+                this.tank.turnTurretTo(this.tank.rotation, dt);
+                break;
+            }
+
+            case AI_STATE.ADVANCE: {
+                // Head for the ground it was sent to, then sit on it and watch.
+                if (distance(pos, this.objective) > this.objectiveRadius) {
+                    this.driver.setInput(this._driveTo(this.objective));
+                } else {
+                    this.driver.setInput({ forward: 0, turn: 0 });
+                }
                 this.tank.turnTurretTo(this.tank.rotation, dt);
                 break;
             }
