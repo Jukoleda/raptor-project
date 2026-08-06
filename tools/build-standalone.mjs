@@ -55,6 +55,7 @@ const CONTROLS = [
 
 // Vehicles assembled from shapes (must come after ENGINE, which defines them).
 const VEHICLES = [
+    "components/vehicles/engine.js",
     "components/vehicles/tank.js",
 ];
 
@@ -80,6 +81,13 @@ const PAGES = [
         out: "tanks.html",
         title: "Raptor — Cañón vs Blindaje",
         modules: [...ENGINE, ...WEAPONS, "weapons/tanksDemo.js"],
+        // The demo injects its own styles from JS; the body starts empty.
+        headStyle: "",
+    },
+    {
+        out: "dyno.html",
+        title: "Raptor — Banco de pruebas: motor y caja",
+        modules: [...ENGINE, ...CONTROLS, ...VEHICLES, "vehicles/dynoDemo.js"],
         // The demo injects its own styles from JS; the body starts empty.
         headStyle: "",
     },

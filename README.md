@@ -19,11 +19,13 @@ index.html                 # Portada (escrita a mano): enlaza las demos
 engine.html                # GENERADO: demo de formas autocontenido, doble clic
 editor.html                # GENERADO: editor visual autocontenido, doble clic
 tanks.html                 # GENERADO: demo cañón vs blindaje, doble clic
+dyno.html                  # GENERADO: banco de pruebas motor/caja, doble clic
 drive.html                 # GENERADO: batalla de tanques (IA + combate), doble clic
 dev.html                   # Demo en desarrollo (módulos ES + gl-matrix por CDN)
 editor-dev.html            # Editor en desarrollo (módulos ES + gl-matrix por CDN)
 tanks-dev.html             # Demo de tanques en desarrollo (módulos ES + CDN)
 drive-dev.html             # Demo de conducción en desarrollo (módulos ES + CDN)
+dyno-dev.html              # Banco de pruebas en desarrollo (módulos ES + CDN)
 .github/workflows/
   deploy.yml               # Despliega el sitio en GitHub Pages en cada push a main
 vendor/
@@ -36,6 +38,8 @@ weapons/
   tanksDemo.js             # Demo de armas: cañón, blanco con blindaje y HUD
 controls/
   driveDemo.js             # Demo de batalla: tanque manejable, enemigos con IA y HUD
+vehicles/
+  dynoDemo.js              # Banco de pruebas: recta larga, motor y caja con telemetría
 components/
   raptorEngine.js          # RaptorEngine: canvas + lista de entidades + render loop
   camera.js                # Camera 2D: pan/zoom, follow(target) y límites de mapa
@@ -67,6 +71,7 @@ components/
     tankAI.js              # TankAI: máquina de estados enemiga (patrulla/persigue/ataca/huye)
     index.js               # Re-exporta los controladores
   vehicles/
+    engine.js              # Engine: curva de par y potencia derivada (P = T·ω)
     tank.js                # Tank: casco + torreta móvil; diseños (formas y stats)
     index.js               # Re-exporta los vehículos
 ```
@@ -81,6 +86,7 @@ motor embebidos, funcionan incluso offline vía `file://`:
 - `engine.html` — demo con las formas.
 - `editor.html` — editor visual (ver abajo).
 - `tanks.html` — demo de armas: cañón vs blindaje (ver abajo).
+- `dyno.html` — banco de pruebas de motor y caja de cambios (ver abajo).
 - `drive.html` — batalla de tanques: conduces y luchas contra IA (ver abajo).
 
 **Online:** publicado con GitHub Pages en
@@ -397,6 +403,70 @@ Se combina con el auto-apuntado: 🎯 elige a quién, AUTO aprieta el gatillo.
 
 `Tank.aimErrorTo(punto)` devuelve los grados que le faltan al cañón para estar
 sobre un punto — lo usan tanto el fuego automático como la IA enemiga.
+
+## Banco de pruebas: motor, caja y telemetría
+
+`dyno.html` es una **recta de 420 × 9 m** (unas 47 veces más larga que ancha) para
+jugar con un tren motriz. Todo va en **unidades reales** —metros, segundos,
+newtons, N·m— así que los números del panel significan algo.
+
+### El motor (`components/vehicles/Engine`)
+
+El par **no es plano**: sube desde el ralentí, hace pico a media vuelta y cae
+hacia el corte. Esa forma es la razón de ser de las marchas, así que es lo que
+modela la curva:
+
+```
+par(rpm) = parMáximo · (1 − k · desviación²)
+```
+
+con una `k` distinta por debajo y por encima del pico, elegida para que la curva
+pase exactamente por los valores que le des a ralentí y al corte.
+
+La **potencia no se configura: sale** del par y las vueltas —
+
+```
+P [W] = T [N·m] · ω [rad/s],   ω = rpm · 2π / 60
+```
+
+— y por eso el pico de potencia siempre cae **a más vueltas** que el de par: el
+par ya está bajando, pero ω sube más rápido. Con los valores por defecto: par
+máximo **340 Nm a 3400 rpm**, potencia máxima **247 CV a 6280 rpm**.
+
+### La caja en modo mecánico
+
+Dale a `Gearbox` relaciones reales y un `Engine` y deja de estimar: las
+revoluciones **vuelven** desde la velocidad a través de la transmisión, y
+`wheelTorque` / `wheelForce` dicen lo que llega de verdad al suelo.
+
+```js
+const engine = new Engine({ peakTorque: 340, peakTorqueRpm: 3400, redlineRpm: 6800 });
+const caja = new Gearbox({
+    engine, gearRatios: [3.6, 2.1, 1.4, 1.0, 0.8],
+    finalDrive: 3.9, wheelRadius: 0.34,
+});
+caja.update(dt, { speed, throttle });
+caja.engineRpm;    // vueltas reales
+caja.wheelForce;   // newtons en el suelo
+caja.gearTopSpeed; // a cuánto llega esa marcha
+```
+
+Sin esos parámetros la caja conserva el modelo normalizado ligero que usa la
+batalla, así que nada cambia allí.
+
+### Lo que puedes probar
+
+- **Curva en vivo** de par y potencia, con marcas en los dos picos y una línea
+  vertical donde está el motor ahora mismo.
+- **Sliders del motor**: par máximo, a qué vueltas y dónde está el corte.
+- **Grupo final** ajustable, para ver el compromiso aceleración / velocidad
+  punta: con 4.8 el 0-100 baja a 4,87 s; con 2.8 sube a 6,00 s.
+- **Cronómetro**: 0-100 km/h, 400 m con velocidad de paso, distancia y G máxima.
+- **Caja automática o manual** (G, y Z/X): déjala en 5ª desde parado y verás el
+  motor ahogarse — 9 km/h en 2,5 s, frente a 62 km/h en 1ª.
+
+Con la configuración de fábrica: **0-100 en 4,87 s** y **400 m en 13,35 s** a
+169 km/h de paso.
 
 ## Caja de cambios
 

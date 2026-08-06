@@ -3,10 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Raptor — Batalla de tanques</title>
+    <title>Raptor — Banco de pruebas: motor y caja</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/camera.js, components/raptorEngine.js, components/physics/body.js, components/physics/collision.js, components/physics/world.js, components/controls/gearbox.js, components/controls/tankController.js, components/controls/tankAI.js, components/controls/autoAim.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/armor.js, components/vehicles/engine.js, components/vehicles/tank.js, controls/driveDemo.js + vendor/gl-matrix-min.js
+        Source: components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/camera.js, components/raptorEngine.js, components/controls/gearbox.js, components/controls/tankController.js, components/controls/tankAI.js, components/controls/autoAim.js, components/vehicles/engine.js, components/vehicles/tank.js, vehicles/dynoDemo.js + vendor/gl-matrix-min.js
         Regenerate with: node tools/build-standalone.mjs
         This file is fully self-contained: open it directly in any browser.
     -->
@@ -613,400 +613,6 @@ function RaptorEngine() {
 }
 
 RaptorEngine;
-
-// ===== components/physics/body.js =====
-// A physics body attached to a shape. The shape remains the source of truth for
-// the transform (position/rotation/scale); the body adds the dynamics on top:
-// type, velocity, mass and collision filtering.
-//
-// Body types:
-//   - "static":  never moves, infinite mass. Walls, ground.
-//   - "dynamic": integrated every step and pushed by collisions (rigid body).
-//
-// Collision filtering (see World.shouldCollide):
-//   - groupIndex: bodies sharing the same non-zero group always collide (>0) or
-//     never collide (<0), overriding category/mask. 0 means "use category/mask".
-//   - category/mask: bitmasks; A and B collide only if
-//     (A.mask & B.category) && (B.mask & A.category).
-
-const STATIC = "static";
-const DYNAMIC = "dynamic";
-
-class Body {
-    constructor(shape, {
-        type = DYNAMIC,
-        mass = 1,
-        restitution = 0.4,
-        velocity = { x: 0, y: 0 },
-        groupIndex = 0,
-        category = 0x0001,
-        mask = 0xffff,
-    } = {}) {
-        this.shape = shape;
-        this.type = type;
-        this.velocity = { x: velocity.x, y: velocity.y };
-        this.restitution = restitution;
-        this.groupIndex = groupIndex;
-        this.category = category;
-        this.mask = mask;
-        this._mass = mass;
-        this._recomputeMass();
-    }
-
-    get isDynamic() {
-        return this.type === DYNAMIC;
-    }
-
-    // Convenience access to the shape transform.
-    get position() {
-        return this.shape.position;
-    }
-
-    _recomputeMass() {
-        this.invMass = this.type === DYNAMIC && this._mass > 0 ? 1 / this._mass : 0;
-    }
-
-    setType(type) {
-        this.type = type;
-        if (type === STATIC) {
-            this.velocity.x = 0;
-            this.velocity.y = 0;
-        }
-        this._recomputeMass();
-        return this;
-    }
-
-    setMass(mass) {
-        this._mass = mass;
-        this._recomputeMass();
-        return this;
-    }
-
-    setVelocity(x, y) {
-        this.velocity.x = x;
-        this.velocity.y = y;
-        return this;
-    }
-}
-
-// ===== components/physics/collision.js =====
-// Convex collision detection for the shapes the engine ships with.
-//
-// collide(bodyA, bodyB) returns null when they are apart, or a manifold
-// { normal, penetration } when they overlap. `normal` is a unit vector pointing
-// from A toward B, and `penetration` is how deep the overlap is along it.
-//
-// Physics happens in the flat 2D world plane the shapes live in (their x/y
-// before the perspective projection), so colliders are built from each shape's
-// local collider outline transformed by position/rotation/scale.
-
-function transformPoint(p, shape) {
-    const angle = (shape.rotation * Math.PI) / 180;
-    const cos = Math.cos(angle);
-    const sin = Math.sin(angle);
-    const x = p.x * shape.scale.x;
-    const y = p.y * shape.scale.y;
-    return {
-        x: shape.position.x + x * cos - y * sin,
-        y: shape.position.y + x * sin + y * cos,
-    };
-}
-
-function worldPolygon(shape) {
-    return shape.getColliderVertices().map((p) => transformPoint(p, shape));
-}
-
-function worldCircle(shape) {
-    // Uniform scale is assumed for circles; scale.x drives the radius.
-    return { center: { x: shape.position.x, y: shape.position.y }, radius: shape.radius * shape.scale.x };
-}
-
-// Largest distance from the shape's origin to its outline, in world units.
-function boundingRadius(shape) {
-    if (shape.colliderShape === "circle") {
-        return shape.radius * Math.max(shape.scale.x, shape.scale.y);
-    }
-    let max = 0;
-    for (const p of shape.getColliderVertices()) {
-        max = Math.max(max, Math.hypot(p.x * shape.scale.x, p.y * shape.scale.y));
-    }
-    return max;
-}
-
-function centroid(poly) {
-    let x = 0;
-    let y = 0;
-    for (const p of poly) {
-        x += p.x;
-        y += p.y;
-    }
-    return { x: x / poly.length, y: y / poly.length };
-}
-
-function projectOntoAxis(poly, axis) {
-    let min = Infinity;
-    let max = -Infinity;
-    for (const p of poly) {
-        const dot = p.x * axis.x + p.y * axis.y;
-        min = Math.min(min, dot);
-        max = Math.max(max, dot);
-    }
-    return [min, max];
-}
-
-// Separating Axis Theorem for two convex polygons. Returns the minimum
-// translation vector as { normal (A->B), penetration } or null if separated.
-function satPolygons(a, b) {
-    let minOverlap = Infinity;
-    let smallestAxis = null;
-
-    for (const poly of [a, b]) {
-        for (let i = 0; i < poly.length; i++) {
-            const p1 = poly[i];
-            const p2 = poly[(i + 1) % poly.length];
-            const edge = { x: p2.x - p1.x, y: p2.y - p1.y };
-            const len = Math.hypot(edge.x, edge.y) || 1;
-            const axis = { x: -edge.y / len, y: edge.x / len };
-
-            const [minA, maxA] = projectOntoAxis(a, axis);
-            const [minB, maxB] = projectOntoAxis(b, axis);
-
-            if (maxA < minB || maxB < minA) {
-                return null; // found a separating axis
-            }
-
-            const overlap = Math.min(maxA, maxB) - Math.max(minA, minB);
-            if (overlap < minOverlap) {
-                minOverlap = overlap;
-                smallestAxis = axis;
-            }
-        }
-    }
-
-    // Orient the normal from A toward B.
-    const ca = centroid(a);
-    const cb = centroid(b);
-    if ((cb.x - ca.x) * smallestAxis.x + (cb.y - ca.y) * smallestAxis.y < 0) {
-        smallestAxis = { x: -smallestAxis.x, y: -smallestAxis.y };
-    }
-
-    return { normal: smallestAxis, penetration: minOverlap };
-}
-
-function circleCircle(ca, cb) {
-    const dx = cb.center.x - ca.center.x;
-    const dy = cb.center.y - ca.center.y;
-    const dist = Math.hypot(dx, dy);
-    const sum = ca.radius + cb.radius;
-    if (dist >= sum) return null;
-    const normal = dist > 1e-6 ? { x: dx / dist, y: dy / dist } : { x: 1, y: 0 };
-    return { normal, penetration: sum - dist };
-}
-
-function closestPointOnSegment(p, a, b) {
-    const abx = b.x - a.x;
-    const aby = b.y - a.y;
-    const lenSq = abx * abx + aby * aby || 1;
-    let t = ((p.x - a.x) * abx + (p.y - a.y) * aby) / lenSq;
-    t = Math.max(0, Math.min(1, t));
-    return { x: a.x + abx * t, y: a.y + aby * t };
-}
-
-function pointInPolygon(p, poly) {
-    let inside = false;
-    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-        const a = poly[i];
-        const b = poly[j];
-        if ((a.y > p.y) !== (b.y > p.y) && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) {
-            inside = !inside;
-        }
-    }
-    return inside;
-}
-
-// Returns manifold with normal pointing from the polygon toward the circle.
-function circlePolygon(circle, poly) {
-    let closest = null;
-    let minDistSq = Infinity;
-    for (let i = 0; i < poly.length; i++) {
-        const cp = closestPointOnSegment(circle.center, poly[i], poly[(i + 1) % poly.length]);
-        const dsq = (cp.x - circle.center.x) ** 2 + (cp.y - circle.center.y) ** 2;
-        if (dsq < minDistSq) {
-            minDistSq = dsq;
-            closest = cp;
-        }
-    }
-
-    const inside = pointInPolygon(circle.center, poly);
-    const dist = Math.sqrt(minDistSq);
-    if (!inside && dist >= circle.radius) return null;
-
-    let normal;
-    if (dist > 1e-6) {
-        normal = { x: (circle.center.x - closest.x) / dist, y: (circle.center.y - closest.y) / dist };
-    } else {
-        normal = { x: 0, y: 1 };
-    }
-    if (inside) {
-        return { normal, penetration: circle.radius + dist };
-    }
-    return { normal, penetration: circle.radius - dist };
-}
-
-function collide(bodyA, bodyB) {
-    const sa = bodyA.shape;
-    const sb = bodyB.shape;
-    const aCircle = sa.colliderShape === "circle";
-    const bCircle = sb.colliderShape === "circle";
-
-    if (aCircle && bCircle) {
-        return circleCircle(worldCircle(sa), worldCircle(sb));
-    }
-    if (!aCircle && !bCircle) {
-        return satPolygons(worldPolygon(sa), worldPolygon(sb));
-    }
-
-    // One circle, one polygon.
-    const circleShape = aCircle ? sa : sb;
-    const polyShape = aCircle ? sb : sa;
-    const res = circlePolygon(worldCircle(circleShape), worldPolygon(polyShape));
-    if (!res) return null;
-
-    // res.normal points polygon -> circle. Reorient to A -> B.
-    const normal = aCircle ? { x: -res.normal.x, y: -res.normal.y } : res.normal;
-    return { normal, penetration: res.penetration };
-}
-
-// ===== components/physics/world.js =====
-// The physics world: holds the bodies, integrates them and resolves collisions.
-// Call step(dt) once per frame (register it as an engine updater).
-//
-// Scope (Fase A): linear rigid-body dynamics. Bodies translate and bounce along
-// the collision normal; angular response (spin from off-center hits) is not
-// simulated yet.
-
-
-// Positional correction keeps overlapping bodies from sinking into each other.
-const CORRECTION_PERCENT = 0.8;
-const CORRECTION_SLOP = 0.001;
-const SOLVER_ITERATIONS = 2;
-
-class World {
-    constructor({ gravity = { x: 0, y: 0 }, bounds = null, linearDamping = 0 } = {}) {
-        this.bodies = [];
-        this.gravity = gravity;
-        this.bounds = bounds; // { minX, maxX, minY, maxY } or null
-        this.linearDamping = linearDamping;
-    }
-
-    add(body) {
-        this.bodies.push(body);
-        return body;
-    }
-
-    remove(body) {
-        const i = this.bodies.indexOf(body);
-        if (i !== -1) this.bodies.splice(i, 1);
-        return this;
-    }
-
-    // Whether two bodies are allowed to collide, per group/category/mask rules.
-    static shouldCollide(a, b) {
-        if (a.type === STATIC && b.type === STATIC) return false;
-        if (a.groupIndex !== 0 && a.groupIndex === b.groupIndex) {
-            return a.groupIndex > 0;
-        }
-        return (a.mask & b.category) !== 0 && (b.mask & a.category) !== 0;
-    }
-
-    step(dt) {
-        if (dt <= 0) return;
-        this.integrate(dt);
-
-        for (let iter = 0; iter < SOLVER_ITERATIONS; iter++) {
-            for (let i = 0; i < this.bodies.length; i++) {
-                for (let j = i + 1; j < this.bodies.length; j++) {
-                    const a = this.bodies[i];
-                    const b = this.bodies[j];
-                    if (!World.shouldCollide(a, b)) continue;
-
-                    const manifold = collide(a, b);
-                    if (manifold && manifold.penetration > 0) {
-                        this.resolve(a, b, manifold);
-                    }
-                }
-            }
-        }
-
-        if (this.bounds) this.applyBounds();
-    }
-
-    integrate(dt) {
-        const damp = Math.max(0, 1 - this.linearDamping * dt);
-        for (const body of this.bodies) {
-            if (!body.isDynamic) continue;
-            body.velocity.x += this.gravity.x * dt;
-            body.velocity.y += this.gravity.y * dt;
-            body.velocity.x *= damp;
-            body.velocity.y *= damp;
-            body.shape.position.x += body.velocity.x * dt;
-            body.shape.position.y += body.velocity.y * dt;
-        }
-    }
-
-    resolve(a, b, { normal, penetration }) {
-        const invSum = a.invMass + b.invMass;
-        if (invSum === 0) return;
-
-        // Positional correction so bodies stop overlapping.
-        const correction = (Math.max(penetration - CORRECTION_SLOP, 0) / invSum) * CORRECTION_PERCENT;
-        a.shape.position.x -= normal.x * correction * a.invMass;
-        a.shape.position.y -= normal.y * correction * a.invMass;
-        b.shape.position.x += normal.x * correction * b.invMass;
-        b.shape.position.y += normal.y * correction * b.invMass;
-
-        // Impulse along the normal (relative velocity is B - A).
-        const rvx = b.velocity.x - a.velocity.x;
-        const rvy = b.velocity.y - a.velocity.y;
-        const velAlongNormal = rvx * normal.x + rvy * normal.y;
-        if (velAlongNormal > 0) return; // already separating
-
-        const e = Math.min(a.restitution, b.restitution);
-        const jImpulse = (-(1 + e) * velAlongNormal) / invSum;
-        const ix = jImpulse * normal.x;
-        const iy = jImpulse * normal.y;
-
-        a.velocity.x -= ix * a.invMass;
-        a.velocity.y -= iy * a.invMass;
-        b.velocity.x += ix * b.invMass;
-        b.velocity.y += iy * b.invMass;
-    }
-
-    applyBounds() {
-        const { minX, maxX, minY, maxY } = this.bounds;
-        for (const body of this.bodies) {
-            if (!body.isDynamic) continue;
-            const r = boundingRadius(body.shape);
-            const pos = body.shape.position;
-
-            if (pos.x - r < minX) {
-                pos.x = minX + r;
-                if (body.velocity.x < 0) body.velocity.x = -body.velocity.x * body.restitution;
-            } else if (pos.x + r > maxX) {
-                pos.x = maxX - r;
-                if (body.velocity.x > 0) body.velocity.x = -body.velocity.x * body.restitution;
-            }
-
-            if (pos.y - r < minY) {
-                pos.y = minY + r;
-                if (body.velocity.y < 0) body.velocity.y = -body.velocity.y * body.restitution;
-            } else if (pos.y + r > maxY) {
-                pos.y = maxY - r;
-                if (body.velocity.y > 0) body.velocity.y = -body.velocity.y * body.restitution;
-            }
-        }
-    }
-}
 
 // ===== components/controls/gearbox.js =====
 // A gearbox for the drivetrain: what turns a flat "hold W to accelerate" into
@@ -1860,318 +1466,6 @@ class AutoAim {
     }
 }
 
-// ===== components/weapons/ballistics.js =====
-// Ballistics: where bullets meet armor.
-//
-// Bullets are treated as swept segments (raycast from their previous to their
-// current position), not as physics bodies. That avoids fast bullets tunnelling
-// through thin armor and gives us the exact hit point and, crucially, the
-// surface normal — which is what the angle-based penetration model needs.
-//
-// Penetration model (arcade, à la World of Tanks):
-//   effectiveArmor = nominalArmor / cos(theta)
-//   theta = angle between the shell's path and the surface normal
-//   - ricochet if theta >= ricochetAngle (too steep, shell skips off)
-//   - penetration if shellPenetration >= effectiveArmor
-//   - block otherwise (shell stops, no damage)
-
-// Transforms a shape's local collider outline into world space. Mirrors the
-// transform used by Shape.draw and the physics layer (rotation is CCW degrees).
-// Named apart from the physics layer's equivalent: both end up as globals in the
-// standalone build, and one silently overwriting the other is a trap.
-function hullOutline(shape) {
-    const angle = (shape.rotation * Math.PI) / 180;
-    const cos = Math.cos(angle);
-    const sin = Math.sin(angle);
-    return shape.getColliderVertices().map((p) => {
-        const x = p.x * shape.scale.x;
-        const y = p.y * shape.scale.y;
-        return {
-            x: shape.position.x + x * cos - y * sin,
-            y: shape.position.y + x * sin + y * cos,
-        };
-    });
-}
-
-// Intersection of segment A->B with segment P->Q. Returns { t, point } where t
-// is the position along A->B in [0, 1], or null when they do not cross.
-function segmentIntersect(a, b, p, q) {
-    const r = { x: b.x - a.x, y: b.y - a.y };
-    const s = { x: q.x - p.x, y: q.y - p.y };
-    const denom = r.x * s.y - r.y * s.x;
-    if (Math.abs(denom) < 1e-9) return null; // parallel
-
-    const t = ((p.x - a.x) * s.y - (p.y - a.y) * s.x) / denom;
-    const u = ((p.x - a.x) * r.y - (p.y - a.y) * r.x) / denom;
-    if (t < 0 || t > 1 || u < 0 || u > 1) return null;
-
-    return { t, point: { x: a.x + r.x * t, y: a.y + r.y * t } };
-}
-
-// Casts the segment a->b against a polygon shape. Returns the first face hit as
-// { point, normal, edgeIndex, t } (normal points outward), or null.
-function raycastShape(a, b, shape) {
-    const poly = hullOutline(shape);
-    let best = null;
-
-    for (let i = 0; i < poly.length; i++) {
-        const p = poly[i];
-        const q = poly[(i + 1) % poly.length];
-        const hit = segmentIntersect(a, b, p, q);
-        if (hit && (!best || hit.t < best.t)) {
-            const dx = q.x - p.x;
-            const dy = q.y - p.y;
-            const len = Math.hypot(dx, dy) || 1;
-            // Outward normal for a counter-clockwise winding.
-            const normal = { x: dy / len, y: -dx / len };
-            best = { point: hit.point, normal, edgeIndex: i, t: hit.t };
-        }
-    }
-    return best;
-}
-
-// Decides what happens when a shell of `penetration` mm hits `armor` mm of plate
-// whose outward `normal` is hit head-on by a shell travelling along `direction`.
-// `normalizes` controls the slope model: true (solid shot) makes sloped armor
-// count more (effective = nominal / cosθ); false (shaped charge / HE) defeats the
-// nominal thickness regardless of slope.
-// Returns { result: "penetration" | "ricochet" | "block", angle, effectiveArmor }.
-function evaluateImpact({ direction, normal, penetration, armor, ricochetAngle = 70, normalizes = true }) {
-    // cos of the impact angle measured from the surface normal.
-    const cos = -(direction.x * normal.x + direction.y * normal.y);
-    const angle = (Math.acos(Math.max(-1, Math.min(1, cos))) * 180) / Math.PI;
-
-    if (cos <= 1e-4) {
-        // Grazing or hitting the inside of a face — treat as a ricochet.
-        return { result: "ricochet", angle, effectiveArmor: Infinity };
-    }
-
-    const effectiveArmor = normalizes ? armor / cos : armor;
-    if (angle >= ricochetAngle) {
-        return { result: "ricochet", angle, effectiveArmor };
-    }
-    if (penetration >= effectiveArmor) {
-        return { result: "penetration", angle, effectiveArmor };
-    }
-    return { result: "block", angle, effectiveArmor };
-}
-
-// Reflects a velocity vector off a surface with the given unit normal.
-function reflect(velocity, normal) {
-    const dot = velocity.x * normal.x + velocity.y * normal.y;
-    return { x: velocity.x - 2 * dot * normal.x, y: velocity.y - 2 * dot * normal.y };
-}
-
-// ===== components/weapons/projectiles.js =====
-// Basic projectile (shell) types and the damage scheme that turns a ballistics
-// result into hit points.
-//
-// Every type bends the shared penetration model (see ballistics.js) and decides
-// how a hit becomes damage. The fields:
-//
-//   id / name         identifier and readable Spanish label
-//   penMultiplier     scales the gun's nominal penetration (mm)
-//   damageMultiplier  scales the gun's nominal damage on a clean penetration
-//   ricochetAngle     impact angle from the surface normal beyond which the
-//                     shell skips off (90 = never ricochets)
-//   normalizes        true  -> sloped armor counts more (effective = nominal/cosθ)
-//                     false -> the shell defeats the nominal thickness regardless
-//                              of slope (shaped charge / surface burst)
-//   splash            fraction of damage that still leaks through on a non-pen,
-//                     i.e. fragments spraying past un-breached plate (HE)
-//
-// The four staples of arcade tank games:
-//   AP    Perforante     — the all-rounder: solid shot, slope matters, skips off
-//                          steep plates.
-//   APCR  Subcalibre     — more penetration, less damage, ricochets sooner.
-//   HEAT  Carga hueca    — shaped charge: ignores slope, never ricochets, steady
-//                          damage; the answer to angled armor.
-//   HE    Alto explosivo — little penetration but a big punch, and even a non-pen
-//                          chips the target with fragments.
-
-
-const PROJECTILES = {
-    AP:   { id: "AP",   name: "Perforante",     penMultiplier: 1.0,  damageMultiplier: 1.0, ricochetAngle: 70, normalizes: true,  splash: 0 },
-    APCR: { id: "APCR", name: "Subcalibre",     penMultiplier: 1.4,  damageMultiplier: 0.7, ricochetAngle: 68, normalizes: true,  splash: 0 },
-    HEAT: { id: "HEAT", name: "Carga hueca",    penMultiplier: 1.2,  damageMultiplier: 1.1, ricochetAngle: 90, normalizes: false, splash: 0 },
-    HE:   { id: "HE",   name: "Alto explosivo", penMultiplier: 0.35, damageMultiplier: 1.8, ricochetAngle: 90, normalizes: false, splash: 0.25 },
-};
-
-// Default type when a weapon / bullet does not name one.
-const DEFAULT_PROJECTILE = PROJECTILES.AP;
-
-// Resolves a shot end to end: runs the penetration model tuned for the shell
-// `type`, then applies its damage scheme. Returns the ballistics result extended
-// with `damage` (hit points actually dealt to the plate):
-//   penetration -> full damage
-//   block       -> splash * damage (HE fragments; 0 for solid shot)
-//   ricochet    -> no damage
-function resolveShot({ type = DEFAULT_PROJECTILE, penetration, damage, direction, normal, armor }) {
-    const impact = evaluateImpact({
-        direction,
-        normal,
-        penetration,
-        armor,
-        ricochetAngle: type.ricochetAngle,
-        normalizes: type.normalizes,
-    });
-
-    let dealt = 0;
-    if (impact.result === "penetration") {
-        dealt = damage;
-    } else if (impact.result === "block") {
-        dealt = Math.round(damage * type.splash);
-    }
-
-    return { ...impact, type, damage: dealt };
-}
-
-// ===== components/weapons/bullet.js =====
-// A shell in flight. It stores its previous position so the ballistics layer can
-// raycast the segment travelled during the last frame (continuous collision).
-
-
-class Bullet {
-    constructor({ x, y, vx, vy, penetration, damage = 100, owner = null, life = 3, type = DEFAULT_PROJECTILE }) {
-        this.position = { x, y };
-        this.prev = { x, y };
-        this.velocity = { x: vx, y: vy };
-        this.penetration = penetration;
-        this.damage = damage;
-        this.type = type; // projectile type (AP / APCR / HEAT / HE), drives the damage scheme
-        this.owner = owner;
-        this.alive = true;
-        this.life = life; // seconds before it despawns
-    }
-
-    // Unit vector of travel.
-    get direction() {
-        const speed = Math.hypot(this.velocity.x, this.velocity.y) || 1;
-        return { x: this.velocity.x / speed, y: this.velocity.y / speed };
-    }
-
-    get speed() {
-        return Math.hypot(this.velocity.x, this.velocity.y);
-    }
-
-    update(dt) {
-        this.prev.x = this.position.x;
-        this.prev.y = this.position.y;
-        this.position.x += this.velocity.x * dt;
-        this.position.y += this.velocity.y * dt;
-        this.life -= dt;
-        if (this.life <= 0) this.alive = false;
-    }
-}
-
-// ===== components/weapons/weapon.js =====
-// A gun that fires shells. Tracks its own reload cooldown; call update(dt) each
-// frame and fire(...) to shoot when ready. `penetration` and `damage` are the
-// gun's nominal values; each projectile type scales them by its own multipliers.
-
-class Weapon {
-    constructor({ penetration = 100, muzzleSpeed = 12, reload = 1.0, damage = 34, type = DEFAULT_PROJECTILE } = {}) {
-        this.penetration = penetration; // mm the shell can defeat head-on
-        this.muzzleSpeed = muzzleSpeed; // world units / second
-        this.reload = reload;           // seconds between shots
-        this.damage = damage;           // hit points on penetration
-        this.type = type;               // loaded projectile type (AP / APCR / HEAT / HE)
-        this.cooldown = 0;
-    }
-
-    update(dt) {
-        if (this.cooldown > 0) this.cooldown -= dt;
-    }
-
-    get ready() {
-        return this.cooldown <= 0;
-    }
-
-    // Progress of the current reload in [0, 1] (1 = ready).
-    get reloadProgress() {
-        return this.reload <= 0 ? 1 : Math.min(1, 1 - this.cooldown / this.reload);
-    }
-
-    // Fires a shell from (x, y) toward (dirX, dirY) using projectile `type`
-    // (defaults to the loaded one). The type's multipliers scale the gun's
-    // nominal penetration and damage. Returns a Bullet, or null if reloading.
-    fire(x, y, dirX, dirY, owner = null, type = this.type) {
-        if (!this.ready) return null;
-        this.cooldown = this.reload;
-        const len = Math.hypot(dirX, dirY) || 1;
-        return new Bullet({
-            x,
-            y,
-            vx: (dirX / len) * this.muzzleSpeed,
-            vy: (dirY / len) * this.muzzleSpeed,
-            penetration: this.penetration * type.penMultiplier,
-            damage: this.damage * type.damageMultiplier,
-            type,
-            owner,
-        });
-    }
-}
-
-// ===== components/weapons/armor.js =====
-// Per-face armor for a target shape. Each collider edge (in getColliderVertices
-// order) has a nominal armor thickness in mm and a readable face name. The armor
-// travels with the shape's rotation, so angling the hull changes which value a
-// shell meets — exactly what drives the penetration model.
-
-class Armor {
-    // faces: array aligned to the shape's collider edges, each { armor, name }.
-    constructor(shape, faces, { hp = 100 } = {}) {
-        this.shape = shape;
-        this.faces = faces;
-        this.maxHp = hp;
-        this.hp = hp;
-        this.alive = true;
-    }
-
-    faceForEdge(index) {
-        return this.faces[index];
-    }
-
-    takeDamage(amount) {
-        this.hp = Math.max(0, this.hp - amount);
-        if (this.hp === 0) this.alive = false;
-        return this.hp;
-    }
-
-    // Builds per-face armor for any convex hull by looking at where each face
-    // actually points in the shape's local space: faces within `frontArc` of
-    // local +Y (forward) are frontal, those as far from it are the rear, and the
-    // rest are sides. Works for a rectangle, a wedge, a hexagon — anything with
-    // a counter-clockwise collider outline, which is what the raycast assumes.
-    static forHull(shape, { front, side, rear, hp = 100, frontArc = 75 } = {}) {
-        const points = shape.getColliderVertices();
-        const faces = points.map((p, i) => {
-            const q = points[(i + 1) % points.length];
-            const dx = q.x - p.x;
-            const dy = q.y - p.y;
-            const len = Math.hypot(dx, dy) || 1;
-            // Outward normal of a CCW edge is (dy, -dx); we only need its Y to
-            // know how far the face is turned away from "forward".
-            const ny = -dx / len;
-            const angle = (Math.acos(Math.max(-1, Math.min(1, ny))) * 180) / Math.PI;
-            if (angle <= frontArc) return { armor: front, name: "Frontal" };
-            if (angle >= 180 - frontArc) return { armor: rear, name: "Trasera" };
-            return { armor: side, name: "Lateral" };
-        });
-        return new Armor(shape, faces, { hp });
-    }
-
-    // Convenience for a rectangular hull. `frontEdge` is the collider edge that
-    // faces the enemy; its opposite becomes the rear, the other two the sides.
-    static rectangle(shape, { front, side, rear, frontEdge = 3, hp = 100 } = {}) {
-        const faces = [];
-        for (let i = 0; i < 4; i++) faces.push({ armor: side, name: "Lateral" });
-        faces[frontEdge % 4] = { armor: front, name: "Frontal" };
-        faces[(frontEdge + 2) % 4] = { armor: rear, name: "Trasera" };
-        return new Armor(shape, faces, { hp });
-    }
-}
-
 // ===== components/vehicles/engine.js =====
 // A combustion engine: revs in, torque out, power derived.
 //
@@ -2536,104 +1830,42 @@ class Tank {
     }
 }
 
-// ===== controls/driveDemo.js =====
-// Tank battle demo: drive a tank around a map larger than the screen and fight
-// four enemies run by a finite state machine (patrol → chase → attack → retreat).
+// ===== vehicles/dynoDemo.js =====
+// Engine and gearbox test bed: a long straight strip to play with a drivetrain.
 //
-// Player: W/S or ↑/↓ drive, A/D or ←/→ pivot the hull, the mouse or a finger on
-// the canvas aims the turret (Q/E traverse by hand), click or Space fires.
-// Every tank carries a health bar above it and dies when it runs out.
+// Everything here is in real units — metres, seconds, newtons, N·m — so the
+// numbers on the panel mean something. The car is integrated longitudinally:
 //
-// Pieces: components/controls/TankController (movement), TankAI (behaviour),
-// components/vehicles/Tank (hull + movable turret + health), components/weapons
-// (gun and shells) and the engine's Camera (follows the player).
+//   tractive force = wheelTorque / wheelRadius        (capped by grip)
+//   drag           = ½·ρ·Cd·A·v²
+//   rolling        = Crr·m·g
+//   a              = (force − drag − rolling) / mass
+//
+// Revs come *back* from road speed through the gears, which is what makes the
+// gearbox interesting: a short gear multiplies torque but runs out of revs, a
+// tall one barely pulls. Play with the sliders and watch the curve move.
+//
+// Controls: W/↑ throttle · S/↓ brake · G auto/manual · Z/X shift · R reset.
 
 
-// The map is much larger than the view, so the camera has to follow the tank.
-// Visible half-extents come from the engine's projection (perspective FOV 45°
-// at depth 6) and the 4:3 canvas — used to keep the camera inside the walls.
-const FOV = (45 * Math.PI) / 180;
-const VIEW_H = 6 * Math.tan(FOV / 2);   // ≈ 2.49 world units (half height)
-const VIEW_W = VIEW_H * (800 / 600);    // ≈ 3.31 world units (half width)
+// The strip: 420 m long, 9 m wide. Roughly 47 times longer than it is wide.
+const TRACK = { length: 420, width: 9 };
+const MEASURE_AT = 400;      // metres, the classic standing-start run
+const SPRINT_TO = 100 / 3.6; // 100 km/h in m/s
 
-// The arena holds ten times the ground it used to: the old 18 × 13 became
-// 57 × 41, i.e. √10 longer on each side, so the *area* is 10×. Everything that
-// fills it (walls, cover, enemies) is derived from these bounds.
-const MAP = { minX: -28.5, maxX: 28.5, minY: -20.5, maxY: 20.5 }; // 57 × 41 arena
-const WALL = 0.4;
-const OBSTACLES = 78;   // scattered cover, scaled to the new size
-const ENEMY_COUNT = 12; // a bigger map needs more to find
-
-// Deterministic scatter: the same map every time you open the page, which keeps
-// the layout learnable (and the tests reproducible).
-function makeRng(seed) {
-    let s = seed >>> 0;
-    return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
-}
-
-// The hulls now collide with the walls by their real outline, so these bounds
-// are only a last-resort net against escaping the map — keeping them tight would
-// stop every tank at the same distance and hide the shape differences.
-const TANK_BOUNDS = { minX: MAP.minX, maxX: MAP.maxX, minY: MAP.minY, maxY: MAP.maxY };
-const CAM_BOUNDS = { minX: MAP.minX + VIEW_W, maxX: MAP.maxX - VIEW_W, minY: MAP.minY + VIEW_H, maxY: MAP.maxY - VIEW_H };
-
-// Selectable player tanks, in the order shown in the panel.
-const GARAGE = [TANK_DESIGNS.medium, TANK_DESIGNS.light, TANK_DESIGNS.heavy, TANK_DESIGNS.hunter];
-
-// Team palettes: hostile red on one side, friendly blue on the other. The
-// silhouette still tells you which design (and threat) each tank is. The player
-// keeps his design's own colours so he can always find himself.
-const ENEMY_COLORS = {
-    hull: { red: 0.62, green: 0.25, blue: 0.22 },
-    turret: { red: 0.5, green: 0.19, blue: 0.18 },
-    barrel: { red: 0.33, green: 0.13, blue: 0.12 },
+// Vehicle. Mass and aero are what stop the engine from being the whole story.
+const CAR = {
+    mass: 1500,        // kg
+    dragArea: 0.42,    // ½·ρ·Cd·A, so drag = dragArea · v²
+    rollingCrr: 0.015,
+    grip: 1.05,        // µ — caps how much force the tyres can actually put down
+    brakeForce: 12000, // N
+    length: 4.2,
+    width: 1.8,
 };
-const ALLY_COLORS = {
-    hull: { red: 0.24, green: 0.45, blue: 0.62 },
-    turret: { red: 0.19, green: 0.36, blue: 0.5 },
-    barrel: { red: 0.13, green: 0.25, blue: 0.35 },
-};
+const G = 9.81;
 
-// King of the hill: hold the middle. A side banks time only while it has tanks
-// in the circle and the other side has none; both present freezes the clock.
-const ZONE = { x: 0, y: 0, radius: 4.5 };
-const CAPTURE_SECONDS = 30;
-const CONTEST_DECAY = 0.25;   // per second, while nobody holds the ground
-const ZONE_COLORS = {
-    neutral: { red: 0.30, green: 0.32, blue: 0.36, alpha: 0.22 },
-    ally: { red: 0.22, green: 0.55, blue: 0.85, alpha: 0.26 },
-    foe: { red: 0.75, green: 0.26, blue: 0.22, alpha: 0.26 },
-    contested: { red: 0.85, green: 0.72, blue: 0.22, alpha: 0.28 },
-};
-
-// Both squadrons deploy facing each other across the map, the objective between
-// them. Local +Y is forward, so -90 faces east and 90 faces west.
-const SQUAD = ["light", "medium", "hunter", "heavy", "medium"];
-const DEPLOY_X = 14;
-const deployment = (side) => SQUAD.map((design, i) => ({
-    design,
-    x: side * DEPLOY_X,
-    y: (i - (SQUAD.length - 1) / 2) * 4.2,
-    rotation: side < 0 ? -90 : 90,
-}));
-const ALLY_SPAWNS = deployment(-1);
-const FOE_SPAWNS = deployment(1);
-const PLAYER_SPAWN = { x: -DEPLOY_X - 2.5, y: 0, rotation: -90 };
-
-const WRECK_COLOR = { red: 0.17, green: 0.17, blue: 0.19 };
-
-// Shells the player can load, and how each impact reads on screen.
-const AMMO = [PROJECTILES.AP, PROJECTILES.APCR, PROJECTILES.HEAT, PROJECTILES.HE];
-const IMPACT = {
-    penetration: { label: "PENETRA", color: { red: 0.2, green: 0.9, blue: 0.35 } },
-    splash: { label: "ESQUIRLAS", color: { red: 0.95, green: 0.55, blue: 0.2 } },
-    ricochet: { label: "REBOTE", color: { red: 0.95, green: 0.85, blue: 0.2 } },
-    block: { label: "NO PENETRA", color: { red: 0.9, green: 0.25, blue: 0.2 } },
-};
-
-// Auto-fire holds off until the gun is this close to the locked target, so it
-// spends shells on the target instead of spraying while the turret swings.
-const AUTO_FIRE_ARC = 4; // degrees
+const GEAR_RATIOS = [3.6, 2.1, 1.4, 1.0, 0.8];
 
 const STYLES = `
     * { box-sizing: border-box; }
@@ -2641,127 +1873,49 @@ const STYLES = `
     #app { display: flex; gap: 16px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
     #stage { position: relative; background: #0a0d12; border-radius: 8px; overflow: hidden; box-shadow: 0 6px 24px rgba(0,0,0,.4); }
     #stage canvas { display: block; max-width: 100%; height: auto; touch-action: none; }
-    #panel { width: 290px; display: flex; flex-direction: column; gap: 16px; }
-
-    /* On-screen controls overlaid on the canvas (touch + mouse). */
-    .pad { position: absolute; bottom: 16px; display: flex; gap: 12px; align-items: flex-end; }
-    .pad.left { left: 16px; }
-    .pad.right { right: 16px; }
-    .pad .col { display: flex; flex-direction: column; gap: 12px; }
-    .tbtn {
-        width: 60px; height: 60px; border-radius: 50%;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 22px; line-height: 1; color: #e6e6e6;
-        background: rgba(38, 43, 51, .55); border: 1px solid rgba(255, 255, 255, .28);
-        -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
-        touch-action: none; user-select: none; -webkit-user-select: none;
-        -webkit-tap-highlight-color: transparent; cursor: pointer;
-    }
-    .tbtn.on, .tbtn:active { background: rgba(74, 127, 181, .7); border-color: #7fb2e6; }
-    .tbtn.fire { background: rgba(122, 47, 47, .6); border-color: rgba(230, 140, 140, .45); }
-    .tbtn.fire:active { background: rgba(170, 60, 60, .8); }
-
-    /* Banner over the canvas when the battle ends. */
-    #banner {
-        position: absolute; inset: 0; display: none;
-        flex-direction: column; align-items: center; justify-content: center; gap: 14px;
-        background: rgba(10, 13, 18, .72); text-align: center; padding: 20px;
-    }
-    #banner.show { display: flex; }
-    #banner b { font-size: 26px; letter-spacing: .02em; }
-    #banner button { width: auto; padding: 10px 18px; }
-
+    #panel { width: 300px; display: flex; flex-direction: column; gap: 16px; }
     h1 { font-size: 17px; margin: 0 0 4px; }
     h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #9aa0a6; margin: 0 0 10px; }
     .card { background: #26292e; border: 1px solid #33373d; border-radius: 8px; padding: 12px; }
-    .keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; justify-items: center; }
-    .keys kbd {
-        display: inline-flex; align-items: center; justify-content: center;
-        min-width: 34px; padding: 7px 0; font-family: inherit; font-size: 13px;
-        background: #2f343a; border: 1px solid #3a3f45; border-bottom-width: 2px; border-radius: 6px; color: #e6e6e6;
-    }
-    .keys kbd.on { background: #2b3a4a; border-color: #4a7fb5; color: #cfe4fb; }
-    .keys .sp { visibility: hidden; }
-    .hint { font-size: 12px; color: #7d838a; margin-top: 10px; text-align: center; }
     .kv { display: flex; justify-content: space-between; font-size: 13px; margin: 5px 0; }
     .kv .k { color: #9aa0a6; }
     .kv .v { font-variant-numeric: tabular-nums; }
-    .bar { height: 12px; background: #1b1d21; border-radius: 6px; overflow: hidden; border: 1px solid #3a3f45; margin-top: 4px; }
-    .bar > i { display: block; height: 100%; width: 0; background: #43c06a; transition: width .1s linear; }
-    .bar.slim { height: 7px; border-radius: 4px; margin-top: 3px; }
-    .mini { display: block; width: 100%; height: auto; border-radius: 6px; background: #0a0d12; border: 1px solid #3a3f45; }
+    .hint { font-size: 12px; color: #7d838a; margin-top: 10px; text-align: center; }
     button { cursor: pointer; border: 1px solid #3a3f45; background: #2f343a; color: #e6e6e6; border-radius: 6px; padding: 9px 10px; font-size: 13px; width: 100%; }
     button:hover { background: #3a4047; }
+    button:disabled { opacity: .4; cursor: default; }
 
-    /* Tank picker. */
-    .garage { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    button.tankbtn { text-align: left; line-height: 1.3; padding: 8px 9px; }
-    button.tankbtn.active { border-color: #4a7fb5; background: #2b3a4a; box-shadow: inset 0 0 0 1px #4a7fb5; }
-    button.tankbtn b { display: block; font-size: 13px; }
-    button.tankbtn small { color: #9aa0a6; font-size: 11px; }
-
-    .tbtn.aim { background: rgba(30, 74, 92, .6); border-color: rgba(120, 210, 240, .45); font-size: 20px; }
-    .tbtn.aim.on { background: rgba(60, 150, 190, .8); border-color: #7fe0ff; }
-
-    .tbtn.autofire { background: rgba(92, 48, 30, .6); border-color: rgba(240, 170, 120, .45); font-size: 12px; font-weight: 700; letter-spacing: .04em; }
-    .tbtn.autofire.on { background: rgba(190, 95, 45, .85); border-color: #ffbe86; }
-
-    /* Ammo picker + last-impact readout. */
-    .ammo { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    button.shell { text-align: left; line-height: 1.3; padding: 8px 9px; }
-    button.shell.active { border-color: #4a7fb5; background: #2b3a4a; box-shadow: inset 0 0 0 1px #4a7fb5; }
-    button.shell b { display: block; font-size: 13px; }
-    button.shell small { color: #9aa0a6; font-size: 11px; }
-    #impact { font-size: 15px; font-weight: 700; letter-spacing: .03em; margin-top: 12px; }
-
-    /* Auto-aim card. */
-    .aimrow { display: flex; align-items: center; gap: 10px; }
-    .aimrow .dot { width: 10px; height: 10px; border-radius: 50%; background: #4a4f57; flex: none; }
-    .aimrow .dot.on { background: #73d9ff; box-shadow: 0 0 8px #73d9ff; }
-    .aimrow b { font-size: 14px; }
-    .target { font-size: 12.5px; color: #9aa0a6; margin-top: 8px; }
-    .target b { color: #cfe4fb; }
-
-    /* Gearbox readout: big gear letter, tachometer and mode switch. */
-    .gearbox { display: flex; align-items: center; gap: 12px; }
-    .gearbox .gear {
-        width: 52px; height: 52px; flex: none; border-radius: 8px;
+    /* Speed + gear headline. */
+    .dash { display: flex; align-items: center; gap: 14px; }
+    .dash .gear {
+        width: 58px; height: 58px; flex: none; border-radius: 8px;
         display: flex; align-items: center; justify-content: center;
-        font-size: 25px; font-weight: 700; font-variant-numeric: tabular-nums;
-        background: #1b1d21; border: 1px solid #3a3f45; color: #e6e6e6;
+        font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums;
+        background: #1b1d21; border: 1px solid #3a3f45;
     }
-    .gearbox .gear.shifting { color: #7d838a; border-color: #4a7fb5; }
-    .gearbox .right { flex: 1; min-width: 0; }
-    .tach { height: 10px; background: #1b1d21; border-radius: 5px; overflow: hidden; border: 1px solid #3a3f45; }
+    .dash .gear.shifting { color: #7d838a; border-color: #4a7fb5; }
+    .dash .speed { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+    .dash .speed small { display: block; font-size: 11px; font-weight: 400; color: #9aa0a6; letter-spacing: .06em; }
+
+    /* Tachometer. */
+    .tach { height: 14px; background: #1b1d21; border-radius: 7px; overflow: hidden; border: 1px solid #3a3f45; margin-top: 10px; position: relative; }
     .tach > i { display: block; height: 100%; width: 0; background: #6aa9e0; }
-    .gearbox .lbl { display: flex; justify-content: space-between; font-size: 11.5px; color: #9aa0a6; margin-bottom: 4px; }
-    .shiftrow { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
-    .shiftrow button:disabled { opacity: .4; cursor: default; }
+    .tach > u { position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(216,74,58,.85); }
+    .tachlbl { display: flex; justify-content: space-between; font-size: 11.5px; color: #9aa0a6; margin-top: 4px; font-variant-numeric: tabular-nums; }
 
-    /* Objective bars. */
-    .cap { margin: 10px 0; }
-    .cap .top { display: flex; justify-content: space-between; font-size: 12.5px; margin-bottom: 3px; }
-    .cap .top .t { color: #9aa0a6; }
-    .cap .top .s { font-variant-numeric: tabular-nums; }
-    .zonestate { text-align: center; font-size: 13px; font-weight: 700; margin-top: 10px; letter-spacing: .03em; }
+    .curve { display: block; width: 100%; height: auto; border-radius: 6px; background: #14171b; border: 1px solid #3a3f45; }
+    .legend { display: flex; gap: 14px; justify-content: center; font-size: 11.5px; color: #9aa0a6; margin-top: 6px; }
+    .legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
 
-    /* Roster with live FSM state. */
-    .foe { margin: 9px 0; }
-    .foe:first-child { margin-top: 0; }
-    .foe .top { display: flex; justify-content: space-between; font-size: 12.5px; }
-    .foe .st { color: #9aa0a6; font-variant-numeric: tabular-nums; }
-    .foe.down .top { opacity: .45; }
-    .foe .st.attack { color: #e8776a; }
-    .foe .st.chase { color: #e8c24a; }
-    .foe .st.retreat { color: #6aa9e0; }
-    .foe .st.advance { color: #7d9bb5; }
-    .foe .dist { color: #7d838a; font-size: 11px; }
+    .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+    .row label { width: 104px; font-size: 12px; color: #b9bfc6; }
+    .row input[type=range] { flex: 1; min-width: 0; }
+    .row .val { width: 60px; text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; color: #9aa0a6; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 
-    /* Stack the panel under the canvas and grow the touch buttons on phones. */
     @media (max-width: 720px) {
         #app { flex-direction: column; padding: 10px; gap: 10px; }
         #panel { width: 100%; }
-        .tbtn { width: 68px; height: 68px; font-size: 24px; }
     }
 `;
 
@@ -2771,28 +1925,13 @@ function el(tag, props = {}, children = []) {
     return node;
 }
 
-// --- Geometry helpers (bullets and bodies against the static map) ---
-
-// Segment a→b against an AABB (slab method). Used for shells and line of sight.
-function segmentHitsBox(a, b, box) {
-    const d = [b.x - a.x, b.y - a.y];
-    const from = [a.x, a.y];
-    const min = [box.minX, box.minY];
-    const max = [box.maxX, box.maxY];
-    let t0 = 0, t1 = 1;
-    for (let i = 0; i < 2; i++) {
-        if (Math.abs(d[i]) < 1e-9) {
-            if (from[i] < min[i] || from[i] > max[i]) return false;
-            continue;
-        }
-        let ta = (min[i] - from[i]) / d[i];
-        let tb = (max[i] - from[i]) / d[i];
-        if (ta > tb) [ta, tb] = [tb, ta];
-        t0 = Math.max(t0, ta);
-        t1 = Math.min(t1, tb);
-        if (t0 > t1) return false;
-    }
-    return true;
+function slider(label, min, max, step, value, apply, format = (v) => v) {
+    const input = el("input", { type: "range", min, max, step, value });
+    const val = el("span", { className: "val" });
+    const render = () => { val.textContent = format(+input.value); };
+    input.oninput = () => { render(); apply(+input.value); };
+    render();
+    return { row: el("div", { className: "row" }, [el("label", { textContent: label }), input, val]) };
 }
 
 function startDemo() {
@@ -2803,1006 +1942,352 @@ function startDemo() {
     game.createWindow(stage);
     const gl = game.context;
 
-    // Two views of the same scenery. `colliders` are axis-aligned boxes — cheap
-    // enough to test a shell or a line of sight against every frame. `solids`
-    // keeps the actual shapes, so tank bodies collide against the real outline
-    // (SAT from the physics module) instead of a bounding circle.
-    const colliders = [];
-    const solids = [];
-    const addBox = (cx, cy, hw, hh) => colliders.push({ minX: cx - hw, maxX: cx + hw, minY: cy - hh, maxY: cy + hh });
-    // Scenery never moves, so its bounding radius and centre are computed once.
-    const addSolid = (shape) => solids.push({ shape, r: boundingRadius(shape), x: shape.position.x, y: shape.position.y });
-
-    // --- Reference grid (every 4 units) so panning reads clearly. ---
-    const gridColor = { red: 0.19, green: 0.23, blue: 0.29 };
-    const mapW = MAP.maxX - MAP.minX;
-    const mapH = MAP.maxY - MAP.minY;
-    for (let x = Math.ceil(MAP.minX / 4) * 4; x <= MAP.maxX; x += 4) {
-        game.add(new Rectangle(gl, { width: 0.05, height: mapH }).setColor(gridColor).setPosition({ x, y: 0 }).init());
-    }
-    for (let y = Math.ceil(MAP.minY / 4) * 4; y <= MAP.maxY; y += 4) {
-        game.add(new Rectangle(gl, { width: mapW, height: 0.05 }).setColor(gridColor).setPosition({ x: 0, y }).init());
+    // --- The strip -------------------------------------------------------
+    // Verge first, so the frame is not mostly void once the camera pulls back.
+    game.add(new Rectangle(gl, { width: TRACK.length + 40, height: TRACK.width * 5 })
+        .setColor({ red: 0.07, green: 0.09, blue: 0.08 })
+        .setPosition({ x: TRACK.length / 2, y: 0 }).init());
+    for (const side of [-1, 1]) {
+        game.add(new Rectangle(gl, { width: TRACK.length + 40, height: 0.35 })
+            .setColor({ red: 0.16, green: 0.2, blue: 0.16 })
+            .setPosition({ x: TRACK.length / 2, y: side * (TRACK.width / 2 + 1.4) }).init());
     }
 
-    // --- The objective: a translucent disc in the middle of the map. Added
-    // before the walls and tanks so everything else draws on top of it. ---
-    const zoneShape = new Circle(gl, { radius: ZONE.radius, segments: 64 })
-        .setColor(ZONE_COLORS.neutral).setPosition({ x: ZONE.x, y: ZONE.y }).init();
-    game.add(zoneShape);
+    const asphalt = new Rectangle(gl, { width: TRACK.length, height: TRACK.width })
+        .setColor({ red: 0.11, green: 0.12, blue: 0.14 })
+        .setPosition({ x: TRACK.length / 2, y: 0 }).init();
+    game.add(asphalt);
 
-    // --- Border walls around the map edges (drawn + collidable). ---
-    const wallColor = { red: 0.42, green: 0.38, blue: 0.31 };
-    const wall = (w, h, x, y) => {
-        const shape = new Rectangle(gl, { width: w, height: h }).setColor(wallColor).setPosition({ x, y }).init();
-        game.add(shape);
-        addBox(x, y, w / 2, h / 2);
-        addSolid(shape);
-    };
-    wall(mapW + WALL, WALL, 0, MAP.maxY); // top
-    wall(mapW + WALL, WALL, 0, MAP.minY); // bottom
-    wall(WALL, mapH + WALL, MAP.minX, 0); // left
-    wall(WALL, mapH + WALL, MAP.maxX, 0); // right
-
-    // --- Obstacles: cover to fight around (drawn + collidable). Scattered from
-    // a fixed seed, kept apart from each other and clear of the player's start.
-    const rng = makeRng(20260805);
-    const palette = [
-        { red: 0.30, green: 0.33, blue: 0.40 }, { red: 0.33, green: 0.30, blue: 0.38 },
-        { red: 0.30, green: 0.36, blue: 0.40 }, { red: 0.34, green: 0.32, blue: 0.30 },
-        { red: 0.28, green: 0.34, blue: 0.30 }, { red: 0.35, green: 0.33, blue: 0.30 },
-    ];
-    const blocks = [];
-    for (let tries = 0; tries < OBSTACLES * 30 && blocks.length < OBSTACLES; tries++) {
-        const size = 0.5 + rng() * 1.4;
-        const x = MAP.minX + 1.6 + rng() * (mapW - 3.2);
-        const y = MAP.minY + 1.6 + rng() * (mapH - 3.2);
-        if (Math.hypot(x, y) < 3.5) continue;                       // keep the start clear
-        const clear = blocks.every((b) => Math.hypot(b.x - x, b.y - y) > (b.s + size) / 2 + 1.6);
-        if (!clear) continue;
-        blocks.push({ x, y, s: size, c: palette[blocks.length % palette.length] });
+    // Lane dashes down the middle, so speed is legible even on bare asphalt.
+    for (let x = 4; x < TRACK.length; x += 12) {
+        game.add(new Rectangle(gl, { width: 4, height: 0.18 })
+            .setColor({ red: 0.3, green: 0.32, blue: 0.36 }).setPosition({ x, y: 0 }).init());
     }
-    for (const b of blocks) {
-        const shape = new Square(gl, { size: b.s }).setColor(b.c).setPosition({ x: b.x, y: b.y }).init();
-        game.add(shape);
-        addBox(b.x, b.y, b.s / 2, b.s / 2);
-        addSolid(shape);
+    // Distance markers along both kerbs; every 100 m gets a taller, brighter one.
+    for (let x = 0; x <= TRACK.length; x += 25) {
+        const major = x % 100 === 0;
+        const color = major ? { red: 0.55, green: 0.58, blue: 0.62 } : { red: 0.26, green: 0.28, blue: 0.32 };
+        for (const side of [-1, 1]) {
+            game.add(new Rectangle(gl, { width: 0.5, height: major ? 1.6 : 0.9 })
+                .setColor(color).setPosition({ x, y: side * (TRACK.width / 2 - 0.5) }).init());
+        }
     }
+    // Start and measured-distance gates.
+    game.add(new Rectangle(gl, { width: 0.5, height: TRACK.width })
+        .setColor({ red: 0.85, green: 0.85, blue: 0.9 }).setPosition({ x: 0, y: 0 }).init());
+    game.add(new Rectangle(gl, { width: 0.5, height: TRACK.width })
+        .setColor({ red: 0.85, green: 0.7, blue: 0.25 }).setPosition({ x: MEASURE_AT, y: 0 }).init());
 
-    // Line of sight for the AI: can it shoot without hitting the scenery?
-    const isBlocked = (from, to) => colliders.some((box) => segmentHitsBox(from, to, box));
+    // --- The car ---------------------------------------------------------
+    const body = new Rectangle(gl, { width: CAR.length, height: CAR.width })
+        .setColor({ red: 0.82, green: 0.36, blue: 0.24 }).setPosition({ x: 0, y: 0 }).init();
+    const stripe = new Rectangle(gl, { width: CAR.length * 0.55, height: 0.3 })
+        .setColor({ red: 0.95, green: 0.82, blue: 0.4 }).init();
+    game.add(body);
+    game.add(stripe);
 
-    // --- Battle state ---
-    let design = GARAGE[0];  // the player's chosen design
-    let player = null;       // unit: { tank, driver, weapon, ai }
-    let allies = [];         // friendly AI units (the player fights alongside them)
-    let enemies = [];        // hostile AI units
-    let allyHold = 0;        // seconds of the objective banked by each side
-    let foeHold = 0;
-    let zoneState = "neutral";
-    let shells = [];         // { bullet, entity }
-    let over = false;
+    // --- Drivetrain ------------------------------------------------------
+    const engine = new Engine();
+    const gearbox = new Gearbox({
+        engine,
+        gearRatios: GEAR_RATIOS,
+        finalDrive: 3.9,
+        wheelRadius: 0.34,
+        shiftTime: 0.22,
+        upshiftAt: 0.94,
+        downshiftAt: 0.45,
+        mode: GEARBOX_MODE.AUTO,
+    });
 
-    // Where the player is pointing, in *client* pixels. Converted to world every
-    // frame so the aim tracks the same spot on screen while the camera moves.
-    let aimPixel = null;
-    let manualTraverse = 0; // -1 / 0 / 1 from Q and E; overrides pointer aim
-    let gearMode = GEARBOX_MODE.AUTO; // the player's transmission mode, kept across restarts
-    let aimMode = AIM_MODE.OFF;       // the player's auto-aim policy, kept across restarts
-    let autoAim = null;               // AutoAim bound to the player's tank
-    let lockedOn = null;              // the tank the reticle is currently drawn on
-    let autoFire = false;             // holds the trigger for you when on
-    let ammo = PROJECTILES.AP;        // the shell the player has loaded
-    const markers = [];               // fading impact dots
+    let speed = 0;        // m/s
+    let distance = 0;     // m from the start line
+    let throttle = 0;     // 0..1
+    let brake = 0;        // 0..1
+    let runTime = 0;      // seconds since the car started moving
+    let sprintTime = null; // 0-100 km/h
+    let measureTime = null; // time at MEASURE_AT
+    let trapSpeed = null;  // speed there
+    let peakG = 0;
 
     const camera = game.camera;
-    camera.smoothing = 6;
-    camera.bounds = CAM_BOUNDS;
+    camera.smoothing = 9;
 
-    // Targeting reticle: four corner ticks framing whatever auto-aim locked on.
-    // Added to the scene only while something is locked, moved every frame.
-    const RETICLE_COLOR = { red: 0.45, green: 0.85, blue: 1 };
-    const reticle = Array.from({ length: 4 }, () =>
-        new Rectangle(gl, { width: 0.16, height: 0.16 }).setColor(RETICLE_COLOR).init());
-
-    // Squad markers: on a map this size your allies are usually off screen, so
-    // each living one gets a small arrow pinned to the edge of the view pointing
-    // at them. They live in the world, so the camera carries them along.
-    const SQUAD_MARK_COLOR = { red: 0.35, green: 0.72, blue: 1 };
-    const squadMarks = ALLY_SPAWNS.map(() =>
-        new Triangle(gl, { width: 0.28, height: 0.34 }).setColor(SQUAD_MARK_COLOR).init());
-    const shownMarks = new Set();
-
-    // --- On-screen controls: steering left, throttle + fire right. ---
-    const tbtn = (label, cls = "") => el("div", { className: `tbtn ${cls}`.trim(), textContent: label });
-    const btn = {
-        up: tbtn("▲"), down: tbtn("▼"), left: tbtn("◀"), right: tbtn("▶"),
-        fire: tbtn("🔥", "fire"), aim: tbtn("🎯", "aim"), auto: tbtn("AUTO", "autofire"),
-    };
-    stage.append(
-        el("div", { className: "pad left" }, [btn.left, btn.right]),
-        el("div", { className: "pad right" }, [
-            el("div", { className: "col" }, [btn.aim, btn.auto]),
-            btn.fire,
-            el("div", { className: "col" }, [btn.up, btn.down]),
-        ]),
-    );
-    btn.fire.addEventListener("pointerdown", (e) => { e.preventDefault(); firePlayer(); });
-    btn.aim.addEventListener("pointerdown", (e) => { e.preventDefault(); cycleAim(); });
-    btn.auto.addEventListener("pointerdown", (e) => { e.preventDefault(); toggleAutoFire(); });
-
-    // --- Banner shown when the battle ends. ---
-    const bannerText = el("b");
-    const banner = el("div", { id: "banner" }, [
-        bannerText,
-        el("button", { textContent: "Nueva batalla", onclick: () => startBattle() }),
-    ]);
-    stage.append(banner);
-
-    // --- Panel / HUD ---
-    const keyEls = {};
-    const mkKey = (id, label) => (keyEls[id] = el("kbd", { textContent: label }));
-    const spacer = () => el("kbd", { className: "sp", textContent: "·" });
-    const keypad = el("div", { className: "keys" }, [
-        spacer(), mkKey("up", "W"), spacer(),
-        mkKey("left", "A"), mkKey("down", "S"), mkKey("right", "D"),
-    ]);
-
-    const garageBtns = GARAGE.map((d) =>
-        el("button", { className: "tankbtn", onclick: () => setDesign(d) }, [
-            el("b", { textContent: d.name }),
-            el("small", { textContent: `${d.hp} HP · ${d.weapon.damage} daño` }),
-        ]),
-    );
-
-    const hpFill = el("i");
-    const hpBar = el("div", { className: "bar" }, [hpFill]);
-    const kHp = kv("Integridad"), kSpeed = kv("Velocidad"), kTurret = kv("Torreta"), kAmmo = kv("Cañón");
-
-    // Gearbox: current gear, tachometer and the auto/manual switch.
+    // --- Panel -----------------------------------------------------------
     const gearBox = el("div", { className: "gear", textContent: "1" });
+    const speedNum = el("div", { className: "speed" }, [
+        document.createTextNode("0"),
+        el("small", { textContent: "KM/H" }),
+    ]);
     const tachFill = el("i");
-    const tachLabel = el("span");
-    const gearHint = el("span", { textContent: "Revoluciones" });
-    const modeBtn = el("button", { onclick: () => setGearMode() });
+    const redlineMark = el("u");
+    const rpmNum = el("span", { textContent: "0 rpm" });
+    const redlineNum = el("span");
+
+    const kTorque = kv("Par al cigüeñal"), kWheel = kv("Fuerza a la rueda"),
+          kPower = kv("Potencia"), kRatio = kv("Desmultiplicación"), kAccel = kv("Aceleración");
+
+    const CURVE_W = 274, CURVE_H = 128;
+    const curve = el("canvas", { width: CURVE_W, height: CURVE_H, className: "curve" });
+    const curveCtx = curve.getContext("2d");
+
+    const kSprint = kv("0 → 100 km/h"), kRun = kv(`${MEASURE_AT} m`), kTrap = kv("Velocidad de paso"),
+          kDist = kv("Distancia"), kPeakG = kv("G máxima");
+
+    const modeBtn = el("button", { onclick: () => toggleMode() });
     const upBtn = el("button", { textContent: "Subir ▲ (X)", onclick: () => shift(1) });
     const downBtn = el("button", { textContent: "Bajar ▼ (Z)", onclick: () => shift(-1) });
-    const gearWidget = el("div", {}, [
-        el("div", { className: "gearbox" }, [
-            gearBox,
-            el("div", { className: "right" }, [
-                el("div", { className: "lbl" }, [gearHint, tachLabel]),
-                el("div", { className: "tach" }, [tachFill]),
-                el("div", { style: "margin-top:8px" }, [modeBtn]),
-            ]),
-        ]),
-        el("div", { className: "shiftrow" }, [downBtn, upBtn]),
-    ]);
+    const resetBtn = el("button", { textContent: "Volver a la salida (R)", onclick: () => reset() });
 
-    // Objective: one bar per side toward the 30 s hold.
-    const capBar = (color) => {
-        const fill = el("i");
-        fill.style.background = color;
-        const secs = el("span", { className: "s", textContent: "0 s" });
-        return { fill, secs, node: (label) => el("div", { className: "cap" }, [
-            el("div", { className: "top" }, [el("span", { className: "t", textContent: label }), secs]),
-            el("div", { className: "bar" }, [fill]),
-        ]) };
-    };
-    const allyCap = capBar("#4a9fe0");
-    const foeCap = capBar("#d84a3a");
-    const zoneStateLine = el("div", { className: "zonestate", textContent: "Zona neutral" });
-
-    const allyRoster = el("div");
-    const roster = el("div");
-    const kFoes = kv("En pie (tuyos / enemigos)");
-
-    // Minimap: the whole map at a glance, with every tank and the viewport.
-    const MINI_W = 252;
-    const MINI_H = Math.round(MINI_W * (mapH / mapW));
-    const mini = el("canvas", { width: MINI_W, height: MINI_H, className: "mini" });
-    const miniCtx = mini.getContext("2d");
-
-    // Auto-aim card: the mode it is on, and what it currently has locked.
-    const aimDot = el("span", { className: "dot" });
-    const aimName = el("b", { textContent: "Desactivado" });
-    const aimBtn = el("button", { textContent: "Cambiar modo (T)", onclick: () => cycleAim() });
-    const aimTarget = el("div", { className: "target", textContent: "Sin objetivo" });
-    // Ammo picker: each shell bends the penetration model differently.
-    const ammoBtns = AMMO.map((type) =>
-        el("button", { className: "shell", onclick: () => setAmmo(type) }, [
-            el("b", { textContent: type.name }),
-            el("small", { textContent: "" }),
-        ]),
-    );
-    const impactLine = el("div", { id: "impact", textContent: "—" });
-    const kFace = kv("Cara"), kAngle = kv("Ángulo"), kEff = kv("Blindaje efectivo"), kPen = kv("Penetración");
-
-    const autoFireDot = el("span", { className: "dot" });
-    const autoFireName = el("b", { textContent: "Fuego manual" });
-    const autoFireBtn = el("button", { textContent: "Fuego automático (F)", onclick: () => toggleAutoFire() });
-    const aimWidget = el("div", {}, [
-        el("div", { className: "aimrow" }, [aimDot, aimName]),
-        aimTarget,
-        el("div", { style: "margin-top:10px" }, [aimBtn]),
-        el("div", { className: "aimrow", style: "margin-top:14px" }, [autoFireDot, autoFireName]),
-        el("div", { style: "margin-top:8px" }, [autoFireBtn]),
-    ]);
+    const torqueCtl = slider("Par máximo", 180, 600, 10, engine.peakTorque,
+        (v) => { engine.peakTorque = v; engine._peak = null; drawCurve(); }, (v) => `${v} Nm`);
+    const peakRpmCtl = slider("Par máx a", 1800, 5500, 100, engine.peakTorqueRpm,
+        (v) => { engine.peakTorqueRpm = v; engine._peak = null; drawCurve(); }, (v) => `${v} rpm`);
+    const redlineCtl = slider("Corte", 4000, 9500, 100, engine.redlineRpm,
+        (v) => { engine.redlineRpm = v; engine._peak = null; drawCurve(); }, (v) => `${v} rpm`);
+    const finalCtl = slider("Grupo final", 2.5, 5.5, 0.1, gearbox.finalDrive,
+        (v) => { gearbox.finalDrive = v; }, (v) => v.toFixed(1));
 
     const panel = el("div", { id: "panel" }, [
-        el("h1", { textContent: "Batalla de tanques" }),
+        el("h1", { textContent: "Banco de pruebas · motor y caja" }),
         el("div", { className: "card" }, [
-            el("h2", { textContent: "Objetivo · zona central" }),
-            allyCap.node("Tu escuadrón"), foeCap.node("Enemigo"),
-            zoneStateLine,
-            el("div", { className: "hint", textContent: `Controla la zona ${CAPTURE_SECONDS} s para ganar · si están los dos bandos, el reloj se para` }),
+            el("div", { className: "dash" }, [gearBox, speedNum]),
+            el("div", { className: "tach" }, [tachFill, redlineMark]),
+            el("div", { className: "tachlbl" }, [rpmNum, redlineNum]),
+            kTorque.row, kWheel.row, kPower.row, kRatio.row, kAccel.row,
         ]),
         el("div", { className: "card" }, [
-            el("h2", { textContent: "Tu tanque" }),
-            el("div", { className: "garage" }, garageBtns),
-            el("div", { className: "row" }, [hpBar]),
-            kHp.row, kSpeed.row, kTurret.row, kAmmo.row,
-            el("div", { className: "hint", textContent: "Teclas 1-4 cambian de tanque (reinicia la batalla)" }),
+            el("h2", { textContent: "Curva de par y potencia" }), curve,
+            el("div", { className: "legend" }, [
+                el("span", {}, [el("i", { style: "background:#e8c24a" }), document.createTextNode("Par (Nm)")]),
+                el("span", {}, [el("i", { style: "background:#6aa9e0" }), document.createTextNode("Potencia (CV)")]),
+            ]),
         ]),
         el("div", { className: "card" }, [
-            el("h2", { textContent: "Munición y blindaje" }),
-            el("div", { className: "ammo" }, ammoBtns),
-            impactLine, kFace.row, kAngle.row, kEff.row, kPen.row,
-            el("div", { className: "hint", textContent: "C cambia de proyectil · el blindaje efectivo crece con el ángulo" }),
-        ]),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Auto-apuntado" }), aimWidget,
-            el("div", { className: "hint", textContent: "T (o 🎯) cicla el objetivo · F (o AUTO) mantiene el gatillo" }),
-        ]),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Caja de cambios" }), gearWidget,
+            el("h2", { textContent: "Caja de cambios" }),
+            modeBtn,
+            el("div", { className: "grid2", style: "margin-top:8px" }, [downBtn, upBtn]),
+            finalCtl.row,
             el("div", { className: "hint", textContent: "G alterna automática/manual · Z y X cambian de marcha" }),
         ]),
         el("div", { className: "card" }, [
-            el("h2", { textContent: "Tu escuadrón" }), allyRoster,
+            el("h2", { textContent: "Motor (juega con él)" }),
+            torqueCtl.row, peakRpmCtl.row, redlineCtl.row,
         ]),
         el("div", { className: "card" }, [
-            el("h2", { textContent: "Enemigos (máquina de estados)" }), roster, kFoes.row,
+            el("h2", { textContent: "Cronómetro" }),
+            kSprint.row, kRun.row, kTrap.row, kDist.row, kPeakG.row,
+            resetBtn,
         ]),
         el("div", { className: "card" }, [
-            el("h2", { textContent: "Controles" }), keypad,
-            el("div", { className: "hint", textContent: "W/S avanzan · A/D giran el casco · ratón o dedo apuntan la torreta (Q/E a mano) · clic o Espacio disparan" }),
+            el("div", { className: "hint", style: "margin:0", textContent: "W/↑ acelera · S/↓ frena · R vuelve a la salida" }),
         ]),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Minimapa" }), mini,
-            el("div", { className: "hint", textContent: "Verde: tú · rojo: enemigos · recuadro azul: lo que ves" }),
-        ]),
-        el("div", { className: "card" }, [el("button", { textContent: "Nueva batalla", onclick: () => startBattle() })]),
     ]);
 
     document.body.append(el("div", { id: "app" }, [stage, panel]));
 
-    startBattle();
-
-    // Debug / test handle.
-    window.raptorDrive = {
-        game, camera, TANK_DESIGNS, setDesign, startBattle,
-        get autoAim() { return autoAim; },
-        get autoFire() { return autoFire; },
-        get blocks() { return blocks; },
-        ammoId: () => ammo.id,
-        cycleAmmo, firePlayer,
-        get colliders() { return colliders; },
-        toggleAutoFire,
-        get lockedOn() { return lockedOn; },
-        cycleAim,
-        get player() { return player; },
-        get enemies() { return enemies; },
-        get allies() { return allies; },
-        get hold() { return { ally: allyHold, foe: foeHold, state: zoneState }; },
-        setHold: (a, f) => { allyHold = a; foeHold = f; },
-        ZONE, CAPTURE_SECONDS,
-        get shells() { return shells; },
-        get over() { return over; },
-        get tank() { return player.tank; },
-        get driver() { return player.driver; },
-        get hull() { return player.tank.hull; },
+    window.raptorDyno = {
+        game, engine, gearbox, reset, toggleMode, shift,
+        get state() { return { speed, distance, runTime, sprintTime, measureTime, trapSpeed, peakG, throttle, brake }; },
+        set throttle(v) { throttle = v; },
+        set brake(v) { brake = v; },
     };
 
+    setMode(GEARBOX_MODE.AUTO);
+    drawCurve();
+    reset();
     game.addUpdater(update);
     game.start();
 
-    // --- Input ---
-    const canvas = game.canvas;
-    // A mouse aims on hover and fires on click; a touch aims by dragging and
-    // fires with the 🔥 button (so aiming never shoots by accident).
-    const onAim = (e) => { aimPixel = { x: e.clientX, y: e.clientY }; };
-    canvas.addEventListener("pointermove", onAim);
-    canvas.addEventListener("pointerdown", (e) => {
-        onAim(e);
-        if (e.pointerType === "mouse") firePlayer();
-    });
-
+    // --- Input -----------------------------------------------------------
+    const held = new Set();
+    const syncPedals = () => {
+        throttle = held.has("w") || held.has("ArrowUp") ? 1 : 0;
+        brake = held.has("s") || held.has("ArrowDown") ? 1 : 0;
+    };
     window.addEventListener("keydown", (e) => {
-        const k = e.key.toLowerCase();
-        if (e.code === "Space") { e.preventDefault(); firePlayer(); }
-        else if (k === "q") manualTraverse = 1;
-        else if (k === "e") manualTraverse = -1;
-        else if (k === "t") cycleAim();
-        else if (k === "f") toggleAutoFire();
-        else if (k === "c") cycleAmmo();
-        else if (k === "g") setGearMode();
+        const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+        if (["w", "s", "ArrowUp", "ArrowDown"].includes(k)) { e.preventDefault(); held.add(k); syncPedals(); }
+        else if (k === "g") toggleMode();
         else if (k === "x") shift(1);
         else if (k === "z") shift(-1);
-        else if (e.code >= "Digit1" && e.code <= "Digit4") {
-            const d = GARAGE[Number(e.code.slice(-1)) - 1];
-            if (d) setDesign(d);
-        }
+        else if (k === "r") reset();
     });
     window.addEventListener("keyup", (e) => {
-        const k = e.key.toLowerCase();
-        if ((k === "q" && manualTraverse > 0) || (k === "e" && manualTraverse < 0)) manualTraverse = 0;
+        held.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key);
+        syncPedals();
     });
 
-    // --- Setup ---
+    // --- Behaviour -------------------------------------------------------
 
     function kv(label) {
         const v = el("span", { className: "v", textContent: "—" });
-        const row = el("div", { className: "kv" }, [el("span", { className: "k", textContent: label }), v]);
-        return { row, v };
+        return { row: el("div", { className: "kv" }, [el("span", { className: "k", textContent: label }), v]), v };
     }
 
-    // Loads a shell type and refreshes the picker's stat line.
-    function setAmmo(type) {
-        ammo = type;
-        refreshAmmo();
-    }
-
-    function cycleAmmo() {
-        setAmmo(AMMO[(AMMO.indexOf(ammo) + 1) % AMMO.length]);
-    }
-
-    function refreshAmmo() {
-        const gun = player ? player.tank.design.weapon : null;
-        AMMO.forEach((type, i) => {
-            ammoBtns[i].classList.toggle("active", type === ammo);
-            ammoBtns[i].querySelector("small").textContent = gun
-                ? `${Math.round(gun.penetration * type.penMultiplier)} mm · ${Math.round(gun.damage * type.damageMultiplier)} daño`
-                : "";
-        });
-    }
-
-    // Panel readout for the player's own shots.
-    function showImpact(key, unit, face, shot, penetration) {
-        const info = IMPACT[key];
-        impactLine.textContent = `${info.label} · ${shot.type.name}`;
-        impactLine.style.color = `rgb(${[info.color.red, info.color.green, info.color.blue].map((c) => Math.round(c * 255)).join(",")})`;
-        kFace.v.textContent = `${face.name} de ${unit.tank.design.name} (${face.armor} mm)`;
-        kAngle.v.textContent = `${shot.angle.toFixed(0)}°`;
-        kEff.v.textContent = Number.isFinite(shot.effectiveArmor) ? `${shot.effectiveArmor.toFixed(0)} mm` : "∞";
-        kPen.v.textContent = `${Math.round(penetration)} mm`;
-    }
-
-    // Steps the auto-aim policy: off → nearest → weakest → toughest → strongest.
-    function cycleAim() {
-        if (!autoAim) return;
-        autoAim.cycle();
-        aimMode = autoAim.mode;
-        refreshAimUi();
-    }
-
-    // Holds the trigger: while on, the gun goes off by itself as soon as it has
-    // reloaded (and, when auto-aim has a target, as soon as it is lined up).
-    function toggleAutoFire(on = !autoFire) {
-        autoFire = on;
-        refreshAimUi();
-    }
-
-    function refreshAimUi() {
-        const on = autoAim && autoAim.enabled;
-        aimName.textContent = autoAim ? autoAim.label : "Desactivado";
-        aimDot.classList.toggle("on", !!on);
-        btn.aim.classList.toggle("on", !!on);
-
-        autoFireName.textContent = autoFire ? "Fuego automático" : "Fuego manual";
-        autoFireDot.classList.toggle("on", autoFire);
-        autoFireBtn.textContent = autoFire ? "Desactivar auto (F)" : "Fuego automático (F)";
-        btn.auto.classList.toggle("on", autoFire);
-    }
-
-    // One frame of auto-fire: only spend a shell when it can actually land.
-    function autoFireTick() {
-        if (!autoFire || !player.weapon.ready) return;
-        const target = autoAim.target;
-        if (target) {
-            // Wait for the turret to line up, and do not shoot into cover.
-            if (player.tank.aimErrorTo(target.position) > AUTO_FIRE_ARC) return;
-            if (isBlocked(player.tank.muzzle, target.position)) return;
-        }
-        fire(player);
-    }
-
-    // Switches the player's transmission between automatic and manual. In auto
-    // the box shifts on revs; in manual you walk it through R · N · 1 · 2 · …
-    function setGearMode(mode = null) {
-        gearMode = mode ?? (gearMode === GEARBOX_MODE.AUTO ? GEARBOX_MODE.MANUAL : GEARBOX_MODE.AUTO);
-        if (player) player.gearbox.setMode(gearMode);
-        const auto = gearMode === GEARBOX_MODE.AUTO;
+    function setMode(mode) {
+        gearbox.setMode(mode);
+        const auto = mode === GEARBOX_MODE.AUTO;
         modeBtn.textContent = auto ? "Automática ⇄ pasar a manual" : "Manual ⇄ pasar a automática";
         upBtn.disabled = downBtn.disabled = auto;
     }
 
-    // Manual gear change (ignored while the box is automatic).
+    // A declaration, not a const arrow: the debug handle above references it
+    // before this point, and only declarations hoist.
+    function toggleMode() {
+        setMode(gearbox.mode === GEARBOX_MODE.AUTO ? GEARBOX_MODE.MANUAL : GEARBOX_MODE.AUTO);
+    }
+
     function shift(dir) {
-        if (!player || gearMode !== GEARBOX_MODE.MANUAL) return;
-        if (dir > 0) player.gearbox.shiftUp();
-        else player.gearbox.shiftDown();
+        if (gearbox.mode !== GEARBOX_MODE.MANUAL) return;
+        if (dir > 0) gearbox.shiftUp(); else gearbox.shiftDown();
     }
 
-    // Builds a unit: tank + controller + gun (+ AI when it is an enemy).
-    function spawn({ design: d, x, y, rotation = 0, enemy = false, isPlayer = false, slot = 0 }) {
-        const colors = isPlayer ? d.colors : enemy ? ENEMY_COLORS : ALLY_COLORS;
-        const tank = new Tank(gl, { design: d, x, y, rotation, colors });
-        tank.addTo(game);
+    function reset() {
+        speed = 0;
+        distance = 0;
+        runTime = 0;
+        sprintTime = null;
+        measureTime = null;
+        trapSpeed = null;
+        peakG = 0;
+        gearbox.gear = 1;
+        gearbox._shiftFor = 0;
+        gearbox.speed = 0;
+        camera.zoom = 0.42;
+        camera.centerOn(0, 0);
+    }
 
-        // Every tank drives through a gearbox; only the player may switch it
-        // to manual, so the enemies always shift automatically.
-        const gearbox = new Gearbox({ ...d.gearbox, mode: enemy ? GEARBOX_MODE.AUTO : gearMode });
-        const driver = new TankController(tank.hull, { ...d.drive, bounds: TANK_BOUNDS, gearbox });
-        const weapon = new Weapon({ ...d.weapon });
-        const unit = { tank, driver, weapon, gearbox, ai: null, enemy, isPlayer, bodyRadius: boundingRadius(tank.hull) };
+    // Draws torque and power against revs, with a marker where the engine is.
+    function drawCurve() {
+        const ctx = curveCtx;
+        const pad = { l: 6, r: 6, t: 8, b: 16 };
+        const w = CURVE_W - pad.l - pad.r;
+        const h = CURVE_H - pad.t - pad.b;
+        ctx.clearRect(0, 0, CURVE_W, CURVE_H);
 
-        if (isPlayer) {
-            driver.bindKeys(window);
-            driver.bindTouch({ forward: btn.up, back: btn.down, left: btn.left, right: btn.right });
-        } else {
-            // Every AI tank is sent to the objective, fanned out around it so a
-            // squadron spreads across the circle instead of stacking on a point.
-            const angle = (slot / SQUAD.length) * Math.PI * 2 + (enemy ? 0 : Math.PI);
-            unit.ai = new TankAI(tank, driver, {
-                bounds: TANK_BOUNDS,
-                isBlocked,
-                objective: {
-                    x: ZONE.x + Math.cos(angle) * ZONE.radius * 0.55,
-                    y: ZONE.y + Math.sin(angle) * ZONE.radius * 0.55,
-                },
-            });
+        const from = engine.idleRpm;
+        const to = engine.redlineRpm;
+        const maxT = Math.max(engine.peakTorque * 1.05, 1);
+        const maxP = Math.max(engine.peakPower.hp * 1.05, 1);
+        const px = (rpm) => pad.l + ((rpm - from) / (to - from)) * w;
+        const pyT = (t) => pad.t + h - (t / maxT) * h;
+        const pyP = (p) => pad.t + h - (p / maxP) * h;
+
+        // Grid every 1000 rpm.
+        ctx.strokeStyle = "#242830";
+        ctx.lineWidth = 1;
+        for (let rpm = Math.ceil(from / 1000) * 1000; rpm <= to; rpm += 1000) {
+            ctx.beginPath();
+            ctx.moveTo(px(rpm), pad.t);
+            ctx.lineTo(px(rpm), pad.t + h);
+            ctx.stroke();
         }
-        return unit;
-    }
 
-    // Everyone on the field, and just the player's side.
-    const allUnits = () => [player, ...allies, ...enemies];
-    const myTeam = () => [player, ...allies];
-
-    // Closest living opponent of `unit`, which is who its AI goes after.
-    function nearestFoe(unit) {
-        const pool = unit.enemy ? myTeam() : enemies;
-        let best = null;
-        let bestDist = Infinity;
-        for (const other of pool) {
-            if (!other.tank.alive) continue;
-            const d = Math.hypot(other.tank.position.x - unit.tank.position.x, other.tank.position.y - unit.tank.position.y);
-            if (d < bestDist) { bestDist = d; best = other; }
-        }
-        return best ? best.tank : null;
-    }
-
-    function clearBattle() {
-        for (const u of [player, ...allies, ...enemies]) {
-            if (!u) continue;
-            u.tank.removeFrom(game);
-            u.driver.unbind();
-        }
-        for (const s of shells) game.remove(s.entity);
-        shells = [];
-        for (const tick of reticle) game.remove(tick);
-        lockedOn = null;
-        for (const m of markers) game.remove(m.shape);
-        markers.length = 0;
-        hideSquadMarks();
-        allies = [];
-        enemies = [];
-        player = null;
-    }
-
-    function startBattle() {
-        clearBattle();
-        over = false;
-        banner.classList.remove("show");
-
-        allyHold = 0;
-        foeHold = 0;
-        setZoneState("neutral");
-
-        player = spawn({ design, ...PLAYER_SPAWN, isPlayer: true });
-        allies = ALLY_SPAWNS.map((s, i) =>
-            spawn({ design: TANK_DESIGNS[s.design], x: s.x, y: s.y, rotation: s.rotation, slot: i }));
-        enemies = FOE_SPAWNS.map((s, i) =>
-            spawn({ design: TANK_DESIGNS[s.design], x: s.x, y: s.y, rotation: s.rotation, enemy: true, slot: i }));
-
-        autoAim = new AutoAim(player.tank, { mode: aimMode });
-        lockedOn = null;
-        for (const tick of reticle) game.remove(tick);
-
-        camera.centerOn(player.tank.position.x, player.tank.position.y);
-        setGearMode(gearMode);
-        refreshAimUi();
-        refreshAmmo();
-        impactLine.textContent = "—";
-        impactLine.style.color = "";
-        kFace.v.textContent = kAngle.v.textContent = kEff.v.textContent = kPen.v.textContent = "—";
-        buildRoster();
-        for (let i = 0; i < GARAGE.length; i++) garageBtns[i].classList.toggle("active", GARAGE[i] === design);
-    }
-
-    // Switching tanks restarts the fight — you get a fresh vehicle.
-    function setDesign(next) {
-        design = next;
-        startBattle();
-    }
-
-    // One row per enemy: name, live FSM state and a slim health bar.
-    // One row per AI tank: name, live FSM state and a slim health bar.
-    function buildRoster() {
-        for (const [container, units] of [[allyRoster, allies], [roster, enemies]]) {
-            container.replaceChildren();
-            for (const unit of units) {
-                const st = el("span", { className: "st" });
-                const fill = el("i");
-                const dist = el("small", { className: "dist" });
-                const row = el("div", { className: "foe" }, [
-                    el("div", { className: "top" }, [
-                        el("span", {}, [document.createTextNode(unit.tank.design.name), dist]),
-                        st,
-                    ]),
-                    el("div", { className: "bar slim" }, [fill]),
-                ]);
-                unit.hud = { row, st, fill, dist };
-                container.append(row);
+        const line = (color, valueAt, toY) => {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let i = 0; i <= 80; i++) {
+                const rpm = from + ((to - from) * i) / 80;
+                const y = toY(valueAt(rpm));
+                if (i === 0) ctx.moveTo(px(rpm), y); else ctx.lineTo(px(rpm), y);
             }
-        }
-    }
+            ctx.stroke();
+        };
+        line("#e8c24a", (r) => engine.torqueAt(r), pyT);
+        line("#6aa9e0", (r) => engine.powerHpAt(r), pyP);
 
-    // --- Combat ---
+        // Peak markers.
+        const peak = engine.peakPower;
+        ctx.fillStyle = "#e8c24a";
+        ctx.beginPath(); ctx.arc(px(engine.peakTorqueRpm), pyT(engine.peakTorque), 3, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = "#6aa9e0";
+        ctx.beginPath(); ctx.arc(px(peak.rpm), pyP(peak.hp), 3, 0, Math.PI * 2); ctx.fill();
 
-    function fire(unit) {
-        if (over || !unit.tank.alive || !unit.weapon.ready) return;
-        const muzzle = unit.tank.muzzle;
-        const dir = unit.tank.turretForward;
-        const shell = unit.enemy ? (PROJECTILES[unit.tank.design.ammo] ?? PROJECTILES.AP) : ammo;
-        const bullet = unit.weapon.fire(muzzle.x, muzzle.y, dir.x, dir.y, unit, shell);
-        if (!bullet) return;
-        const entity = new Circle(gl, { radius: 0.075 })
-            .setColor(unit.enemy ? { red: 1, green: 0.55, blue: 0.35 } : { red: 1, green: 0.85, blue: 0.3 })
-            .setPosition(muzzle).init();
-        game.add(entity);
-        shells.push({ bullet, entity });
-    }
-
-    function firePlayer() {
-        if (player) fire(player);
-    }
-
-    function destroy(unit) {
-        // Leave the hull behind as a wreck; strip the moving parts and the bar.
-        for (const part of [unit.tank.barrel, unit.tank.turret, unit.tank.barBack, unit.tank.barFill]) {
-            game.remove(part);
-        }
-        unit.tank.hull.setColor(WRECK_COLOR);
-        unit.driver.setInput({ forward: 0, turn: 0 });
-        unit.driver.speed = 0;
-    }
-
-    // A shell that hit armor: run the penetration model for its type against the
-    // face it actually struck, then apply what that means.
-    function resolveImpact(shell, unit, hit) {
-        const b = shell.bullet;
-        const face = unit.tank.faceForEdge(hit.edgeIndex);
-        const shot = resolveShot({
-            type: b.type,
-            penetration: b.penetration,
-            damage: b.damage,
-            direction: b.direction,
-            normal: hit.normal,
-            armor: face.armor,
-        });
-
-        const key = shot.result === "block" && shot.damage > 0 ? "splash" : shot.result;
-        spawnMarker(hit.point, key);
-        if (b.owner === player) showImpact(key, unit, face, shot, b.penetration);
-
-        if (shot.damage > 0) {
-            unit.tank.takeDamage(shot.damage);
-            if (!unit.tank.alive) destroy(unit);
-        }
-
-        if (shot.result === "ricochet") {
-            // Skips off and keeps flying, slower and with less punch left.
-            b.velocity = reflect(b.velocity, hit.normal);
-            b.velocity.x *= 0.7;
-            b.velocity.y *= 0.7;
-            b.penetration *= 0.8;
-            b.position = { x: hit.point.x + hit.normal.x * 0.06, y: hit.point.y + hit.normal.y * 0.06 };
-            b.prev = { x: b.position.x, y: b.position.y };
-            return;
-        }
-        b.alive = false;
-    }
-
-    function updateShells(dt) {
-        for (const shell of shells.slice()) {
-            const b = shell.bullet;
-            b.update(dt);
-
-            // Raycast the swept segment against every hull and take the nearest
-            // hit, so a shell cannot pass through a tank standing in front.
-            let best = null;
-            for (const unit of allUnits()) {
-                if (!unit.tank.alive || unit === b.owner) continue;
-                // Shells pass through your own squadron: no friendly fire.
-                if (unit.enemy === b.owner.enemy) continue;
-                const hit = raycastShape(b.prev, b.position, unit.tank.hull);
-                if (hit && (!best || hit.t < best.hit.t)) best = { unit, hit };
-            }
-            if (best) resolveImpact(shell, best.unit, best.hit);
-
-            // Scenery stops shells too.
-            if (b.alive && !best && colliders.some((box) => segmentHitsBox(b.prev, b.position, box))) {
-                spawnMarker(b.position, "block");
-                b.alive = false;
-            }
-
-            if (!b.alive) {
-                game.remove(shell.entity);
-                shells.splice(shells.indexOf(shell), 1);
-            } else {
-                shell.entity.setPosition(b.position);
-            }
-        }
-
-        // Fade out the impact dots.
-        for (const marker of markers.slice()) {
-            marker.life -= dt;
-            if (marker.life <= 0) {
-                game.remove(marker.shape);
-                markers.splice(markers.indexOf(marker), 1);
-            }
-        }
-    }
-
-    // A short-lived dot where a shell met armor, coloured by what happened.
-    function spawnMarker(point, key) {
-        const shape = new Circle(gl, { radius: 0.14 })
-            .setColor(IMPACT[key].color).setPosition(point).init();
-        game.add(shape);
-        markers.push({ shape, life: 0.45 });
-    }
-
-    // --- Physics-lite: keep bodies out of the scenery and out of each other ---
-
-    // Nudges a hull out along a manifold from the physics module. `sign` flips
-    // the push because collide() reports its normal pointing A -> B.
-    function push(shape, manifold, sign, share = 1) {
-        shape.setPosition({
-            x: shape.position.x + sign * manifold.normal.x * manifold.penetration * share,
-            y: shape.position.y + sign * manifold.normal.y * manifold.penetration * share,
-        });
-    }
-
-    // Tank body against the scenery, by its actual outline: a cheap radius test
-    // picks the few solids within reach, then SAT resolves the real overlap.
-    // That is why a wedge can slip past a corner a boxy hull would catch on.
-    function resolveWorld(unit) {
-        const hull = unit.tank.hull;
-        const reach = unit.bodyRadius;
-        let pushed = 0;
-        for (let pass = 0; pass < 2; pass++) {
-            for (const solid of solids) {
-                if (Math.hypot(solid.x - hull.position.x, solid.y - hull.position.y) > reach + solid.r) continue;
-                const hit = collide({ shape: hull }, { shape: solid.shape });
-                if (!hit) continue;
-                push(hull, hit, -1);
-                pushed += hit.penetration;
-            }
-        }
-        if (pushed > 0.02) unit.driver.speed *= 0.35;
-    }
-
-    // Separates overlapping tanks by their outlines, each giving way by half.
-    function separate(units) {
-        for (let i = 0; i < units.length; i++) {
-            for (let j = i + 1; j < units.length; j++) {
-                const a = units[i], b = units[j];
-                const dx = b.tank.position.x - a.tank.position.x;
-                const dy = b.tank.position.y - a.tank.position.y;
-                if (Math.hypot(dx, dy) > a.bodyRadius + b.bodyRadius) continue;
-                const hit = collide({ shape: a.tank.hull }, { shape: b.tank.hull });
-                if (!hit) continue;
-                push(a.tank.hull, hit, -1, 0.5);
-                push(b.tank.hull, hit, 1, 0.5);
-                a.driver.speed *= 0.5;
-                b.driver.speed *= 0.5;
-            }
-        }
-    }
-
-    // Frames the locked target with the reticle, adding it to the scene only
-    // while something is actually locked.
-    function setLock(target) {
-        if (target !== lockedOn) {
-            if (target && !lockedOn) for (const tick of reticle) game.add(tick);
-            else if (!target && lockedOn) for (const tick of reticle) game.remove(tick);
-            lockedOn = target;
-        }
-        if (!lockedOn) return;
-        const r = lockedOn.radius + 0.34;
-        const p = lockedOn.position;
-        const corners = [[-1, 1], [1, 1], [-1, -1], [1, -1]];
-        reticle.forEach((tick, i) => tick.setPosition({ x: p.x + corners[i][0] * r, y: p.y + corners[i][1] * r }));
-    }
-
-    // Places (or hides) the edge arrow for each ally that is off screen.
-    function updateSquadMarks() {
-        const { halfW, halfH } = camera.viewExtents(canvas);
-        const marginX = halfW - 0.35;
-        const marginY = halfH - 0.35;
-
-        allies.forEach((mate, i) => {
-            const mark = squadMarks[i];
-            const dx = mate.tank.position.x - camera.x;
-            const dy = mate.tank.position.y - camera.y;
-            const offScreen = mate.tank.alive && (Math.abs(dx) > marginX || Math.abs(dy) > marginY);
-
-            if (!offScreen) {
-                if (shownMarks.has(i)) { game.remove(mark); shownMarks.delete(i); }
-                return;
-            }
-            if (!shownMarks.has(i)) { game.add(mark); shownMarks.add(i); }
-
-            // Slide along the direction to the ally until it meets the edge.
-            const scale = Math.min(marginX / Math.abs(dx || 1e-6), marginY / Math.abs(dy || 1e-6));
-            mark.setPosition({ x: camera.x + dx * scale, y: camera.y + dy * scale });
-            mark.setRotation((Math.atan2(-dx, dy) * 180) / Math.PI); // point outward, at them
-        });
-    }
-
-    function hideSquadMarks() {
-        for (const i of shownMarks) game.remove(squadMarks[i]);
-        shownMarks.clear();
-    }
-
-    // --- The objective ---
-
-    const inZone = (unit) =>
-        unit.tank.alive && Math.hypot(unit.tank.position.x - ZONE.x, unit.tank.position.y - ZONE.y) <= ZONE.radius;
-
-    // Numbers help, but with diminishing returns — a lone tank still captures.
-    const captureRate = (n) => Math.min(1.6, 1 + 0.2 * (n - 1));
-
-    function setZoneState(state) {
-        if (state === zoneState) return;   // recolouring re-uploads a buffer
-        zoneState = state;
-        zoneShape.setColor(ZONE_COLORS[state]);
-    }
-
-    // Banks time for whichever side holds the middle alone. Returns nothing;
-    // the win check reads allyHold / foeHold.
-    function updateCapture(dt) {
-        const mine = myTeam().filter(inZone).length;
-        const theirs = enemies.filter(inZone).length;
-
-        if (mine > 0 && theirs > 0) {
-            setZoneState("contested");
-        } else if (mine > 0) {
-            setZoneState("ally");
-            allyHold = Math.min(CAPTURE_SECONDS, allyHold + dt * captureRate(mine));
-        } else if (theirs > 0) {
-            setZoneState("foe");
-            foeHold = Math.min(CAPTURE_SECONDS, foeHold + dt * captureRate(theirs));
-        } else {
-            // Nobody on the ground: both sides slowly bleed their progress.
-            setZoneState("neutral");
-            allyHold = Math.max(0, allyHold - dt * CONTEST_DECAY);
-            foeHold = Math.max(0, foeHold - dt * CONTEST_DECAY);
-        }
-    }
-
-    // --- Minimap ---
-
-    const miniX = (x) => ((x - MAP.minX) / mapW) * MINI_W;
-    const miniY = (y) => ((MAP.maxY - y) / mapH) * MINI_H;
-
-    function miniTank(unit, color) {
-        const t = unit.tank;
-        const x = miniX(t.position.x), y = miniY(t.position.y);
-        if (!t.alive) {
-            miniCtx.fillStyle = "#4a4a52";
-            miniCtx.fillRect(x - 2, y - 2, 4, 4);
-            return;
-        }
-        if (t === lockedOn) {
-            miniCtx.strokeStyle = "#73d9ff";
-            miniCtx.lineWidth = 1.5;
-            miniCtx.beginPath();
-            miniCtx.arc(x, y, 6, 0, Math.PI * 2);
-            miniCtx.stroke();
-        }
-        const g = t.turretForward;
-        miniCtx.strokeStyle = color;
-        miniCtx.lineWidth = 2;
-        miniCtx.beginPath();
-        miniCtx.moveTo(x, y);
-        miniCtx.lineTo(x + g.x * 11, y - g.y * 11);
-        miniCtx.stroke();
-        miniCtx.fillStyle = color;
-        miniCtx.beginPath();
-        miniCtx.arc(x, y, 3.5, 0, Math.PI * 2);
-        miniCtx.fill();
-    }
-
-    function drawMinimap() {
-        const ctx = miniCtx;
-        ctx.clearRect(0, 0, MINI_W, MINI_H);
-
-        ctx.fillStyle = "#4c515f";
-        for (const b of blocks) {
-            const w = (b.s / mapW) * MINI_W;
-            const h = (b.s / mapH) * MINI_H;
-            ctx.fillRect(miniX(b.x) - w / 2, miniY(b.y) - h / 2, w, h);
-        }
-
-        // The objective.
-        const zr = (ZONE.radius / mapW) * MINI_W;
-        ctx.fillStyle = { neutral: "rgba(150,155,165,.16)", ally: "rgba(74,159,224,.24)",
-                          foe: "rgba(216,74,58,.24)", contested: "rgba(232,194,74,.26)" }[zoneState];
-        ctx.beginPath();
-        ctx.arc(miniX(ZONE.x), miniY(ZONE.y), zr, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.strokeStyle = "rgba(106,169,224,.9)";
+        // Where the engine is right now.
+        const rpm = Math.max(from, Math.min(to, gearbox.engineRpm));
+        ctx.strokeStyle = "rgba(230,230,230,.55)";
         ctx.lineWidth = 1.5;
-        const vw = (2 * VIEW_W / mapW) * MINI_W;
-        const vh = (2 * VIEW_H / mapH) * MINI_H;
-        ctx.strokeRect(miniX(camera.x) - vw / 2, miniY(camera.y) - vh / 2, vw, vh);
+        ctx.beginPath();
+        ctx.moveTo(px(rpm), pad.t);
+        ctx.lineTo(px(rpm), pad.t + h);
+        ctx.stroke();
 
-        for (const foe of enemies) miniTank(foe, "#e06a5f");
-        for (const mate of allies) miniTank(mate, "#4a9fe0");
-        miniTank(player, "#5fe08a");
-    }
-
-    // --- Frame ---
-
-    function finish(won, reason = "") {
-        over = true;
-        bannerText.textContent = (won ? "¡Victoria!" : "Derrota") + (reason ? ` — ${reason}` : "");
-        bannerText.style.color = won ? "#5fe08a" : "#e06a5f";
-        banner.classList.add("show");
+        ctx.fillStyle = "#7d838a";
+        ctx.font = "10px system-ui, sans-serif";
+        ctx.fillText(`${(from / 1000).toFixed(1)}k`, pad.l, CURVE_H - 4);
+        ctx.fillText(`${(to / 1000).toFixed(1)}k rpm`, CURVE_W - 52, CURVE_H - 4);
+        ctx.fillStyle = "#e8c24a";
+        ctx.fillText(`${Math.round(engine.peakTorque)} Nm`, pad.l + 34, CURVE_H - 4);
+        ctx.fillStyle = "#6aa9e0";
+        ctx.fillText(`${Math.round(peak.hp)} CV`, pad.l + 90, CURVE_H - 4);
     }
 
     function update(dt) {
-        const alive = allUnits().filter((u) => u.tank.alive);
+        // The gearbox reads road speed and decides the gear; we read back what
+        // the drivetrain is putting down.
+        gearbox.update(dt, { speed, throttle });
 
-        // Player: driving comes from the controller's own key/touch bindings.
-        player.weapon.update(dt);
-        if (player.tank.alive && !over) {
-            player.driver.update(dt);
-            // Aiming priority: hand traverse beats auto-aim, which beats the
-            // pointer. Auto-aim only picks a target and swings the gun onto it.
-            const locked = autoAim.update(manualTraverse !== 0 ? 0 : dt, enemies.map((e) => e.tank));
-            if (manualTraverse !== 0) {
-                player.tank.traverse(manualTraverse, dt);
-            } else if (!locked && aimPixel) {
-                player.tank.aimAt(camera.screenToWorld(aimPixel.x, aimPixel.y, canvas), dt);
-            }
-            setLock(locked);
-            autoFireTick();
-        }
+        const tractive = Math.min(gearbox.wheelForce, CAR.grip * CAR.mass * G) * throttle;
+        const drag = CAR.dragArea * speed * speed;
+        const rolling = speed > 0.05 ? CAR.rollingCrr * CAR.mass * G : 0;
+        const braking = brake * CAR.brakeForce * (speed > 0.05 ? 1 : 0);
+        const accel = (tractive - drag - rolling - braking) / CAR.mass;
 
-        // Both squadrons: the FSM writes their input, then they drive and shoot.
-        for (const unit of [...allies, ...enemies]) {
-            unit.weapon.update(dt);
-            if (!unit.tank.alive || over) continue;
-            unit.ai.update(dt, nearestFoe(unit));
-            unit.driver.update(dt);
-            if (unit.ai.wantsToFire) fire(unit);
-        }
+        speed = Math.max(0, speed + accel * dt);
+        // The gear's own redline caps it: you cannot out-rev the ratio.
+        speed = Math.min(speed, gearbox.speedLimit);
+        distance += speed * dt;
 
-        for (const unit of alive) resolveWorld(unit);
-        separate(alive);
-        updateShells(dt);
+        if (speed > 0.1 || distance > 0) runTime += dt;
+        if (accel > peakG * G) peakG = accel / G;
+        if (sprintTime === null && speed >= SPRINT_TO) sprintTime = runTime;
+        if (measureTime === null && distance >= MEASURE_AT) { measureTime = runTime; trapSpeed = speed; }
 
-        for (const unit of allUnits()) unit.tank.sync();
-        camera.follow(player.tank.position, dt);
-        updateSquadMarks();
+        // Ran out of strip: hold at the end.
+        if (distance > TRACK.length - CAR.length) { distance = TRACK.length - CAR.length; speed = 0; }
 
-        if (!over) updateCapture(dt);
+        body.setPosition({ x: distance, y: 0 });
+        stripe.setPosition({ x: distance, y: 0 });
 
-        // Win / lose: hold the middle for long enough, or wipe the other side.
-        if (!over) {
-            if (allyHold >= CAPTURE_SECONDS) finish(true, "Zona controlada 30 s");
-            else if (foeHold >= CAPTURE_SECONDS) finish(false, "El enemigo controló la zona");
-            else if (enemies.every((f) => !f.tank.alive)) finish(true, "Escuadrón enemigo destruido");
-            else if (!player.tank.alive) finish(false, "Tu tanque fue destruido");
-        }
+        // Pull the view back as it gains speed, so there is road ahead to see.
+        const wanted = Math.max(0.2, 0.42 - speed * 0.0035);
+        camera.zoom += (wanted - camera.zoom) * Math.min(1, dt * 2);
+        const { halfW } = camera.viewExtents(game.canvas);
+        camera.bounds = { minX: halfW, maxX: TRACK.length - halfW, minY: 0, maxY: 0 };
+        camera.follow({ x: distance + halfW * 0.35, y: 0 }, dt);
 
-        drawHud();
-        drawMinimap();
+        drawHud(accel);
+        drawCurve();
     }
 
-    function drawHud() {
-        const tank = player.tank;
-        const driver = player.driver;
+    function drawHud(accel) {
+        const rpm = gearbox.engineRpm;
+        const torque = gearbox.shifting ? 0 : engine.torqueAt(rpm);
+        const power = gearbox.shifting ? 0 : engine.powerAt(rpm);
 
-        // Pressed directions, on the panel keypad and the on-screen buttons.
-        const fwd = driver.input.forward > 0, back = driver.input.forward < 0;
-        const left = driver.input.turn > 0, right = driver.input.turn < 0;
-        keyEls.up.classList.toggle("on", fwd);
-        keyEls.down.classList.toggle("on", back);
-        keyEls.left.classList.toggle("on", left);
-        keyEls.right.classList.toggle("on", right);
-        btn.up.classList.toggle("on", fwd);
-        btn.down.classList.toggle("on", back);
-        btn.left.classList.toggle("on", left);
-        btn.right.classList.toggle("on", right);
+        gearBox.textContent = gearbox.label;
+        gearBox.classList.toggle("shifting", gearbox.shifting);
+        speedNum.firstChild.nodeValue = (speed * 3.6).toFixed(0);
 
-        const pct = tank.hpRatio * 100;
-        hpFill.style.width = `${pct}%`;
-        hpFill.style.background = pct > 50 ? "#43c06a" : pct > 20 ? "#d8b13a" : "#d84a3a";
+        const frac = rpm / engine.redlineRpm;
+        tachFill.style.width = `${frac * 100}%`;
+        tachFill.style.background = gearbox.shifting ? "#7d838a" : frac > 0.92 ? "#d84a3a" : frac > 0.78 ? "#d8b13a" : "#6aa9e0";
+        redlineMark.style.left = "92%";
+        rpmNum.textContent = `${Math.round(rpm)} rpm`;
+        redlineNum.textContent = `corte ${engine.redlineRpm}`;
 
-        // Gearbox readout: gear, revs and whether the clutch is out mid-shift.
-        const gb = player.gearbox;
-        gearBox.textContent = gb.label;
-        gearBox.classList.toggle("shifting", gb.shifting);
-        const revs = gb.rpm;
-        tachFill.style.width = `${revs * 100}%`;
-        tachFill.style.background = gb.shifting ? "#7d838a" : revs > 0.88 ? "#d84a3a" : revs > 0.7 ? "#d8b13a" : "#6aa9e0";
-        tachLabel.textContent = gb.shifting ? "cambiando…" : `${Math.round(revs * 100)}%`;
+        kTorque.v.textContent = `${torque.toFixed(0)} Nm @ ${Math.round(rpm)}`;
+        kWheel.v.textContent = `${(gearbox.wheelForce * throttle / 1000).toFixed(1)} kN`;
+        kPower.v.textContent = `${(power / 1000).toFixed(0)} kW · ${(power / 735.5).toFixed(0)} CV`;
+        kRatio.v.textContent = gearbox.gear === 0 ? "—" : `${gearbox.gearRatio.toFixed(2)} × ${gearbox.finalDrive.toFixed(1)}`;
+        kAccel.v.textContent = `${accel.toFixed(2)} m/s² (${(accel / G).toFixed(2)} g)`;
 
-        const deg = (a) => (((a % 360) + 360) % 360).toFixed(0);
-        kHp.v.textContent = `${Math.ceil(tank.hp)} / ${tank.maxHp} HP`;
-        kSpeed.v.textContent = `${driver.speed.toFixed(2)} u/s`;
-        kTurret.v.textContent = `${deg(tank.turretAngle)}°`;
-        kAmmo.v.textContent = player.weapon.ready ? "Listo" : `Recargando ${(player.weapon.reloadProgress * 100).toFixed(0)}%`;
-
-        if (!autoAim.enabled) {
-            aimTarget.textContent = "Sin objetivo";
-        } else if (!lockedOn) {
-            aimTarget.textContent = "Buscando…";
-        } else {
-            const d = Math.hypot(lockedOn.position.x - tank.position.x, lockedOn.position.y - tank.position.y);
-            aimTarget.replaceChildren(
-                el("b", { textContent: lockedOn.design.name }),
-                document.createTextNode(` · ${Math.ceil(lockedOn.hp)} HP · a ${d.toFixed(1)} u`),
-            );
-        }
-
-        // Objective progress.
-        allyCap.fill.style.width = `${(allyHold / CAPTURE_SECONDS) * 100}%`;
-        foeCap.fill.style.width = `${(foeHold / CAPTURE_SECONDS) * 100}%`;
-        allyCap.secs.textContent = `${allyHold.toFixed(1)} s`;
-        foeCap.secs.textContent = `${foeHold.toFixed(1)} s`;
-        const zoneLabels = {
-            neutral: ["Zona neutral", "#9aa0a6"],
-            ally: ["Capturando", "#6aa9e0"],
-            foe: ["El enemigo captura", "#e06a5f"],
-            contested: ["En disputa", "#e8c24a"],
-        };
-        const [zoneText, zoneColor] = zoneLabels[zoneState];
-        zoneStateLine.textContent = zoneText;
-        zoneStateLine.style.color = zoneColor;
-
-        // Both rosters.
-        let standing = 0;
-        for (const unit of [...allies, ...enemies]) {
-            const t = unit.tank;
-            if (t.alive && unit.enemy) standing++;
-            const state = unit.ai.state;
-            unit.hud.st.textContent = AI_STATE_LABEL[state];
-            unit.hud.st.className = `st ${state}`;
-            unit.hud.row.classList.toggle("down", !t.alive);
-            unit.hud.fill.style.width = `${t.hpRatio * 100}%`;
-            unit.hud.fill.style.background = t.hpRatio > 0.5 ? "#43c06a" : t.hpRatio > 0.2 ? "#d8b13a" : "#d84a3a";
-            unit.hud.dist.textContent = t.alive
-                ? ` · a ${Math.hypot(t.position.x - tank.position.x, t.position.y - tank.position.y).toFixed(0)} u`
-                : "";
-        }
-        const mineStanding = myTeam().filter((u) => u.tank.alive).length;
-        kFoes.v.textContent = `${mineStanding} / ${standing}`;
+        kSprint.v.textContent = sprintTime === null ? "—" : `${sprintTime.toFixed(2)} s`;
+        kRun.v.textContent = measureTime === null ? "—" : `${measureTime.toFixed(2)} s`;
+        kTrap.v.textContent = trapSpeed === null ? "—" : `${(trapSpeed * 3.6).toFixed(0)} km/h`;
+        kDist.v.textContent = `${distance.toFixed(0)} m`;
+        kPeakG.v.textContent = `${peakG.toFixed(2)} g`;
     }
 }
 
