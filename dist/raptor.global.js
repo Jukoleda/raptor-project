@@ -1,8 +1,95 @@
-// Raptor 0.4.0 — GENERADO por tools/build.mjs, no editar a mano.
-// Fuente: raptor.js y sus dependencias (49 módulos).
+// Raptor 0.5.0 — GENERADO por tools/build.mjs, no editar a mano.
+// Fuente: raptor.js y sus dependencias (52 módulos).
 // Uso: <script src="raptor.global.js"></script> y luego window.Raptor.
 (function (root) {
 "use strict";
+
+// ===== components/render/projection.js =====
+// The projection, in one place.
+//
+// It used to live in two: `Shape.draw` hard-coded a 45° field of view and a
+// depth of −6, and `Camera.viewExtents` re-derived the visible area from its
+// *own* copy of those numbers. They had to agree, and nothing said so — change
+// the depth of a shape and the camera's map bounds go quietly wrong, letting
+// the view slide off the edge of the world. Same numbers, one definition.
+//
+// It is also where the per-frame allocation went. `Shape.draw` built a fresh
+// projection matrix for every shape, every frame — identical work, 1400 times
+// over in the forest — plus a model-view matrix and three little arrays for the
+// translate/rotate/scale arguments. That is roughly seven thousand throwaway
+// objects per frame at 60 Hz, which the garbage collector then has to sweep.
+//
+// Drawing is synchronous and never re-entrant, so a shared scratch buffer is
+// safe: nothing can be halfway through using one when the next draw starts.
+
+const FOV_DEGREES = 45;
+const FOV_RADIANS = (FOV_DEGREES * Math.PI) / 180;
+
+// How far shapes sit from the camera along −Z. The sign differs by side: a
+// shape translates to −DEFAULT_DEPTH, the camera measures a positive distance.
+const DEFAULT_DEPTH = 6;
+
+const NEAR_PLANE = 0.1;
+const FAR_PLANE = 100;
+
+// Half-extents of the visible world at a given depth and aspect ratio. Both the
+// camera (for map bounds) and anything doing picking need this, and it has to
+// match what the projection above actually shows.
+function viewHalfExtents(aspect, { depth = DEFAULT_DEPTH, zoom = 1 } = {}) {
+    const halfH = (depth * Math.tan(FOV_RADIANS / 2)) / zoom;
+    return { halfW: halfH * aspect, halfH };
+}
+
+// A canvas that is not laid out yet reports a client size of zero, which would
+// make the aspect NaN and render nothing at all — with no error to explain it.
+// The drawing buffer is the honest fallback.
+function aspectOf(canvas) {
+    const width = canvas.clientWidth || canvas.width || 1;
+    const height = canvas.clientHeight || canvas.height || 1;
+    return width / height;
+}
+
+// One projection matrix per canvas, rebuilt only when the aspect changes.
+const projections = new WeakMap();
+
+function projectionFor(canvas) {
+    const { mat4 } = glMatrix;
+    const aspect = aspectOf(canvas);
+
+    let cached = projections.get(canvas);
+    if (!cached) {
+        cached = { aspect: null, matrix: mat4.create() };
+        projections.set(canvas, cached);
+    }
+    if (cached.aspect !== aspect) {
+        mat4.perspective(cached.matrix, FOV_RADIANS, aspect, NEAR_PLANE, FAR_PLANE);
+        cached.aspect = aspect;
+    }
+    return cached.matrix;
+}
+
+// Scratch space for building a model-view matrix, reused across draws.
+const Z_AXIS = [0, 0, 1];
+const translation = [0, 0, 0];
+const scaling = [1, 1, 1];
+let modelView = null;
+
+// Builds the model-view matrix for one shape and returns the shared scratch
+// matrix. The caller must upload it before the next call — which is exactly
+// what `Shape.draw` does, one shape at a time.
+function modelViewFor({ x, y, depth, rotationDegrees, scaleX, scaleY }) {
+    const { mat4 } = glMatrix;
+    if (!modelView) modelView = mat4.create();
+
+    translation[0] = x; translation[1] = y; translation[2] = depth;
+    scaling[0] = scaleX; scaling[1] = scaleY;
+
+    mat4.identity(modelView);
+    mat4.translate(modelView, modelView, translation);
+    if (rotationDegrees) mat4.rotate(modelView, modelView, (rotationDegrees * Math.PI) / 180, Z_AXIS);
+    mat4.scale(modelView, modelView, scaling);
+    return modelView;
+}
 
 // ===== components/camera.js =====
 // A 2D camera: a movable window onto the world.
@@ -43,13 +130,12 @@ class Camera {
         return this;
     }
 
-    // Half-extents of the visible world, in world units. Mirrors the projection
-    // Shape.draw uses (perspective `fov` at `depth`) and the canvas aspect, so
-    // it stays in sync with what is actually on screen.
-    viewExtents(canvas, { depth = 6, fov = 45 } = {}) {
-        const halfH = (depth * Math.tan((fov * Math.PI) / 180 / 2)) / this.zoom;
-        const aspect = canvas.clientWidth / canvas.clientHeight;
-        return { halfW: halfH * aspect, halfH };
+    // Half-extents of the visible world, in world units. The field of view and
+    // the depth come from components/render/projection.js — the same values
+    // Shape.draw projects with, so this cannot drift out of sync with what is
+    // actually on screen.
+    viewExtents(canvas, { depth = DEFAULT_DEPTH } = {}) {
+        return viewHalfExtents(aspectOf(canvas), { depth, zoom: this.zoom });
     }
 
     // Converts a pointer position (clientX/clientY, as given by mouse/touch
@@ -76,46 +162,70 @@ class Camera {
 // RaptorEngine owns the canvas, the WebGL context and the render loop. It is
 // shape-agnostic: anything with a `draw()` method can be added as an entity and
 // it will be drawn every frame. See components/shapes/ for the built-in shapes.
+//
+// A frame, in order: run the updaters, re-sort by layer if anything changed,
+// clear, draw what is on screen, schedule the next one.
 
-function RaptorEngine() {
-    this.context = undefined;
-    this.canvas = undefined;
-    this.entities = [];
+class RaptorEngine {
+    constructor() {
+        this.context = undefined;
+        this.canvas = undefined;
+        this.entities = [];
 
-    // The view onto the world. Defaults to the origin with zoom 1 (a no-op), so
-    // scenes that ignore it render unchanged. Move/replace it to pan or zoom;
-    // every entity is drawn through it. See components/camera.js.
-    this.camera = new Camera();
+        // Per-frame update callbacks, each called as fn(deltaSeconds). Register
+        // physics, animation, input, etc. here — they run before drawing.
+        this.updaters = [];
+
+        // The view onto the world. Defaults to the origin with zoom 1 (a no-op),
+        // so scenes that ignore it render unchanged. Move/replace it to pan or
+        // zoom; every entity is drawn through it. See components/camera.js.
+        this.camera = new Camera();
+
+        // Entities are drawn in layer order, low to high, and in insertion order
+        // within a layer. The sort is lazy: it only happens when something is
+        // added or a layer changes, not every frame.
+        this._needsSort = false;
+
+        // Skip entities that cannot be on screen. A map is usually much larger
+        // than the view — the forest holds about 1400 sprites and shows fewer
+        // than sixty of them — and the cheapest work is the work not done.
+        //
+        // Off by default: a scene that does something unusual with the camera,
+        // or draws entities without a position, keeps working unchanged.
+        this.culling = false;
+        this.drawnLastFrame = 0;
+
+        this.running = false;
+        this._lastTime = undefined;
+
+        // Bound once, because requestAnimationFrame calls it detached.
+        this.renderLoop = this.renderLoop.bind(this);
+    }
 
     // Creates the canvas and WebGL context. Pass a `mount` element to place the
     // canvas inside it (e.g. an editor layout); defaults to document.body.
-    this.createWindow = (mount, { width = 800, height = 600 } = {}) => {
-        var gameWindow = document.createElement("canvas");
+    createWindow(mount, { width = 800, height = 600 } = {}) {
+        const canvas = document.createElement("canvas");
+        canvas.id = "gameWindow";
+        canvas.width = width;
+        canvas.height = height;
+        (mount || document.body).appendChild(canvas);
 
-        gameWindow.id = "gameWindow";
-        gameWindow.width = width;
-        gameWindow.height = height;
+        const context = canvas.getContext("webgl");
+        // Throwing beats the old alert(): a framework has no business opening a
+        // modal, and returning with no context only moved the failure somewhere
+        // less obvious.
+        if (!context) throw new Error("Raptor: este navegador o equipo no soporta WebGL");
 
-        (mount || document.body).appendChild(gameWindow);
-
-        var context = gameWindow.getContext("webgl");
-
-        if (!context) {
-            alert("Unable to initialize WebGL. Your browser or machine may not support it.");
-            return;
-        }
-
-        this.canvas = gameWindow;
+        this.canvas = canvas;
         this.context = context;
-    };
+        return this;
+    }
 
-    // Entities are drawn in layer order, low to high, and in insertion order
-    // within a layer. The sort is lazy: it only happens when something is added
-    // or a layer changes, not every frame.
-    this._needsSort = false;
+    // --- Entities ---------------------------------------------------------
 
     // Registers a drawable entity. Returns it so calls can be chained.
-    this.add = (entity) => {
+    add(entity) {
         this.entities.push(entity);
         if (entity.layer) this._needsSort = true;
         // A shape can be re-layered long after it was added, and the engine has
@@ -123,69 +233,79 @@ function RaptorEngine() {
         // next time something else happened to trigger a sort.
         entity._onLayerChange = () => { this._needsSort = true; };
         return entity;
-    };
+    }
 
     // Removes a previously added entity. Returns the engine for chaining.
-    this.remove = (entity) => {
+    remove(entity) {
         const index = this.entities.indexOf(entity);
         if (index !== -1) {
             this.entities.splice(index, 1);
             entity._onLayerChange = null;
         }
         return this;
-    };
+    }
 
     // Stable sort by layer: Array.prototype.sort is required to be stable since
     // ES2019, which is what keeps insertion order inside a layer.
-    this.sortEntities = () => {
+    sortEntities() {
         this.entities.sort((a, b) => (a.layer || 0) - (b.layer || 0));
         this._needsSort = false;
         return this;
-    };
+    }
+
+    // Entities without a position or a radius are always drawn: "I do not know
+    // where this is" must never mean "so do not draw it". The radius is a circle
+    // around the shape that is guaranteed to contain it, so the test errs
+    // towards drawing — a wrongly hidden shape pops in at the screen edge, which
+    // is far worse than a few extra quads.
+    isVisible(entity, bounds) {
+        const radius = entity.cullRadius;
+        if (radius === null || radius === undefined || !entity.position) return true;
+        return entity.position.x + radius >= bounds.minX
+            && entity.position.x - radius <= bounds.maxX
+            && entity.position.y + radius >= bounds.minY
+            && entity.position.y - radius <= bounds.maxY;
+    }
+
+    // --- Updaters ---------------------------------------------------------
+
+    addUpdater(fn) {
+        this.updaters.push(fn);
+        return fn;
+    }
+
+    // Scenes come and go, and an updater left behind keeps moving things that
+    // no longer exist.
+    removeUpdater(fn) {
+        const index = this.updaters.indexOf(fn);
+        if (index !== -1) this.updaters.splice(index, 1);
+        return this;
+    }
+
+    // --- GL state ---------------------------------------------------------
 
     // One-time GL state configuration. Runs once, not per frame.
-    this.configure = () => {
+    configure() {
         const gl = this.context;
-
         gl.clearColor(0.0, 0.0, 0.0, 1.0);
-
         // 2D engine: depth testing is not needed. Enable alpha blending so
         // translucent objects composite correctly.
         gl.disable(gl.DEPTH_TEST);
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    };
-
-    // Clears the framebuffer at the start of each frame.
-    this.clearScreen = () => {
-        this.context.clear(this.context.COLOR_BUFFER_BIT);
-    };
-
-    // Per-frame update callbacks, each called as fn(deltaSeconds). Register
-    // physics, animation, input, etc. here — they run before drawing.
-    this.updaters = [];
-    this.addUpdater = (fn) => {
-        this.updaters.push(fn);
-        return fn;
-    };
-
-    // Scenes come and go, and an updater left behind keeps moving things that
-    // no longer exist. Removal iterates a copy in the loop below, so unhooking
-    // from inside an update is safe.
-    this.removeUpdater = (fn) => {
-        const index = this.updaters.indexOf(fn);
-        if (index !== -1) this.updaters.splice(index, 1);
         return this;
-    };
+    }
 
-    this._lastTime = undefined;
+    clearScreen() {
+        this.context.clear(this.context.COLOR_BUFFER_BIT);
+        return this;
+    }
 
-    // Whether the loop is scheduling frames. Read it; use start/stop to change.
-    this.running = false;
+    // --- The loop ---------------------------------------------------------
 
     // Configures GL state and starts the render loop. Calling it twice is safe:
     // a second loop would double every delta-time.
-    this.start = () => {
+    start() {
         if (this.running) return this;
         this.configure();
         this.running = true;
@@ -194,18 +314,28 @@ function RaptorEngine() {
         this._lastTime = undefined;
         requestAnimationFrame(this.renderLoop);
         return this;
-    };
+    }
 
     // Stops scheduling frames. The last one stays on screen — nothing clears.
-    this.stop = () => {
+    stop() {
         this.running = false;
         return this;
-    };
+    }
 
-    // Single render loop for the whole engine: update -> clear -> draw every
-    // entity -> schedule the next frame, in that order. `now` is the timestamp
-    // requestAnimationFrame passes in, used to derive delta-time.
-    this.renderLoop = (now) => {
+    // The visible rectangle in world units, or null when culling is off. Worked
+    // out once per frame rather than per shape.
+    viewBounds() {
+        if (!this.culling || !this.canvas) return null;
+        const { halfW, halfH } = this.camera.viewExtents(this.canvas);
+        return {
+            minX: this.camera.x - halfW, maxX: this.camera.x + halfW,
+            minY: this.camera.y - halfH, maxY: this.camera.y + halfH,
+        };
+    }
+
+    // `now` is the timestamp requestAnimationFrame passes in, used to derive
+    // delta-time.
+    renderLoop(now) {
         if (!this.running) return;
 
         // Delta-time in seconds, clamped so a background tab / long stall does
@@ -216,20 +346,23 @@ function RaptorEngine() {
 
         // A copy: an updater is allowed to add or remove updaters — which is
         // exactly what happens when one of them switches scenes.
-        for (const update of this.updaters.slice()) {
-            update(dt);
-        }
+        for (const update of this.updaters.slice()) update(dt);
 
         if (this._needsSort) this.sortEntities();
 
         this.clearScreen();
 
+        const bounds = this.viewBounds();
+        let drawn = 0;
         for (const entity of this.entities) {
+            if (bounds && !this.isVisible(entity, bounds)) continue;
             entity.draw(this.camera);
+            drawn++;
         }
+        this.drawnLastFrame = drawn;
 
         requestAnimationFrame(this.renderLoop);
-    };
+    }
 }
 
 // ===== components/ui/dom.js =====
@@ -1078,7 +1211,7 @@ const DEFAULT_TIMEOUT = 20000;
 // Rejects if the underlying load has not settled in time. Without this a
 // request that never answers leaves the loading screen up forever, which reads
 // to a player as "the game is broken" with nothing to go on.
-function withTimeout(promise, ms, what) {
+function withTimeout(promise, ms) {
     if (!ms) return promise;
     let timer;
     return Promise.race([
@@ -1088,6 +1221,14 @@ function withTimeout(promise, ms, what) {
         }),
     ]).finally(() => clearTimeout(timer));
 }
+
+// How each kind is fetched. A registry rather than a switch inside the class,
+// so a new kind is an *addition* and never an edit: `Assets.register` drops one
+// in and gives it a declaring method, without this file knowing it exists.
+//
+//     Assets.register("video", async (entry) => cargarVideo(entry.url));
+//     assets.video("intro", "intro.mp4");
+const LOADERS = new Map();
 
 class Assets {
     constructor({ gl = null, basePath = "", timeout = DEFAULT_TIMEOUT, concurrency = 8 } = {}) {
@@ -1160,13 +1301,17 @@ class Assets {
         return entry.value;
     }
 
+    // Declares and returns the registry, so declarations chain. Separate from
+    // `_declare` — which returns the entry — because the two callers want
+    // different things and hiding that behind `&& this` only looked clever.
+    _declareAndReturn(kind, key, url, options) {
+        this._declare(kind, key, url, options);
+        return this;
+    }
+
     // With a URL these declare; without one they read. Same name, both halves.
-    texture(key, url = null, options) { return url === null ? this._read(key, ASSET_KIND.TEXTURE) : this._declare(ASSET_KIND.TEXTURE, key, url, options) && this; }
-    image(key, url = null, options) { return url === null ? this._read(key, ASSET_KIND.IMAGE) : this._declare(ASSET_KIND.IMAGE, key, url, options) && this; }
-    json(key, url = null, options) { return url === null ? this._read(key, ASSET_KIND.JSON) : this._declare(ASSET_KIND.JSON, key, url, options) && this; }
-    text(key, url = null, options) { return url === null ? this._read(key, ASSET_KIND.TEXT) : this._declare(ASSET_KIND.TEXT, key, url, options) && this; }
-    sound(key, url = null, options) { return url === null ? this._read(key, ASSET_KIND.SOUND) : this._declare(ASSET_KIND.SOUND, key, url, options) && this; }
-    font(key, url = null, options) { return url === null ? this._read(key, ASSET_KIND.FONT) : this._declare(ASSET_KIND.FONT, key, url, options) && this; }
+    // Every kind's method is generated by `Assets.register` below, including the
+    // built-in ones — there is no separate path for them.
 
     // Untyped read, when the caller knows what it asked for.
     get(key) { return this._read(key); }
@@ -1252,15 +1397,22 @@ class Assets {
     }
 
     _fetchByKind(entry) {
-        switch (entry.kind) {
-            case ASSET_KIND.TEXTURE: return this._loadTexture(entry);
-            case ASSET_KIND.IMAGE: return this._loadImage(entry.url);
-            case ASSET_KIND.JSON: return this._loadFetch(entry.url, "json");
-            case ASSET_KIND.TEXT: return this._loadFetch(entry.url, "text");
-            case ASSET_KIND.SOUND: return this._loadSound(entry);
-            case ASSET_KIND.FONT: return this._loadFont(entry);
-            default: throw new Error(`Raptor: tipo de asset desconocido "${entry.kind}"`);
+        const loader = LOADERS.get(entry.kind);
+        if (!loader) throw new Error(`Raptor: tipo de asset desconocido "${entry.kind}"`);
+        return loader(entry, this);
+    }
+
+    // Teaches Assets a new kind. The loader receives (entry, assets) and returns
+    // a promise for the value; a same-named method is added for declaring and
+    // reading it, so a custom kind looks exactly like a built-in one.
+    static register(kind, loader) {
+        LOADERS.set(kind, loader);
+        if (!Object.prototype.hasOwnProperty.call(Assets.prototype, kind)) {
+            Assets.prototype[kind] = function (key, url = null, options) {
+                return url === null ? this._read(key, kind) : this._declareAndReturn(kind, key, url, options);
+            };
         }
+        return Assets;
     }
 
     async _loadTexture(entry) {
@@ -1333,6 +1485,15 @@ class Assets {
         return this;
     }
 }
+
+// The kinds Raptor ships with, declared through the very same door a custom one
+// would use. Nothing above this line knows the list.
+Assets.register(ASSET_KIND.TEXTURE, (entry, assets) => assets._loadTexture(entry));
+Assets.register(ASSET_KIND.IMAGE, (entry, assets) => assets._loadImage(entry.url));
+Assets.register(ASSET_KIND.JSON, (entry, assets) => assets._loadFetch(entry.url, "json"));
+Assets.register(ASSET_KIND.TEXT, (entry, assets) => assets._loadFetch(entry.url, "text"));
+Assets.register(ASSET_KIND.SOUND, (entry, assets) => assets._loadSound(entry));
+Assets.register(ASSET_KIND.FONT, (entry, assets) => assets._loadFont(entry));
 
 // ===== components/app.js =====
 // The front door. `App` is what you reach for to build something with Raptor;
@@ -1481,6 +1642,12 @@ class App {
     set camera(camera) { this.engine.camera = camera; }
     get entities() { return this.engine.entities; }
     get running() { return this.engine.running; }
+
+    // Skipping off-screen entities. Worth it as soon as the world is bigger
+    // than the view; pointless when everything fits on screen anyway.
+    get culling() { return this.engine.culling; }
+    set culling(on) { this.engine.culling = on; }
+    get drawnLastFrame() { return this.engine.drawnLastFrame; }
 
     add(entity) { return this.engine.add(entity); }
     remove(entity) { this.engine.remove(entity); return this; }
@@ -1762,6 +1929,7 @@ function getProgramInfo(gl, kind = PROGRAM_COLOR) {
 // in `initBuffers` and binds it in `bindAttributes`, without touching the
 // matrix maths. See components/shapes/sprite.js for the one that does.
 
+
 // Used when draw() is called without a camera: pan 0, zoom 1 (world == screen).
 const IDENTITY_CAMERA = { x: 0, y: 0, zoom: 1 };
 
@@ -1774,7 +1942,7 @@ class Shape {
         this.position = { x: 0, y: 0 };
         this.rotation = 0; // degrees, counter-clockwise
         this.scale = { x: 1, y: 1 };
-        this.depth = -6;
+        this.depth = -DEFAULT_DEPTH;
 
         this.color = { red: 1, green: 1, blue: 1, alpha: 1 };
 
@@ -1798,6 +1966,20 @@ class Shape {
         this.programInfo = null;
         this.buffers = null;
         this.vCount = 0;
+
+        // Radius of the shape's own geometry, in local units. Filled in by
+        // initBuffers, and used by the engine to skip shapes that cannot be on
+        // screen. Null means "no idea" — such a shape is always drawn.
+        this._localRadius = null;
+    }
+
+    // A circle around the shape that is guaranteed to contain it, in world
+    // units. Conservative on purpose: culling something that *is* visible shows
+    // up as things popping in at the edge of the screen, which is far worse
+    // than drawing a few extra quads.
+    get cullRadius() {
+        if (this._localRadius === null) return null;
+        return this._localRadius * Math.max(Math.abs(this.scale.x), Math.abs(this.scale.y));
     }
 
     // Must be implemented by subclasses. Returns a flat array of local-space
@@ -1825,6 +2007,16 @@ class Shape {
 
         const vertices = this.getVertices();
         this.vCount = vertices.length / 2;
+
+        // The furthest vertex from the origin. Computed here because the
+        // geometry is already in hand — asking for it again later would mean
+        // rebuilding it.
+        let furthest = 0;
+        for (let i = 0; i < vertices.length; i += 2) {
+            const distance = vertices[i] * vertices[i] + vertices[i + 1] * vertices[i + 1];
+            if (distance > furthest) furthest = distance;
+        }
+        this._localRadius = Math.sqrt(furthest);
 
         const positionBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
@@ -1856,24 +2048,23 @@ class Shape {
     // means "no camera", i.e. world space maps straight to the screen as before.
     draw(camera = IDENTITY_CAMERA) {
         const gl = this.context;
-        // gl-matrix 3.x exposes its modules under the global `glMatrix` namespace.
-        const { mat4 } = glMatrix;
-
-        const fieldOfView = (45 * Math.PI) / 180;
-        const aspect = gl.canvas.clientWidth / gl.canvas.clientHeight;
-        const projectionMatrix = mat4.create();
-        mat4.perspective(projectionMatrix, fieldOfView, aspect, 0.1, 100.0);
 
         // View transform: pan by the camera center, then zoom about it. Depth is
         // constant, so scaling the world coordinates scales the screen linearly.
         const zoom = camera.zoom ?? 1;
-        const viewX = (this.position.x - (camera.x ?? 0)) * zoom;
-        const viewY = (this.position.y - (camera.y ?? 0)) * zoom;
 
-        const modelViewMatrix = mat4.create();
-        mat4.translate(modelViewMatrix, modelViewMatrix, [viewX, viewY, this.depth]);
-        mat4.rotate(modelViewMatrix, modelViewMatrix, (this.rotation * Math.PI) / 180, [0, 0, 1]);
-        mat4.scale(modelViewMatrix, modelViewMatrix, [this.scale.x * zoom, this.scale.y * zoom, 1]);
+        // Both matrices come from shared, reused storage — see the note in
+        // components/render/projection.js on why that is safe and why it
+        // matters at a thousand-odd shapes a frame.
+        const projectionMatrix = projectionFor(gl.canvas);
+        const modelViewMatrix = modelViewFor({
+            x: (this.position.x - (camera.x ?? 0)) * zoom,
+            y: (this.position.y - (camera.y ?? 0)) * zoom,
+            depth: this.depth,
+            rotationDegrees: this.rotation,
+            scaleX: this.scale.x * zoom,
+            scaleY: this.scale.y * zoom,
+        });
 
         const { uniformLocations, program } = this.programInfo;
 
@@ -3160,6 +3351,46 @@ class Scene {
 
 // ===== components/scenes/index.js =====
 // Barrel for the scenes layer.
+
+// ===== components/math/random.js =====
+// A seeded random number generator.
+//
+// `Math.random()` cannot be seeded, and a game that cannot be seeded cannot be
+// replayed, cannot be tested and cannot hand a friend the same level. So this
+// is a plain linear congruential generator — the same constants as Numerical
+// Recipes — which had been copied by hand into five different files before it
+// lived here.
+//
+//     const random = createRandom(20260806);
+//     random();                 // 0 ≤ n < 1
+//     randomInt(random, 1, 6);  // un dado
+//
+// It is not cryptographically anything. It is fast, deterministic and short,
+// which is what a level generator wants.
+
+const MULTIPLIER = 1664525;
+const INCREMENT = 1013904223;
+const MODULUS = 4294967296; // 2³²
+
+// Returns a function that yields the next number in [0, 1) each time it is
+// called. Two generators built from the same seed produce the same sequence.
+function createRandom(seed = 1) {
+    let state = seed >>> 0;
+    return () => ((state = (state * MULTIPLIER + INCREMENT) >>> 0) / MODULUS);
+}
+
+// An integer in [min, max], both ends included — which is what people mean by
+// "a number between 1 and 6", and not what a naive floor() gives you.
+function randomInt(random, min, max) {
+    return min + Math.floor(random() * (max - min + 1));
+}
+
+function randomRange(random, min, max) {
+    return min + random() * (max - min);
+}
+
+// ===== components/math/index.js =====
+// Barrel for the maths helpers.
 
 // ===== components/controls/tankController.js =====
 // Tank-style movement for any shape.
@@ -4727,6 +4958,8 @@ class Engine {
 
 // --- Scenes -------------------------------------------------------------
 
+// --- Maths --------------------------------------------------------------
+
 // --- Gameplay kit -------------------------------------------------------
 // Not part of the engine proper: batteries that happen to ship in the box,
 // built on the layers above. Ignore them and nothing below changes.
@@ -4764,7 +4997,7 @@ class Engine {
 // generated single-file pages (engine.html, dyno.html, …) come from
 // `node tools/build.mjs`, which also emits dist/raptor.js for consumers.
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 
 root.Raptor = {
     AIM_CYCLE: AIM_CYCLE,
@@ -4784,17 +5017,22 @@ root.Raptor = {
     Bullet: Bullet,
     Camera: Camera,
     Circle: Circle,
+    DEFAULT_DEPTH: DEFAULT_DEPTH,
     DEFAULT_DESIGN: DEFAULT_DESIGN,
     DEFAULT_PROJECTILE: DEFAULT_PROJECTILE,
     DYNAMIC: DYNAMIC,
     Engine: Engine,
     EngineSound: EngineSound,
+    FAR_PLANE: FAR_PLANE,
+    FOV_DEGREES: FOV_DEGREES,
+    FOV_RADIANS: FOV_RADIANS,
     FULLSCREEN_STYLES: FULLSCREEN_STYLES,
     GEARBOX_MODE: GEARBOX_MODE,
     Gearbox: Gearbox,
     Keyboard: Keyboard,
     LOADING_STYLES: LOADING_STYLES,
     LoadingScreen: LoadingScreen,
+    NEAR_PLANE: NEAR_PLANE,
     PAD_STYLES: PAD_STYLES,
     PROGRAM_COLOR: PROGRAM_COLOR,
     PROGRAM_TEXTURE: PROGRAM_TEXTURE,
@@ -4821,10 +5059,12 @@ root.Raptor = {
     VERSION: VERSION,
     Weapon: Weapon,
     World: World,
+    aspectOf: aspectOf,
     boundingRadius: boundingRadius,
     button: button,
     card: card,
     collide: collide,
+    createRandom: createRandom,
     el: el,
     evaluateImpact: evaluateImpact,
     exitFullscreen: exitFullscreen,
@@ -4836,6 +5076,9 @@ root.Raptor = {
     kv: kv,
     normalizeKey: normalizeKey,
     onFullscreenChange: onFullscreenChange,
+    projectionFor: projectionFor,
+    randomInt: randomInt,
+    randomRange: randomRange,
     raycastShape: raycastShape,
     reflect: reflect,
     requestFullscreen: requestFullscreen,
@@ -4843,5 +5086,6 @@ root.Raptor = {
     select: select,
     slider: slider,
     toggleFullscreen: toggleFullscreen,
+    viewHalfExtents: viewHalfExtents,
 };
 })(typeof globalThis !== "undefined" ? globalThis : this);

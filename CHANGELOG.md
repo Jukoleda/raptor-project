@@ -4,6 +4,60 @@ Todos los cambios notables de este proyecto se documentan en este archivo.
 
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/).
 
+## [0.5.0] - 2026-08-06
+
+Relevamiento del proyecto contra SOLID y clean code, y las optimizaciones que
+salieron de él. Sin funcionalidad nueva: lo mismo, mejor hecho y más rápido.
+
+### Rendimiento
+- **La proyección se calcula una vez por frame, no una por forma.**
+  `Shape.draw` construía una matriz de proyección para *cada* forma en *cada*
+  frame —trabajo idéntico, mil cuatrocientas veces— más una matriz modelo-vista
+  y tres arrays para los argumentos de translate/rotate/scale: unos siete mil
+  objetos desechables por frame. Ahora la proyección se cachea por canvas y se
+  rehace solo si cambia el aspecto, y las matrices salen de un buffer
+  reutilizado (dibujar es síncrono y no reentrante, así que compartirlo es
+  seguro). **Coste de CPU de la pasada de dibujo: 10,5 ms → 6,0 ms.**
+- **Recorte por vista** (`app.culling = true`): no se dibuja lo que no puede
+  estar en pantalla. En El Bosque son **57 de 1397** entidades. **Frame:
+  51,9 ms → 25,3 ms, un 51% menos.** Apagado por defecto; el radio envuelve la
+  forma y es generoso a propósito, porque esconder algo visible se nota como
+  cosas que aparecen de golpe en el borde.
+
+### Corregido
+- **El campo de visión y la profundidad estaban definidos dos veces**, en
+  `Shape.draw` y en `Camera.viewExtents`, y tenían que coincidir sin que nada lo
+  dijera. Cambiar la profundidad de una forma desajustaba en silencio los
+  límites de mapa de la cámara. Ahora son un solo sitio,
+  `components/render/projection.js`.
+- **Un canvas todavía sin maquetar** reporta tamaño cero, lo que hacía la
+  relación de aspecto `NaN` y no dibujaba nada, sin ningún error que lo
+  explicara. Ahora cae al tamaño del búfer.
+- **`createWindow` abría un `alert()`** cuando no había WebGL y seguía adelante
+  sin contexto, moviendo el fallo a un sitio menos obvio. Ahora lanza.
+
+### Cambiado
+- **`Assets` pasa de un `switch` sobre tipos a un registro** (abierto/cerrado):
+  `Assets.register(kind, loader)` añade un tipo *y* su método de declaración sin
+  tocar la clase. Los seis tipos que trae Raptor se registran por esa misma
+  puerta — el resto del archivo no sabe cuáles son.
+- **`RaptorEngine` es una clase**, como todo lo demás del framework. Era una
+  función constructora con doce propiedades flecha, es decir doce closures por
+  instancia en vez de métodos en el prototipo.
+- **El generador aleatorio con semilla estaba copiado a mano en cinco
+  archivos.** Ahora es `components/math/random.js`, con las mismas constantes,
+  así que todos los mapas ya generados salen idénticos.
+- **`Assets` ya no usa el truco `&& this`** para encadenar: era corto y no se
+  entendía. Un `_declareAndReturn` con nombre en su lugar.
+
+### Eliminado
+- **Arte muerto en El Bosque**: una celda de la hoja (`SPARK`) que no se usaba
+  en ninguna parte, y un segundo fotograma de bellota que el comentario decía
+  animar pero nadie mostraba — ahora las bellotas sí pulsan entre los dos.
+- **API especulativa** en `math/random.js` (`pick`, `chance`) que no llamaba
+  nadie, y cuatro exports internos de `game/forest.js` que ningún módulo de
+  fuera usaba.
+
 ## [0.4.0] - 2026-08-06
 
 Paso 3 de los tres, y con él Raptor deja de ser un framework con demos: hay un

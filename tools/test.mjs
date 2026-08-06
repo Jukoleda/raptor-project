@@ -685,6 +685,150 @@ suite("escenas", async () => {
     await page.close();
 });
 
+
+// --- Optimizaciones: que sigan siendo correctas, no solo rápidas -----------
+
+suite("rendimiento", async () => {
+    const { page } = await open("bosque.html");
+    await page.waitForFunction(() => window.raptorBosque?.scene === "menu", { timeout: 15000 });
+    await page.evaluate(() => window.raptorBosque.go("juego", { acorns: 10, seconds: 600 }));
+    await page.waitForFunction(() => window.raptorBosque.state, { timeout: 15000 });
+    await page.waitForTimeout(400);
+
+    // The projection matrix is shared per canvas and rebuilt only when the
+    // aspect changes. Building one per shape per frame was most of the CPU cost
+    // of a draw pass.
+    ok("la proyección se comparte por canvas",
+        await page.evaluate(() => {
+            const c = window.raptorBosque.app.canvas;
+            return window.Raptor === undefined
+                ? projectionFor(c) === projectionFor(c)   // bundle plano
+                : window.Raptor.projectionFor(c) === window.Raptor.projectionFor(c);
+        }));
+
+    // The one that matters: culling must never hide something that would have
+    // been on screen. Ground truth comes from pushing every vertex through the
+    // real matrices, not from a second copy of the cull maths.
+    const cull = await page.evaluate(async () => {
+        const app = window.raptorBosque.app;
+        const g = window.raptorBosque.game;
+        const { mat4, vec4 } = glMatrix;
+        const results = [];
+
+        for (const [px, py] of [[0, 0], [-14, 10], [14, -10], [0, 11], [-15, 0]]) {
+            g.paused = false;
+            g.position.x = px; g.position.y = py;
+            for (let i = 0; i < 30; i++) await new Promise((r) => requestAnimationFrame(r));
+            g.paused = true;
+
+            const cam = app.camera;
+            const canvas = app.canvas;
+            const aspect = (canvas.clientWidth || canvas.width) / (canvas.clientHeight || canvas.height);
+            const proj = mat4.create();
+            mat4.perspective(proj, (45 * Math.PI) / 180, aspect, 0.1, 100);
+            const { halfW, halfH } = cam.viewExtents(canvas);
+            const bounds = { minX: cam.x - halfW, maxX: cam.x + halfW, minY: cam.y - halfH, maxY: cam.y + halfH };
+
+            let onScreen = 0, hidden = 0, drawn = 0;
+            for (const e of app.entities) {
+                if (!e.getVertices) continue;
+                const verts = e.getVertices();
+                const mv = mat4.create();
+                mat4.translate(mv, mv, [(e.position.x - cam.x) * cam.zoom, (e.position.y - cam.y) * cam.zoom, e.depth]);
+                mat4.rotate(mv, mv, (e.rotation * Math.PI) / 180, [0, 0, 1]);
+                mat4.scale(mv, mv, [e.scale.x * cam.zoom, e.scale.y * cam.zoom, 1]);
+                mat4.multiply(mv, proj, mv);
+
+                let visible = false;
+                for (let i = 0; i < verts.length && !visible; i += 2) {
+                    const p = vec4.transformMat4(vec4.create(), vec4.fromValues(verts[i], verts[i + 1], 0, 1), mv);
+                    if (p[3] <= 0) continue;
+                    const nx = p[0] / p[3], ny = p[1] / p[3];
+                    if (nx >= -1 && nx <= 1 && ny >= -1 && ny <= 1) visible = true;
+                }
+                const kept = app.engine.isVisible(e, bounds);
+                if (visible) onScreen++;
+                if (kept) drawn++;
+                if (visible && !kept) hidden++;
+            }
+            results.push({ at: `${px},${py}`, onScreen, drawn, hidden, total: app.entities.length });
+        }
+        g.paused = false;
+        return results;
+    });
+
+    ok("el culling no esconde nada que estuviera en pantalla",
+        cull.every((r) => r.hidden === 0), JSON.stringify(cull.map((r) => `${r.at}:${r.hidden}`)));
+    ok("y descarta la gran mayoría del mapa",
+        cull.every((r) => r.drawn < r.total * 0.15),
+        cull.map((r) => `${r.drawn}/${r.total}`).join(" "));
+
+    await page.close();
+});
+
+// --- La aleatoriedad tiene que ser reproducible ---------------------------
+
+suite("random", async () => {
+    const { page } = await open("bosque.html");
+    await page.waitForFunction(() => window.raptorBosque, { timeout: 15000 });
+
+    // A level that cannot be reproduced cannot be tested or shared. The exact
+    // sequence matters too: it is the one every map in the repo was built with.
+    const seq = await page.evaluate(() => {
+        const first = createRandom(20260806);
+        const second = createRandom(20260806);
+        const a = [], b = [];
+        for (let i = 0; i < 5; i++) { a.push(first()); b.push(second()); }
+        return { a, b, different: createRandom(1)() !== createRandom(2)() };
+    });
+    ok("la misma semilla da la misma secuencia",
+        seq.a.every((v, i) => v === seq.b[i]), seq.a.map((v) => v.toFixed(4)).join(","));
+    ok("semillas distintas divergen", seq.different);
+    ok("todo cae en [0, 1)", seq.a.every((v) => v >= 0 && v < 1));
+
+    const ints = await page.evaluate(() => {
+        const r = createRandom(7);
+        const seen = new Set();
+        for (let i = 0; i < 400; i++) seen.add(randomInt(r, 1, 6));
+        return [...seen].sort();
+    });
+    // Inclusive at both ends: "entre 1 y 6" has to be able to give a 6.
+    ok("randomInt incluye los dos extremos",
+        ints.length === 6 && ints[0] === 1 && ints[5] === 6, JSON.stringify(ints));
+
+    // Two runs of the generator must build the identical forest.
+    const same = await page.evaluate(() => {
+        const a = generateForest(123), b = generateForest(123), c = generateForest(124);
+        const flat = (g) => g.map((row) => row.join("")).join("");
+        return { equal: flat(a) === flat(b), differs: flat(a) !== flat(c) };
+    });
+    ok("el mapa es reproducible desde su semilla", same.equal && same.differs, JSON.stringify(same));
+    await page.close();
+});
+
+// --- Assets abierto a extensión, cerrado a modificación -------------------
+
+suite("extensible", async () => {
+    const { page } = await open("assets.html", null, { expect: EXPECTED_404 });
+
+    // A new kind must be an addition, not an edit: registering one gives it a
+    // declaring method and a loading path without touching the class.
+    const custom = await page.evaluate(async () => {
+        const Assets = window.raptorAssets.Assets;
+        Assets.register("mayusculas", async (entry) => {
+            const response = await fetch(entry.url);
+            return (await response.text()).toUpperCase();
+        });
+        const assets = new Assets({});
+        assets.mayusculas("saludo", "data:text/plain,hola%20bosque");
+        await assets.load();
+        return { value: assets.mayusculas("saludo"), kind: assets.manifest[0].kind };
+    });
+    ok("un tipo nuevo se registra sin tocar la clase",
+        custom.value === "HOLA BOSQUE" && custom.kind === "mayusculas", JSON.stringify(custom));
+    await page.close();
+});
+
 // --- Phone ---------------------------------------------------------------
 
 suite("mobile", async () => {

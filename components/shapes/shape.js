@@ -12,6 +12,7 @@
 // matrix maths. See components/shapes/sprite.js for the one that does.
 
 import { getProgramInfo, PROGRAM_COLOR } from "../render/shaders.js";
+import { projectionFor, modelViewFor, DEFAULT_DEPTH } from "../render/projection.js";
 
 // Used when draw() is called without a camera: pan 0, zoom 1 (world == screen).
 const IDENTITY_CAMERA = { x: 0, y: 0, zoom: 1 };
@@ -25,7 +26,7 @@ export default class Shape {
         this.position = { x: 0, y: 0 };
         this.rotation = 0; // degrees, counter-clockwise
         this.scale = { x: 1, y: 1 };
-        this.depth = -6;
+        this.depth = -DEFAULT_DEPTH;
 
         this.color = { red: 1, green: 1, blue: 1, alpha: 1 };
 
@@ -49,6 +50,20 @@ export default class Shape {
         this.programInfo = null;
         this.buffers = null;
         this.vCount = 0;
+
+        // Radius of the shape's own geometry, in local units. Filled in by
+        // initBuffers, and used by the engine to skip shapes that cannot be on
+        // screen. Null means "no idea" — such a shape is always drawn.
+        this._localRadius = null;
+    }
+
+    // A circle around the shape that is guaranteed to contain it, in world
+    // units. Conservative on purpose: culling something that *is* visible shows
+    // up as things popping in at the edge of the screen, which is far worse
+    // than drawing a few extra quads.
+    get cullRadius() {
+        if (this._localRadius === null) return null;
+        return this._localRadius * Math.max(Math.abs(this.scale.x), Math.abs(this.scale.y));
     }
 
     // Must be implemented by subclasses. Returns a flat array of local-space
@@ -76,6 +91,16 @@ export default class Shape {
 
         const vertices = this.getVertices();
         this.vCount = vertices.length / 2;
+
+        // The furthest vertex from the origin. Computed here because the
+        // geometry is already in hand — asking for it again later would mean
+        // rebuilding it.
+        let furthest = 0;
+        for (let i = 0; i < vertices.length; i += 2) {
+            const distance = vertices[i] * vertices[i] + vertices[i + 1] * vertices[i + 1];
+            if (distance > furthest) furthest = distance;
+        }
+        this._localRadius = Math.sqrt(furthest);
 
         const positionBuffer = gl.createBuffer();
         gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
@@ -107,24 +132,23 @@ export default class Shape {
     // means "no camera", i.e. world space maps straight to the screen as before.
     draw(camera = IDENTITY_CAMERA) {
         const gl = this.context;
-        // gl-matrix 3.x exposes its modules under the global `glMatrix` namespace.
-        const { mat4 } = glMatrix;
-
-        const fieldOfView = (45 * Math.PI) / 180;
-        const aspect = gl.canvas.clientWidth / gl.canvas.clientHeight;
-        const projectionMatrix = mat4.create();
-        mat4.perspective(projectionMatrix, fieldOfView, aspect, 0.1, 100.0);
 
         // View transform: pan by the camera center, then zoom about it. Depth is
         // constant, so scaling the world coordinates scales the screen linearly.
         const zoom = camera.zoom ?? 1;
-        const viewX = (this.position.x - (camera.x ?? 0)) * zoom;
-        const viewY = (this.position.y - (camera.y ?? 0)) * zoom;
 
-        const modelViewMatrix = mat4.create();
-        mat4.translate(modelViewMatrix, modelViewMatrix, [viewX, viewY, this.depth]);
-        mat4.rotate(modelViewMatrix, modelViewMatrix, (this.rotation * Math.PI) / 180, [0, 0, 1]);
-        mat4.scale(modelViewMatrix, modelViewMatrix, [this.scale.x * zoom, this.scale.y * zoom, 1]);
+        // Both matrices come from shared, reused storage — see the note in
+        // components/render/projection.js on why that is safe and why it
+        // matters at a thousand-odd shapes a frame.
+        const projectionMatrix = projectionFor(gl.canvas);
+        const modelViewMatrix = modelViewFor({
+            x: (this.position.x - (camera.x ?? 0)) * zoom,
+            y: (this.position.y - (camera.y ?? 0)) * zoom,
+            depth: this.depth,
+            rotationDegrees: this.rotation,
+            scaleX: this.scale.x * zoom,
+            scaleY: this.scale.y * zoom,
+        });
 
         const { uniformLocations, program } = this.programInfo;
 

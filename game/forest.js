@@ -10,31 +10,29 @@
 // character sticks to a wall instead of sliding along it — pressing into a wall
 // diagonally cancels the component that *would* have worked.
 
+import { createRandom } from "../components/math/random.js";
+
 export const MAP = { width: 34, height: 26 };
 export const HALF = { x: (MAP.width - 1) / 2, y: (MAP.height - 1) / 2 };
 
-// The player's footprint, in world units. Narrower than the sprite on purpose:
+// The player's footprint, in world units. Internal: callers move through
+// `moveWithCollision` and never need to know the shape of the body. Narrower than the sprite on purpose:
 // a hitbox that matches the drawing exactly feels unfair, because the shoulders
 // catch on doorways the player is clearly aiming through.
-export const BODY = { halfW: 0.28, halfH: 0.22 };
+const BODY = { halfW: 0.28, halfH: 0.22 };
 
 export const CELL_KIND = { GRASS: 0, ALT: 1, DIRT: 2, FLOWERS: 3, WATER: 4, PATH: 5, TREE: 6, ROCK: 7, BUSH: 8, STUMP: 9, LOG: 10 };
 
 const SOLID = new Set([CELL_KIND.TREE, CELL_KIND.ROCK, CELL_KIND.WATER, CELL_KIND.LOG]);
 
-export function isSolidKind(kind) {
+function isSolidKind(kind) {
     return SOLID.has(kind);
-}
-
-function makeRandom(seed) {
-    let s = seed >>> 0;
-    return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
 }
 
 // Builds the grid. Deterministic from `seed`, so a level can be replayed and a
 // test can rely on the layout.
 export function generateForest(seed = 20260806) {
-    const random = makeRandom(seed);
+    const random = createRandom(seed);
     const grid = [];
 
     for (let row = 0; row < MAP.height; row++) {
@@ -80,9 +78,9 @@ export function generateForest(seed = 20260806) {
 // world counts Y upward, which is the sign flip below — get it wrong and the
 // map renders mirrored, which looks fine until collisions disagree with it.
 export const toWorld = (col, row) => ({ x: col - HALF.x, y: HALF.y - row });
-export const toGrid = (x, y) => ({ col: Math.round(x + HALF.x), row: Math.round(HALF.y - y) });
+const toGrid = (x, y) => ({ col: Math.round(x + HALF.x), row: Math.round(HALF.y - y) });
 
-export function solidAt(grid, x, y) {
+function solidAt(grid, x, y) {
     const { col, row } = toGrid(x, y);
     if (row < 0 || row >= grid.length || col < 0 || col >= grid[0].length) return true;
     return isSolidKind(grid[row][col]);
