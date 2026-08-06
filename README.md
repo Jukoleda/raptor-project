@@ -465,6 +465,11 @@ batalla, así que nada cambia allí.
 - **Caja automática o manual** (G, y Z/X): déjala en 5ª desde parado y verás el
   motor ahogarse — 9 km/h en 2,5 s, frente a 62 km/h en 1ª.
 
+**En móvil** hay controles sobre la pista: **GAS** y **FRENO** (pedales, se
+mantienen pulsados), **▲/▼** para cambiar de marcha, **AUTO/MAN** para alternar
+el modo y **↺** para volver a la salida. Teclado y táctil alimentan el mismo
+estado, así que ninguno pisa al otro.
+
 Con la configuración de fábrica: **0-100 en 4,87 s** y **400 m en 13,35 s** a
 169 km/h de paso.
 

@@ -27,6 +27,12 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
   par máximo, corte y grupo final; **cronómetro** de 0-100 km/h, 400 m con
   velocidad de paso, distancia y G máxima. Caja automática o manual. La cámara se
   aleja con la velocidad. Entrada de desarrollo `dyno-dev.html`.
+- **Controles táctiles** sobre la pista, para poder probarlo en el móvil:
+  **GAS** y **FRENO** como pedales (se mantienen pulsados, con captura de
+  puntero para que soltar fuera del botón también los suelte), **▲/▼** de marcha,
+  **AUTO/MAN** y **↺** de reinicio. Teclado y táctil alimentan el mismo estado,
+  así que ninguno pisa al otro; los botones de marcha se atenúan en automática y
+  el pad se compacta en pantallas estrechas para no tapar la pista.
 - Portada (`index.html`) con la nueva tarjeta.
 
 ### Corregido
