@@ -9,7 +9,8 @@
 // components/vehicles/Tank (hull + movable turret + health), components/weapons
 // (gun and shells) and the engine's Camera (follows the player).
 
-import RaptorEngine from "../components/raptorEngine.js";
+import App from "../components/app.js";
+import { el, kv, card, button, hint } from "../components/ui/index.js";
 import { Rectangle, Square, Circle, Triangle } from "../components/shapes/index.js";
 import { TankController, TankAI, AI_STATE_LABEL, Gearbox, GEARBOX_MODE, AutoAim, AIM_MODE } from "../components/controls/index.js";
 import { Tank, TANK_DESIGNS } from "../components/vehicles/index.js";
@@ -102,29 +103,10 @@ const IMPACT = {
 // spends shells on the target instead of spraying while the turret swings.
 const AUTO_FIRE_ARC = 4; // degrees
 
+// Only this page's own chrome: the layout, cards, rows, buttons and the
+// on-screen pad all come from the framework (components/ui/, components/input/).
 const STYLES = `
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #e6e6e6; background: #1b1d21; }
-    #app { display: flex; gap: 16px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
-    #stage { position: relative; background: #0a0d12; border-radius: 8px; overflow: hidden; box-shadow: 0 6px 24px rgba(0,0,0,.4); }
-    #stage canvas { display: block; max-width: 100%; height: auto; touch-action: none; }
-    #panel { width: 290px; display: flex; flex-direction: column; gap: 16px; }
-
-    /* On-screen controls overlaid on the canvas (touch + mouse). */
-    .pad { position: absolute; bottom: 16px; display: flex; gap: 12px; align-items: flex-end; }
-    .pad.left { left: 16px; }
-    .pad.right { right: 16px; }
-    .pad .col { display: flex; flex-direction: column; gap: 12px; }
-    .tbtn {
-        width: 60px; height: 60px; border-radius: 50%;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 22px; line-height: 1; color: #e6e6e6;
-        background: rgba(38, 43, 51, .55); border: 1px solid rgba(255, 255, 255, .28);
-        -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
-        touch-action: none; user-select: none; -webkit-user-select: none;
-        -webkit-tap-highlight-color: transparent; cursor: pointer;
-    }
-    .tbtn.on, .tbtn:active { background: rgba(74, 127, 181, .7); border-color: #7fb2e6; }
+    #panel { width: 290px; }
     .tbtn.fire { background: rgba(122, 47, 47, .6); border-color: rgba(230, 140, 140, .45); }
     .tbtn.fire:active { background: rgba(170, 60, 60, .8); }
 
@@ -226,17 +208,9 @@ const STYLES = `
 
     /* Stack the panel under the canvas and grow the touch buttons on phones. */
     @media (max-width: 720px) {
-        #app { flex-direction: column; padding: 10px; gap: 10px; }
         #panel { width: 100%; }
-        .tbtn { width: 68px; height: 68px; font-size: 24px; }
     }
 `;
-
-function el(tag, props = {}, children = []) {
-    const node = Object.assign(document.createElement(tag), props);
-    for (const child of children) node.append(child);
-    return node;
-}
 
 // --- Geometry helpers (bullets and bodies against the static map) ---
 
@@ -262,13 +236,10 @@ function segmentHitsBox(a, b, box) {
     return true;
 }
 
-function startDemo() {
-    document.head.append(el("style", { textContent: STYLES }));
-
-    const game = new RaptorEngine();
-    const stage = el("div", { id: "stage" });
-    game.createWindow(stage);
-    const gl = game.context;
+App.boot({ title: "Batalla de tanques", styles: STYLES }, (app) => {
+    const { stage, keyboard, touch } = app;
+    const game = app;
+    const gl = app.gl;
 
     // Two views of the same scenery. `colliders` are axis-aligned boxes — cheap
     // enough to test a shell or a line of sight against every frame. `solids`
@@ -352,7 +323,7 @@ function startDemo() {
     // Where the player is pointing, in *client* pixels. Converted to world every
     // frame so the aim tracks the same spot on screen while the camera moves.
     let aimPixel = null;
-    let manualTraverse = 0; // -1 / 0 / 1 from Q and E; overrides pointer aim
+    let manualTraverse = 0; // -1 / 0 / 1 from Q and E, read per frame in update
     let gearMode = GEARBOX_MODE.AUTO; // the player's transmission mode, kept across restarts
     let aimMode = AIM_MODE.OFF;       // the player's auto-aim policy, kept across restarts
     let autoAim = null;               // AutoAim bound to the player's tank
@@ -380,22 +351,17 @@ function startDemo() {
     const shownMarks = new Set();
 
     // --- On-screen controls: steering left, throttle + fire right. ---
-    const tbtn = (label, cls = "") => el("div", { className: `tbtn ${cls}`.trim(), textContent: label });
     const btn = {
-        up: tbtn("▲"), down: tbtn("▼"), left: tbtn("◀"), right: tbtn("▶"),
-        fire: tbtn("🔥", "fire"), aim: tbtn("🎯", "aim"), auto: tbtn("AUTO", "autofire"),
+        up: touch.button("up", "▲", "round"), down: touch.button("down", "▼", "round"),
+        left: touch.button("left", "◀", "round"), right: touch.button("right", "▶", "round"),
+        fire: touch.button("fire", "🔥", "round fire"),
+        aim: touch.button("aim", "🎯", "round aim"), auto: touch.button("auto", "AUTO", "round autofire"),
     };
-    stage.append(
-        el("div", { className: "pad left" }, [btn.left, btn.right]),
-        el("div", { className: "pad right" }, [
-            el("div", { className: "col" }, [btn.aim, btn.auto]),
-            btn.fire,
-            el("div", { className: "col" }, [btn.up, btn.down]),
-        ]),
-    );
-    btn.fire.addEventListener("pointerdown", (e) => { e.preventDefault(); firePlayer(); });
-    btn.aim.addEventListener("pointerdown", (e) => { e.preventDefault(); cycleAim(); });
-    btn.auto.addEventListener("pointerdown", (e) => { e.preventDefault(); toggleAutoFire(); });
+    touch.pad("left", [btn.left, btn.right]);
+    touch.pad("right", [[btn.aim, btn.auto], btn.fire, [btn.up, btn.down]]);
+    touch.tap(btn.fire, () => firePlayer());
+    touch.tap(btn.aim, () => cycleAim());
+    touch.tap(btn.auto, () => toggleAutoFire());
 
     // --- Banner shown when the battle ends. ---
     const bannerText = el("b");
@@ -495,53 +461,33 @@ function startDemo() {
         el("div", { style: "margin-top:8px" }, [autoFireBtn]),
     ]);
 
-    const panel = el("div", { id: "panel" }, [
-        el("h1", { textContent: "Batalla de tanques" }),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Objetivo · zona central" }),
-            allyCap.node("Tu escuadrón"), foeCap.node("Enemigo"),
-            zoneStateLine,
-            el("div", { className: "hint", textContent: `Controla la zona ${CAPTURE_SECONDS} s para ganar · si están los dos bandos, el reloj se para` }),
+    app.addPanel(
+        card("Objetivo · zona central", [
+            allyCap.node("Tu escuadrón"), foeCap.node("Enemigo"), zoneStateLine,
+            hint(`Controla la zona ${CAPTURE_SECONDS} s para ganar · si están los dos bandos, el reloj se para`),
         ]),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Tu tanque" }),
+        card("Tu tanque", [
             el("div", { className: "garage" }, garageBtns),
             el("div", { className: "row" }, [hpBar]),
             kHp.row, kSpeed.row, kTurret.row, kAmmo.row,
-            el("div", { className: "hint", textContent: "Teclas 1-4 cambian de tanque (reinicia la batalla)" }),
+            hint("Teclas 1-4 cambian de tanque (reinicia la batalla)"),
         ]),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Munición y blindaje" }),
+        card("Munición y blindaje", [
             el("div", { className: "ammo" }, ammoBtns),
             impactLine, kFace.row, kAngle.row, kEff.row, kPen.row,
-            el("div", { className: "hint", textContent: "C cambia de proyectil · el blindaje efectivo crece con el ángulo" }),
+            hint("C cambia de proyectil · el blindaje efectivo crece con el ángulo"),
         ]),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Auto-apuntado" }), aimWidget,
-            el("div", { className: "hint", textContent: "T (o 🎯) cicla el objetivo · F (o AUTO) mantiene el gatillo" }),
+        card("Auto-apuntado", [aimWidget, hint("T (o 🎯) cicla el objetivo · F (o AUTO) mantiene el gatillo")]),
+        card("Caja de cambios", [gearWidget, hint("G alterna automática/manual · Z y X cambian de marcha")]),
+        card("Tu escuadrón", [allyRoster]),
+        card("Enemigos (máquina de estados)", [roster, kFoes.row]),
+        card("Controles", [
+            keypad,
+            hint("W/S avanzan · A/D giran el casco · ratón o dedo apuntan la torreta (Q/E a mano) · clic o Espacio disparan"),
         ]),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Caja de cambios" }), gearWidget,
-            el("div", { className: "hint", textContent: "G alterna automática/manual · Z y X cambian de marcha" }),
-        ]),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Tu escuadrón" }), allyRoster,
-        ]),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Enemigos (máquina de estados)" }), roster, kFoes.row,
-        ]),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Controles" }), keypad,
-            el("div", { className: "hint", textContent: "W/S avanzan · A/D giran el casco · ratón o dedo apuntan la torreta (Q/E a mano) · clic o Espacio disparan" }),
-        ]),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Minimapa" }), mini,
-            el("div", { className: "hint", textContent: "Verde: tú · rojo: enemigos · recuadro azul: lo que ves" }),
-        ]),
-        el("div", { className: "card" }, [el("button", { textContent: "Nueva batalla", onclick: () => startBattle() })]),
-    ]);
-
-    document.body.append(el("div", { id: "app" }, [stage, panel]));
+        card("Minimapa", [mini, hint("Verde: tú · rojo: enemigos · recuadro azul: lo que ves")]),
+        card(null, [button("Nueva batalla", () => startBattle())]),
+    );
 
     startBattle();
 
@@ -570,11 +516,10 @@ function startDemo() {
         get hull() { return player.tank.hull; },
     };
 
-    game.addUpdater(update);
-    game.start();
+    app.onUpdate(update);
 
     // --- Input ---
-    const canvas = game.canvas;
+    const canvas = app.canvas;
     // A mouse aims on hover and fires on click; a touch aims by dragging and
     // fires with the 🔥 button (so aiming never shoots by accident).
     const onAim = (e) => { aimPixel = { x: e.clientX, y: e.clientY }; };
@@ -584,34 +529,19 @@ function startDemo() {
         if (e.pointerType === "mouse") firePlayer();
     });
 
-    window.addEventListener("keydown", (e) => {
-        const k = e.key.toLowerCase();
-        if (e.code === "Space") { e.preventDefault(); firePlayer(); }
-        else if (k === "q") manualTraverse = 1;
-        else if (k === "e") manualTraverse = -1;
-        else if (k === "t") cycleAim();
-        else if (k === "f") toggleAutoFire();
-        else if (k === "c") cycleAmmo();
-        else if (k === "g") setGearMode();
-        else if (k === "x") shift(1);
-        else if (k === "z") shift(-1);
-        else if (e.code >= "Digit1" && e.code <= "Digit4") {
-            const d = GARAGE[Number(e.code.slice(-1)) - 1];
-            if (d) setDesign(d);
-        }
-    });
-    window.addEventListener("keyup", (e) => {
-        const k = e.key.toLowerCase();
-        if ((k === "q" && manualTraverse > 0) || (k === "e" && manualTraverse < 0)) manualTraverse = 0;
-    });
+    keyboard
+        .on([" ", "Space"], () => firePlayer())
+        .on("t", () => cycleAim())
+        .on("f", () => toggleAutoFire())
+        .on("c", () => cycleAmmo())
+        .on("g", () => setGearMode())
+        .on("x", () => shift(1))
+        .on("z", () => shift(-1));
+    for (let i = 0; i < GARAGE.length; i++) keyboard.on(String(i + 1), () => setDesign(GARAGE[i]));
+    // Q/E are held rather than tapped, so they are read from the key state in
+    // update() — no keyup bookkeeping, and no way to get stuck traversing.
 
     // --- Setup ---
-
-    function kv(label) {
-        const v = el("span", { className: "v", textContent: "—" });
-        const row = el("div", { className: "kv" }, [el("span", { className: "k", textContent: label }), v]);
-        return { row, v };
-    }
 
     // Loads a shell type and refreshes the picker's stat line.
     function setAmmo(type) {
@@ -1146,6 +1076,9 @@ function startDemo() {
 
         // Player: driving comes from the controller's own key/touch bindings.
         player.weapon.update(dt);
+        // Q and E are held, so they come from the key state rather than from an
+        // event pair — there is nothing left to get stuck when the tab blurs.
+        manualTraverse = keyboard.axis("e", "q");
         if (player.tank.alive && !over) {
             player.driver.update(dt);
             // Aiming priority: hand traverse beats auto-aim, which beats the
@@ -1271,10 +1204,4 @@ function startDemo() {
         const mineStanding = myTeam().filter((u) => u.tank.alive).length;
         kFoes.v.textContent = `${mineStanding} / ${standing}`;
     }
-}
-
-if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", startDemo);
-} else {
-    startDemo();
-}
+});

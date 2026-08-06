@@ -1,9 +1,10 @@
 # Despliega el sitio en GitHub Pages en cada push a main.
 #
-# Regenera las páginas autocontenidas (build-standalone.mjs) antes de publicar,
-# así lo desplegado siempre coincide con el source aunque alguien olvide
-# regenerar los .html a mano. Sirve la raíz del repo: index.html (la portada)
-# como página de inicio y engine/editor/tanks .html como demos.
+# Regenera el build (tools/build.mjs) antes de publicar, así lo desplegado
+# siempre coincide con el source aunque alguien olvide regenerarlo a mano. El
+# build falla si dos módulos declaran el mismo nombre de nivel superior, de modo
+# que un despliegue nunca sale con una página en blanco. Sirve la raíz del repo:
+# index.html (la portada) como inicio y las demos generadas junto a dist/.
 name: Deploy to GitHub Pages
 
 on:
@@ -29,8 +30,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Regenerar páginas autocontenidas
-        run: node tools/build-standalone.mjs
+      - name: Construir framework y demos
+        run: node tools/build.mjs
       - name: Configurar Pages
         uses: actions/configure-pages@v5
         with:

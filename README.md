@@ -1,20 +1,86 @@
-# raptor-project
+# Raptor
 
-Un motor de render **2D** ligero construido sobre **WebGL**, en JavaScript puro
-(módulos ES). Usa [gl-matrix](https://glmatrix.net/) para las operaciones con
-matrices. Cada demo se distribuye además como un `.html` autocontenido que se
-abre en cualquier navegador sin servidor ni conexión.
+Un **framework 2D sobre WebGL**, escrito a mano en JavaScript puro (módulos ES).
+Usa [gl-matrix](https://glmatrix.net/) para las matrices y nada más. Cada demo se
+distribuye además como un `.html` autocontenido que se abre en cualquier
+navegador sin servidor ni conexión.
 
 **▶ En vivo:** <https://jukoleda.github.io/raptor-project/>
 
-El motor inicializa un canvas WebGL, mantiene una lista de entidades y las dibuja
-en un único bucle de render. Incluye un juego de formas básicas (rectángulo,
-cuadrado, triángulo, círculo, polígono regular y polígono arbitrario), cada una
-con color, posición, rotación y escala configurables.
+```js
+import { App, Rectangle } from "./raptor.js";
+
+App.boot({ title: "Hola" }, (app) => {
+    const caja = app.add(new Rectangle(app.gl, { width: 2, height: 1 })
+        .setColor({ red: 0.9, green: 0.4, blue: 0.2 }).init());
+
+    app.onUpdate((dt) => caja.setRotation(caja.rotation + 90 * dt));
+});
+```
+
+Eso es un programa completo: `App.boot` espera al documento, monta la página,
+crea el canvas y el contexto WebGL, engancha teclado y mandos táctiles y arranca
+el bucle. Lo de dentro es tu escena.
+
+## Las capas
+
+Raptor está hecho de piezas que se usan juntas o sueltas. De abajo arriba:
+
+| Capa | Qué hace |
+|---|---|
+| `shapes/` | Geometría que sabe dibujarse a través de una cámara |
+| `camera.js` | La ventana móvil al mundo: pan, zoom, `follow()` y límites de mapa |
+| `raptorEngine.js` | Canvas, contexto GL y **un solo** bucle de render |
+| `physics/` | Cuerpos, colisión convexa (SAT) y solver de impulsos |
+| `input/` | Estado de teclado y mandos en pantalla que **no se contradicen** |
+| `ui/` | El armazón DOM: panel, tarjetas, sliders, lecturas, pantalla completa |
+| `audio/` | Sonido sintetizado, para que un build siga siendo un único archivo |
+| `app.js` | El shell que conecta todo lo anterior |
+
+Encima va un **kit de juego** —`controls/`, `weapons/`, `vehicles/`— del que
+salen las demos de tanques. Es código Raptor normal: nada del motor depende de
+él, y borrarlo dejaría el framework intacto.
+
+### Por qué existe `App`
+
+Porque sin él cada demo reescribía lo mismo. Antes de extraerlo, `el()` estaba
+copiado literalmente en cuatro archivos, `kv()` en tres, la secuencia de arranque
+en cuatro y el conjunto de teclas pulsadas en tres. Las demos sumaban 2682 líneas
+frente a 2709 del motor, que es la señal de que faltaba una capa. Ahora suman
+2344 y ninguna vuelve a escribir ese armazón.
+
+## Instalar y construir
+
+```bash
+npm run build     # framework (dist/) + las cinco páginas autocontenidas
+npm run check     # valida el grafo de módulos sin escribir nada
+npm test          # ejecuta las páginas en un navegador de verdad
+```
+
+El build produce dos cosas:
+
+- **`dist/raptor.js`** — el framework como librería ESM, con los 61 nombres
+  públicos; y **`dist/raptor.global.js`** para un `<script src>` de toda la vida,
+  que deja `window.Raptor`.
+- **Las páginas** (`engine.html`, `editor.html`, `tanks.html`, `dyno.html`,
+  `drive.html`) — cada una autocontenida: gl-matrix y el framework embebidos.
+
+En una aplicación se importa desde la raíz, o desde una sola capa si solo quieres
+una:
+
+```js
+import { App, World, Body } from "raptor-engine";
+import { collide } from "raptor-engine/physics";
+```
 
 ## Estructura
 
 ```
+raptor.js                  # Entrada pública del framework: import { App, ... }
+package.json               # Nombre, versión y mapa de exports por capa
+dist/
+  raptor.js                # GENERADO: el framework como librería ESM
+  raptor.global.js         # GENERADO: para <script src>, deja window.Raptor
 index.html                 # Portada (escrita a mano): enlaza las demos
 engine.html                # GENERADO: demo de formas autocontenido, doble clic
 editor.html                # GENERADO: editor visual autocontenido, doble clic
@@ -31,7 +97,8 @@ dyno-dev.html              # Banco de pruebas en desarrollo (módulos ES + CDN)
 vendor/
   gl-matrix-min.js         # Copia vendorizada de gl-matrix (para el build offline)
 tools/
-  build-standalone.mjs     # Genera engine/editor/tanks .html desde el source
+  build.mjs                # Sigue el grafo de imports: dist/ + páginas; falla si hay nombres duplicados
+  test.mjs                 # Suite: ejecuta las páginas generadas en un navegador real
 editor/
   editor.js                # Editor visual: UI + edición en vivo de las entidades
 weapons/
@@ -41,9 +108,19 @@ controls/
 vehicles/
   dynoDemo.js              # Banco de pruebas: recta larga, motor y caja con telemetría
 components/
+  index.js                 # Barrel de barrels: toda la superficie pública
+  app.js                   # App: arranque, canvas, panel, entrada, ciclo de vida
   raptorEngine.js          # RaptorEngine: canvas + lista de entidades + render loop
   camera.js                # Camera 2D: pan/zoom, follow(target) y límites de mapa
-  main.js                  # Arranque: crea el motor, añade formas y arranca
+  main.js                  # Hola mundo: las formas básicas en pantalla
+  ui/
+    dom.js                 # el(), card(), kv(), slider(), select(), button(), hint()
+    fullscreen.js          # Pantalla completa con los prefijos de Safari
+    index.js               # Re-exporta la interfaz
+  input/
+    keyboard.js            # Keyboard: teclas mantenidas, acciones y axis()
+    touchpad.js            # TouchPad: pedales y taps sobre el canvas
+    index.js               # Re-exporta la entrada
   shapes/
     shape.js               # Clase base: shaders, buffers, transform y draw()
     rectangle.js           # Rectangle
@@ -108,14 +185,29 @@ python3 -m http.server 8000   # o: npx serve
 
 ### Regenerar los HTML
 
-`engine.html`, `editor.html`, `tanks.html` y `drive.html` son **archivos
-generados**; no los edites a mano (`index.html` sí es la portada escrita a mano).
-Tras cambiar algo en `components/`, `editor/`, `weapons/` o `controls/`,
-reconstrúyelos con:
+`engine.html`, `editor.html`, `tanks.html`, `dyno.html` y `drive.html` son
+**archivos generados**; no los edites a mano (`index.html` sí es la portada
+escrita a mano). Tras cambiar algo en `components/`, `editor/`, `weapons/`,
+`vehicles/` o `controls/`, reconstrúyelos con:
 
 ```bash
-node tools/build-standalone.mjs
+node tools/build.mjs
 ```
+
+**El build sigue los `import`, no una lista.** Las páginas generadas son un
+`<script>` plano, así que todas las declaraciones caen en un mismo ámbito: dos
+módulos que declaren el mismo `const` son un `SyntaxError` que deja la página en
+blanco, y dos que declaren la misma `function` se pisan en silencio. Antes cada
+página llevaba su lista de módulos escrita a mano, en orden de dependencias, y
+ambos fallos ocurrieron más de una vez. Ahora el build lee el grafo de imports,
+ordena los módulos solo, y **falla** si dos declaran el mismo nombre:
+
+```
+Error: dyno.html: nombres duplicados en el ámbito global del bundle.
+  BASE_STYLES (const) — components/ui/dom.js y components/camera.js
+```
+
+Añadir un módulo a una demo es, ahora, importarlo.
 
 ## Editor visual
 
@@ -623,29 +715,82 @@ const p = camera.screenToWorld(event.clientX, event.clientY, game.canvas);
 ## Uso básico
 
 ```js
-import RaptorEngine from "./raptorEngine.js";
-import { Rectangle, Circle } from "./shapes/index.js";
+import { App, Rectangle, Circle } from "./raptor.js";
 
-const game = new RaptorEngine();
-game.createWindow();          // crea el canvas y el contexto WebGL
-const gl = game.context;
+App.boot({ title: "Dos formas" }, (app) => {
+    app.add(
+        new Rectangle(app.gl, { width: 1.4, height: 0.9 })
+            .setColor({ red: 0.9, green: 0.3, blue: 0.2 })
+            .setPosition({ x: -1, y: 0 })
+            .init()            // sube la geometría a la GPU (llamar al final)
+    );
 
-game.add(
-    new Rectangle(gl, { width: 1.4, height: 0.9 })
-        .setColor({ red: 0.9, green: 0.3, blue: 0.2 })
-        .setPosition({ x: -1, y: 0 })
-        .init()                // sube la geometría a la GPU (llamar al final)
-);
-
-game.add(
-    new Circle(gl, { radius: 0.6 })
-        .setColor({ blue: 0.9 })
-        .setPosition({ x: 1, y: 0 })
-        .init()
-);
-
-game.start();                 // configura el estado GL y arranca el render loop
+    app.add(
+        new Circle(app.gl, { radius: 0.6 })
+            .setColor({ blue: 0.9 })
+            .setPosition({ x: 1, y: 0 })
+            .init()
+    );
+});
 ```
+
+`App.boot` espera al documento, inyecta los estilos, monta `#app` / `#stage` /
+`#panel`, crea el canvas y el contexto, y arranca el bucle **después** de que tu
+`setup` termine, para que el primer frame no te pille a medio construir.
+
+### Qué te da `App`
+
+```js
+app.gl              // el contexto WebGL
+app.canvas          // el <canvas>
+app.camera          // la cámara (app.camera.follow(objetivo, dt))
+app.stage           // el contenedor posicionado: HUD, banners, mandos
+app.keyboard        // Keyboard, ya enganchado a window
+app.touch           // TouchPad sobre el canvas
+
+app.add(forma)              // registra una entidad dibujable
+app.onUpdate((dt) => {})    // un callback por frame, en segundos
+app.addPanel(card(...))     // tarjetas en el panel lateral
+app.addOverlay(nodo)        // cualquier cosa encima del canvas
+app.use(world)              // plugin: si tiene step(dt), entra en el bucle
+app.pause() / app.resume()  // el bucle para; el último frame se queda
+app.toggleFullscreen()      // con los prefijos que aún pide Safari
+app.on("resize" | "fullscreenchange", fn)
+```
+
+`app.use(plugin)` es el punto de extensión: si el objeto tiene `install(app)` se
+le deja configurarse; si tiene `step(dt)` o `update(dt)`, se engancha al bucle.
+Un `World` de física cumple lo segundo, así que `app.use(world)` basta.
+
+### Entrada que no se contradice
+
+`Keyboard` separa las dos cosas que un juego necesita y que se suelen mezclar:
+
+```js
+app.keyboard.isDown("w", "ArrowUp")        // ¿está pulsada ahora? (por frame)
+app.keyboard.axis("a", "d")                // −1, 0 o +1, listo para la física
+app.keyboard.on("r", reset)                // acción: una vez por pulsación
+```
+
+La diferencia importa: `on()` **ignora la repetición automática** del teclado, y
+al perder el foco de la ventana se sueltan todas las teclas — si no, la que
+estuviera pulsada se queda pulsada para siempre, que es el bug clásico de
+cambiar de pestaña acelerando.
+
+`TouchPad` escribe en **el mismo conjunto** de teclas pulsadas, así que un dedo y
+una tecla nunca pueden decir cosas distintas:
+
+```js
+const gas = app.touch.button("gas", "GAS", "gas");
+app.touch.pedal(gas, "gas");                    // mantenido, con captura de puntero
+app.touch.tap(app.touch.button("fire", "🔥"), disparar);   // una vez, en pointerdown
+app.touch.pad("right", [[aim, auto], fire]);    // anclado a una esquina; array = columna
+```
+
+Los pedales usan captura de puntero, de modo que deslizar el dedo fuera del botón
+lo suelta en vez de dejarlo pegado. Los taps van en `pointerdown`, no en `click`,
+porque en táctil `click` llega ~300 ms tarde y en un botón de disparo eso se
+siente roto.
 
 ## Formas disponibles
 

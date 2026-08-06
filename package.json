@@ -1,0 +1,45 @@
+{
+    "name": "raptor-engine",
+    "version": "0.1.0",
+    "description": "Framework 2D en WebGL escrito a mano: formas, cámara, física, entrada, interfaz y audio sintetizado.",
+    "type": "module",
+    "license": "MIT",
+    "main": "./raptor.js",
+    "module": "./raptor.js",
+    "exports": {
+        ".": "./raptor.js",
+        "./app": "./components/app.js",
+        "./camera": "./components/camera.js",
+        "./shapes": "./components/shapes/index.js",
+        "./physics": "./components/physics/index.js",
+        "./input": "./components/input/index.js",
+        "./ui": "./components/ui/index.js",
+        "./audio": "./components/audio/index.js",
+        "./controls": "./components/controls/index.js",
+        "./weapons": "./components/weapons/index.js",
+        "./vehicles": "./components/vehicles/index.js",
+        "./package.json": "./package.json"
+    },
+    "files": [
+        "raptor.js",
+        "components/",
+        "vendor/",
+        "dist/",
+        "README.md",
+        "CHANGELOG.md",
+        "LICENSE"
+    ],
+    "scripts": {
+        "build": "node tools/build.mjs",
+        "test": "node tools/test.mjs",
+        "check": "node tools/build.mjs --check"
+    },
+    "keywords": ["webgl", "2d", "game-engine", "framework", "canvas", "physics"],
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/Jukoleda/raptor-project.git"
+    },
+    "engines": {
+        "node": ">=18"
+    }
+}
