@@ -1,89 +1,20 @@
 // Base class for every 2D shape the engine can draw.
 //
-// All shapes share the exact same vertex/fragment shaders and draw pipeline;
-// the only thing that changes from one shape to another is its geometry (the
-// vertices) and the primitive draw mode. Subclasses therefore only need to
-// implement `getVertices()` and set `this.drawMode`.
+// Shapes share the draw pipeline — the same matrices, the same transform, the
+// same loop — and differ in three things a subclass can override:
+//
+//   getVertices()   the local-space geometry
+//   drawMode        TRIANGLES, TRIANGLE_STRIP, TRIANGLE_FAN…
+//   program         which shader to use (see components/render/shaders.js)
+//
+// Anything needing extra vertex data (a sprite's texture coordinates) adds it
+// in `initBuffers` and binds it in `bindAttributes`, without touching the
+// matrix maths. See components/shapes/sprite.js for the one that does.
 
-const VS_SOURCE = `
-    attribute vec4 aVertexPosition;
-    attribute vec4 aVertexColor;
-
-    uniform mat4 uModelViewMatrix;
-    uniform mat4 uProjectionMatrix;
-
-    varying lowp vec4 vColor;
-
-    void main() {
-        gl_Position = uProjectionMatrix * uModelViewMatrix * aVertexPosition;
-        vColor = aVertexColor;
-    }
-`;
-
-const FS_SOURCE = `
-    varying lowp vec4 vColor;
-
-    void main() {
-        gl_FragColor = vColor;
-    }
-`;
-
-function loadShader(gl, type, source) {
-    const shader = gl.createShader(type);
-    gl.shaderSource(shader, source);
-    gl.compileShader(shader);
-
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-        alert("An error occurred compiling the shaders: " + gl.getShaderInfoLog(shader));
-        gl.deleteShader(shader);
-        return null;
-    }
-
-    return shader;
-}
-
-function buildProgramInfo(gl) {
-    const vertexShader = loadShader(gl, gl.VERTEX_SHADER, VS_SOURCE);
-    const fragmentShader = loadShader(gl, gl.FRAGMENT_SHADER, FS_SOURCE);
-
-    const program = gl.createProgram();
-    gl.attachShader(program, vertexShader);
-    gl.attachShader(program, fragmentShader);
-    gl.linkProgram(program);
-
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-        alert("Unable to initialize the shader program: " + gl.getProgramInfoLog(program));
-    }
-
-    return {
-        program,
-        attribLocations: {
-            vertexPosition: gl.getAttribLocation(program, "aVertexPosition"),
-            vertexColor: gl.getAttribLocation(program, "aVertexColor"),
-        },
-        uniformLocations: {
-            projectionMatrix: gl.getUniformLocation(program, "uProjectionMatrix"),
-            modelViewMatrix: gl.getUniformLocation(program, "uModelViewMatrix"),
-        },
-    };
-}
-
-// The shader program is identical for every shape, so compile and link it once
-// per WebGL context and share it. Keyed by context so multiple canvases stay
-// independent.
-const programCache = new WeakMap();
+import { getProgramInfo, PROGRAM_COLOR } from "../render/shaders.js";
 
 // Used when draw() is called without a camera: pan 0, zoom 1 (world == screen).
 const IDENTITY_CAMERA = { x: 0, y: 0, zoom: 1 };
-
-function getProgramInfo(gl) {
-    let info = programCache.get(gl);
-    if (!info) {
-        info = buildProgramInfo(gl);
-        programCache.set(gl, info);
-    }
-    return info;
-}
 
 export default class Shape {
     constructor(context) {
@@ -105,6 +36,16 @@ export default class Shape {
         // outline from getColliderVertices) or "circle" (uses this.radius).
         this.colliderShape = "polygon";
 
+        // Which shader program to draw with. Subclasses override it; the
+        // default is flat per-vertex colour.
+        this.program = PROGRAM_COLOR;
+
+        // Draw order. Lower layers are drawn first, so higher ones land on top;
+        // within a layer, insertion order decides. Without this the only way to
+        // put a background behind a player is to add it first and never change
+        // your mind.
+        this.layer = 0;
+
         this.programInfo = null;
         this.buffers = null;
         this.vCount = 0;
@@ -125,7 +66,7 @@ export default class Shape {
 
     // Uploads geometry to the GPU. Call once, after configuring the shape.
     init() {
-        this.programInfo = getProgramInfo(this.context);
+        this.programInfo = getProgramInfo(this.context, this.program);
         this.initBuffers();
         return this;
     }
@@ -185,7 +126,26 @@ export default class Shape {
         mat4.rotate(modelViewMatrix, modelViewMatrix, (this.rotation * Math.PI) / 180, [0, 0, 1]);
         mat4.scale(modelViewMatrix, modelViewMatrix, [this.scale.x * zoom, this.scale.y * zoom, 1]);
 
-        const { attribLocations, uniformLocations, program } = this.programInfo;
+        const { uniformLocations, program } = this.programInfo;
+
+        gl.useProgram(program);
+        gl.uniformMatrix4fv(uniformLocations.projectionMatrix, false, projectionMatrix);
+        gl.uniformMatrix4fv(uniformLocations.modelViewMatrix, false, modelViewMatrix);
+
+        const enabled = this.bindAttributes(gl);
+        gl.drawArrays(this.drawMode, 0, this.vCount);
+
+        // Attribute arrays are global state, not part of the program: leaving
+        // one enabled makes the *next* shape read a buffer its shader never
+        // asked for. Now that there is more than one program, they have to be
+        // turned off again.
+        for (const location of enabled) gl.disableVertexAttribArray(location);
+    }
+
+    // Binds this shape's vertex data and returns the attribute locations it
+    // switched on, so draw() can switch them back off.
+    bindAttributes(gl) {
+        const { attribLocations } = this.programInfo;
 
         gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.position);
         gl.vertexAttribPointer(attribLocations.vertexPosition, 2, gl.FLOAT, false, 0, 0);
@@ -195,11 +155,7 @@ export default class Shape {
         gl.vertexAttribPointer(attribLocations.vertexColor, 4, gl.FLOAT, false, 0, 0);
         gl.enableVertexAttribArray(attribLocations.vertexColor);
 
-        gl.useProgram(program);
-        gl.uniformMatrix4fv(uniformLocations.projectionMatrix, false, projectionMatrix);
-        gl.uniformMatrix4fv(uniformLocations.modelViewMatrix, false, modelViewMatrix);
-
-        gl.drawArrays(this.drawMode, 0, this.vCount);
+        return [attribLocations.vertexPosition, attribLocations.vertexColor];
     }
 
     // --- Fluent configuration helpers (chainable) ---
@@ -234,6 +190,16 @@ export default class Shape {
 
     setDepth(depth) {
         this.depth = depth;
+        return this;
+    }
+
+    // Draw order. The engine re-sorts when this changes, so it is safe to call
+    // at any time — not just before the shape is added.
+    setLayer(layer) {
+        if (layer !== this.layer) {
+            this.layer = layer;
+            if (this._onLayerChange) this._onLayerChange(this);
+        }
         return this;
     }
 }

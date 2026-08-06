@@ -84,6 +84,7 @@ suite("pages", async () => {
     const pages = [
         ["engine.html", null], ["editor.html", "raptorEditor"], ["tanks.html", "raptorTanks"],
         ["dyno.html", "raptorDyno"], ["drive.html", "raptorDrive"],
+        ["sprites.html", "raptorSprites"],
     ];
     for (const [file, handle] of pages) {
         const { page, errors } = await open(file);
@@ -287,10 +288,130 @@ suite("demos", async () => {
     }
 });
 
+
+// --- Textures, atlas frames, animation and draw order --------------------
+
+suite("sprites", async () => {
+    const { page, errors } = await open("sprites.html");
+
+    const sheet = await page.evaluate(() => ({
+        width: window.raptorSprites.texture.width,
+        height: window.raptorSprites.texture.height,
+        ready: window.raptorSprites.texture.ready,
+        columns: window.raptorSprites.sheet.columns,
+        rows: window.raptorSprites.sheet.rows,
+        count: window.raptorSprites.sheet.count,
+    }));
+    ok("la textura procedural se sube", sheet.ready && sheet.width === 192 && sheet.height === 96, JSON.stringify(sheet));
+    ok("la hoja se corta en 6×3", sheet.columns === 6 && sheet.rows === 3 && sheet.count === 18, JSON.stringify(sheet));
+
+    // The frame rectangle is in pixels; the UVs must be 0..1 and Y-flipped,
+    // because a texture's first row is its bottom and a sheet's is its top.
+    const uv = await page.evaluate(() => {
+        const s = window.raptorSprites;
+        const saved = s.player.frame;
+        s.player.frame = s.sheet.frame(7);   // columna 1, fila 1
+        const coords = s.player.getTextureCoords();
+        s.player.frame = saved;
+        return coords;
+    });
+    ok("UV en 0..1, con la Y invertida",
+        Math.abs(uv[0] - 1 / 6) < 1e-6 && Math.abs(uv[4] - 1 / 3) < 1e-6
+        && Math.abs(uv[1] - 2 / 3) < 1e-6 && Math.abs(uv[3] - 1 / 3) < 1e-6,
+        JSON.stringify(uv.map((v) => +v.toFixed(4))));
+
+    const order = await page.evaluate(() => {
+        const list = window.raptorSprites.app.entities;
+        const layers = list.map((e) => e.layer);
+        return {
+            sorted: layers.every((v, i) => i === 0 || layers[i - 1] <= v),
+            player: list.indexOf(window.raptorSprites.player),
+            canopy: list.indexOf(window.raptorSprites.canopies[0]),
+            shadow: list.indexOf(window.raptorSprites.shadow),
+        };
+    });
+    ok("las entidades se dibujan en orden de capa", order.sorted, JSON.stringify(order));
+    ok("la copa va por encima y la sombra por debajo",
+        order.canopy > order.player && order.shadow < order.player, JSON.stringify(order));
+
+    // Re-layering after the fact has to re-sort, not wait for the next add().
+    const relayered = await page.evaluate(async () => {
+        const s = window.raptorSprites;
+        s.player.setLayer(999);
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const last = s.app.entities.at(-1) === s.player;
+        s.player.setLayer(s.LAYER.ACTOR);
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        return last && s.app.entities.indexOf(s.player) < s.app.entities.indexOf(s.canopies[0]);
+    });
+    ok("setLayer() reordena en caliente", relayered);
+
+    const idle = await page.evaluate(() => window.raptorSprites.state);
+    ok("en reposo reproduce la animación de espera", idle.animation === "quieto", JSON.stringify(idle));
+
+    await page.keyboard.down("d");
+    await page.waitForTimeout(700);
+    const walking = await page.evaluate(() => window.raptorSprites.state);
+    await page.keyboard.up("d");
+    ok("al moverse cambia a andar y avanza",
+        walking.animation === "andar" && walking.x > idle.x + 0.5,
+        `${idle.x.toFixed(2)} → ${walking.x.toFixed(2)}`);
+    ok("mirando a la derecha no se voltea", walking.flipX === false);
+
+    await page.keyboard.down("a");
+    await page.waitForTimeout(400);
+    ok("hacia la izquierda se voltea", (await page.evaluate(() => window.raptorSprites.state)).flipX === true);
+    await page.keyboard.up("a");
+
+    // The frames have to cycle: a still animation is the classic symptom of
+    // calling play() every frame and resetting it forever.
+    const cycled = await page.evaluate(async () => {
+        const s = window.raptorSprites;
+        const seen = new Set();
+        s.app.keyboard.press("d");
+        for (let i = 0; i < 60; i++) {
+            await new Promise((r) => requestAnimationFrame(r));
+            seen.add(s.animator.current.index);
+        }
+        s.app.keyboard.release("d");
+        return [...seen].sort();
+    });
+    ok("el ciclo de andar recorre sus 4 fotogramas", cycled.length === 4, JSON.stringify(cycled));
+
+    await page.keyboard.press("2");
+    await page.waitForTimeout(100);
+    const tinted = await page.evaluate(() => window.raptorSprites.player.color);
+    ok("el tinte multiplica el téxel", tinted.red === 1 && tinted.green < 0.5, JSON.stringify(tinted));
+    await page.keyboard.press("4");
+    await page.waitForTimeout(100);
+    ok("el alfa del tinte desvanece", (await page.evaluate(() => window.raptorSprites.player.color.alpha)) < 0.5);
+    await page.keyboard.press("1");
+
+    await page.keyboard.press("l");
+    await page.waitForTimeout(80);
+    ok("L alterna NEAREST/LINEAR", await page.evaluate(() => window.raptorSprites.smooth));
+    await page.keyboard.press("l");
+
+    // Two shader programs in one scene is the thing that breaks quietly.
+    const mixed = await page.evaluate(async () => {
+        const s = window.raptorSprites;
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        return {
+            shadow: s.shadow.program, player: s.player.program,
+            glError: s.app.gl.getError(),
+        };
+    });
+    ok("formas de color y sprites conviven sin error de GL",
+        mixed.shadow === "color" && mixed.player === "texture" && mixed.glError === 0, JSON.stringify(mixed));
+
+    ok("sprites: sin errores", errors.length === 0, errors.join(" | "));
+    await page.close();
+});
+
 // --- Phone ---------------------------------------------------------------
 
 suite("mobile", async () => {
-    for (const file of ["dyno.html", "drive.html"]) {
+    for (const file of ["dyno.html", "drive.html", "sprites.html"]) {
         const { page, context, errors } = await open(file, devices["iPhone 12"]);
         const fit = await page.evaluate(() => {
             const stage = document.querySelector("#stage").getBoundingClientRect();

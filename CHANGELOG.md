@@ -4,6 +4,63 @@ Todos los cambios notables de este proyecto se documentan en este archivo.
 
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/).
 
+## [0.2.0] - 2026-08-06
+
+Con esto Raptor deja de poder dibujar solo colores planos. Un motor de juegos
+sin imágenes no es una herramienta para hacer juegos.
+
+### Añadido (Sprites y texturas)
+- **`components/render/texture.js`** — `Texture`: una imagen en la GPU, desde una
+  URL, un `<canvas>`, píxeles en crudo o un color liso. Es **usable desde el
+  primer frame**: nace como un píxel blanco de 1×1 y se cambia sola cuando la
+  imagen llega, así que nada tiene que esperar ni revienta mientras tanto
+  (`texture.loaded` es la promesa, para quien prefiera esperar). Resuelve de una
+  vez las tres trampas de WebGL 1: la **Y invertida** (la primera fila de una
+  imagen es la de arriba, la de una textura la de abajo), los **lados que no son
+  potencia de dos** (no admiten mipmaps ni `REPEAT`, y pedirlos dibuja la textura
+  en negro sin decir por qué) y el propio tiempo de carga. `setSmooth` alterna
+  `NEAREST` —por defecto, para pixel art nítido— y `LINEAR`.
+- **`components/shapes/sprite.js`** — `Sprite`: un quad que dibuja **parte** de
+  una textura. `setFrame({ x, y, width, height })` toma el rectángulo **en
+  píxeles**, que es como se mide una hoja de sprites, y lo convierte a
+  coordenadas 0..1. El color actúa como **tinte** (el shader multiplica el
+  téxel), así que blanco no toca nada, un color tiñe y el alfa desvanece: poner
+  un personaje en rojo al recibir un golpe no necesita una segunda imagen.
+  `setFlip` voltea la imagen sin tocar la transformación — girarla lo pondría
+  boca abajo.
+- **`components/render/spriteSheet.js`** — `SpriteSheet` corta una textura en
+  rejilla (con `margin` y `spacing`); `Animation` guarda **tiempo**, no un
+  contador de fotogramas, así que a 8 fps un ciclo dura lo mismo a 30 Hz que a
+  144; y `Animator` le pone nombres (`play("andar")`). Volver a pedir la
+  animación que ya está sonando es un no-op, que es lo que evita el personaje
+  congelado a media zancada.
+- **Capas de dibujo**: `shape.setLayer(n)` decide el orden — bajas primero, y
+  dentro de una capa manda el orden de inserción. El motor reordena solo cuando
+  algo cambia, no en cada frame. Sin esto, la única forma de poner un fondo
+  detrás era añadirlo el primero y no cambiar de opinión nunca.
+- **Demo `sprites.html`** (fuente `sprites/spritesDemo.js`): un mapa con suelo
+  por tiles, árboles, una moneda girando y un personaje animado que se voltea al
+  cambiar de sentido. La hoja de sprites se **dibuja al vuelo** con un canvas 2D
+  y se sube con `Texture.fromCanvas`, así que la página sigue siendo un único
+  archivo que se abre desde `file://` sin nada al lado — el mismo enfoque que el
+  sonido sintetizado. Panel con la hoja a la vista, el fotograma actual y sus UV,
+  velocidad de animación, tintes, filtrado y visibilidad de las copas.
+  Los troncos van por debajo del jugador y las copas por encima, aunque se añaden
+  al revés: se puede caminar *detrás* de un árbol.
+
+### Cambiado
+- **Varios programas de shader.** `components/render/shaders.js` cachea los
+  programas por (contexto, tipo) en vez de haber uno solo. `Shape` expone
+  `program` y un `bindAttributes` que las subclases amplían, de modo que un
+  sprite añade sus coordenadas de textura sin tocar las matrices. Las formas de
+  color y los sprites **conviven en la misma escena** (en la demo, la sombra del
+  personaje es un `Circle` normal).
+- **Los arrays de atributos se desactivan tras dibujar.** Son estado global, no
+  del programa: dejar uno encendido hacía que la forma siguiente leyera un búfer
+  que su shader nunca pidió. Con un único programa no se notaba; con dos, sí.
+- **Los errores de shader lanzan** en lugar de abrir un `alert()`. Una librería
+  no tiene por qué abrir un modal, y una traza dice qué forma pidió el programa.
+
 ## [0.1.0] - 2026-08-06
 
 Raptor pasa de ser un montón de componentes con demos alrededor a ser un

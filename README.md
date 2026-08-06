@@ -28,7 +28,8 @@ Raptor está hecho de piezas que se usan juntas o sueltas. De abajo arriba:
 
 | Capa | Qué hace |
 |---|---|
-| `shapes/` | Geometría que sabe dibujarse a través de una cámara |
+| `shapes/` | Geometría que sabe dibujarse a través de una cámara, incluido `Sprite` |
+| `render/` | Texturas, hojas de sprites, animación y los programas de shader |
 | `camera.js` | La ventana móvil al mundo: pan, zoom, `follow()` y límites de mapa |
 | `raptorEngine.js` | Canvas, contexto GL y **un solo** bucle de render |
 | `physics/` | Cuerpos, colisión convexa (SAT) y solver de impulsos |
@@ -52,18 +53,19 @@ frente a 2709 del motor, que es la señal de que faltaba una capa. Ahora suman
 ## Instalar y construir
 
 ```bash
-npm run build     # framework (dist/) + las cinco páginas autocontenidas
+npm run build     # framework (dist/) + las seis páginas autocontenidas
 npm run check     # valida el grafo de módulos sin escribir nada
 npm test          # ejecuta las páginas en un navegador de verdad
 ```
 
 El build produce dos cosas:
 
-- **`dist/raptor.js`** — el framework como librería ESM, con los 61 nombres
+- **`dist/raptor.js`** — el framework como librería ESM, con los 69 nombres
   públicos; y **`dist/raptor.global.js`** para un `<script src>` de toda la vida,
   que deja `window.Raptor`.
 - **Las páginas** (`engine.html`, `editor.html`, `tanks.html`, `dyno.html`,
-  `drive.html`) — cada una autocontenida: gl-matrix y el framework embebidos.
+  `drive.html`, `sprites.html`) — cada una autocontenida: gl-matrix y el
+  framework embebidos.
 
 En una aplicación se importa desde la raíz, o desde una sola capa si solo quieres
 una:
@@ -87,11 +89,13 @@ editor.html                # GENERADO: editor visual autocontenido, doble clic
 tanks.html                 # GENERADO: demo cañón vs blindaje, doble clic
 dyno.html                  # GENERADO: banco de pruebas motor/caja, doble clic
 drive.html                 # GENERADO: batalla de tanques (IA + combate), doble clic
+sprites.html               # GENERADO: sprites, texturas y animación, doble clic
 dev.html                   # Demo en desarrollo (módulos ES + gl-matrix por CDN)
 editor-dev.html            # Editor en desarrollo (módulos ES + gl-matrix por CDN)
 tanks-dev.html             # Demo de tanques en desarrollo (módulos ES + CDN)
 drive-dev.html             # Demo de conducción en desarrollo (módulos ES + CDN)
 dyno-dev.html              # Banco de pruebas en desarrollo (módulos ES + CDN)
+sprites-dev.html           # Demo de sprites en desarrollo (módulos ES + CDN)
 .github/workflows/
   deploy.yml               # Despliega el sitio en GitHub Pages en cada push a main
 vendor/
@@ -107,6 +111,8 @@ controls/
   driveDemo.js             # Demo de batalla: tanque manejable, enemigos con IA y HUD
 vehicles/
   dynoDemo.js              # Banco de pruebas: recta larga, motor y caja con telemetría
+sprites/
+  spritesDemo.js           # Demo de sprites: hoja procedural, animación y capas
 components/
   index.js                 # Barrel de barrels: toda la superficie pública
   app.js                   # App: arranque, canvas, panel, entrada, ciclo de vida
@@ -121,8 +127,14 @@ components/
     keyboard.js            # Keyboard: teclas mantenidas, acciones y axis()
     touchpad.js            # TouchPad: pedales y taps sobre el canvas
     index.js               # Re-exporta la entrada
+  render/
+    texture.js             # Texture: imagen en la GPU (URL, canvas o píxeles)
+    spriteSheet.js         # SpriteSheet, Animation y Animator
+    shaders.js             # Programas de shader, cacheados por contexto
+    index.js               # Re-exporta el render
   shapes/
     shape.js               # Clase base: shaders, buffers, transform y draw()
+    sprite.js              # Sprite: quad texturizado con fotogramas y tinte
     rectangle.js           # Rectangle
     square.js              # Square (extiende Rectangle)
     triangle.js            # Triangle
@@ -168,6 +180,7 @@ motor embebidos, funcionan incluso offline vía `file://`:
 - `tanks.html` — demo de armas: cañón vs blindaje (ver abajo).
 - `dyno.html` — banco de pruebas de motor y caja de cambios (ver abajo).
 - `drive.html` — batalla de tanques: conduces y luchas contra IA (ver abajo).
+- `sprites.html` — sprites, texturas y animación (ver abajo).
 
 **Online:** publicado con GitHub Pages en
 <https://jukoleda.github.io/raptor-project/>. El workflow
@@ -791,6 +804,119 @@ Los pedales usan captura de puntero, de modo que deslizar el dedo fuera del bot�
 lo suelta en vez de dejarlo pegado. Los taps van en `pointerdown`, no en `click`,
 porque en táctil `click` llega ~300 ms tarde y en un botón de disparo eso se
 siente roto.
+
+## Sprites, texturas y animación
+
+Hasta aquí todas las formas eran de color plano. `Sprite` es un rectángulo que
+dibuja **parte de una textura**, que es de lo que están hechos los juegos.
+
+```js
+import { App, Sprite, Texture, SpriteSheet, Animator } from "./raptor.js";
+
+const textura = Texture.fromImage(gl, "heroe.png");
+const hoja = new SpriteSheet(textura, { frameWidth: 16, frameHeight: 16 });
+
+const heroe = new Sprite(gl, { texture: textura, frame: hoja.frame(0) })
+    .setPosition({ x: 0, y: 0 })
+    .init();
+
+const anim = new Animator(heroe, {
+    quieto: hoja.animation(4, 5, { fps: 2 }),
+    andar:  hoja.animation(0, 3, { fps: 10 }),
+});
+
+app.onUpdate((dt) => anim.update(dt));
+```
+
+### Texture
+
+Una textura es utilizable **desde el primer frame**: nace como un píxel blanco de
+1×1 y se cambia sola por la imagen cuando llega. Nada tiene que esperar y nada
+revienta mientras tanto. `texture.loaded` es la promesa, para el código que sí
+prefiera esperar.
+
+Fuentes: `fromImage(gl, url)`, `fromCanvas(gl, canvas)`, `fromPixels(gl, bytes, w, h)`
+y `solid(gl, color)`.
+
+`fromCanvas` es más útil de lo que parece: es como la demo genera su hoja **al
+vuelo**, y por eso `sprites.html` sigue siendo un único archivo que se abre desde
+`file://` sin nada al lado — el mismo truco que el sonido del motor.
+
+Tres trampas de WebGL resueltas de una vez, porque cuestan una tarde cada una:
+
+- **La Y va al revés.** La primera fila de una imagen es la de *arriba*; la de
+  una textura GL es la de *abajo*. Sin `UNPACK_FLIP_Y_WEBGL` todo sale del revés.
+- **Lados que no son potencia de dos** no admiten mipmaps ni `REPEAT`: si los
+  pides, la textura se dibuja **negra** y sin explicación. Se comprueba el tamaño
+  y se eligen los parámetros que sí valen.
+- **Cargar lleva tiempo.** De ahí el píxel blanco de arriba.
+
+`setSmooth(false)` (por defecto) usa `NEAREST` y mantiene el pixel art nítido;
+`true` usa `LINEAR` y suaviza. En la demo está en un botón para que se vea.
+
+### Fotogramas y atlas
+
+`SpriteSheet` corta la textura en una rejilla —con `margin` y `spacing` si tu
+exportador los añade— y `frame(i)` o `frame(columna, fila)` devuelve el
+rectángulo **en píxeles**, que es como se mide una hoja de verdad. `Sprite` lo
+convierte a coordenadas 0..1 por ti.
+
+`Animation` guarda **tiempo**, no un contador de fotogramas, así que a 8 fps un
+ciclo de andar dura lo mismo a 30 Hz que a 144. `Animator` le pone nombres:
+
+```js
+anim.play("andar");   // llamarlo cada frame no lo reinicia
+```
+
+Eso último importa: reiniciar la animación en cada frame es lo que deja a un
+personaje congelado a media zancada, y es el error más fácil de cometer.
+
+### Tinte
+
+El color de un sprite es un **tinte**: el shader multiplica el téxel por él.
+Blanco no toca nada, un color tiñe, y un alfa por debajo de 1 desvanece. Así se
+pone un personaje en rojo al recibir un golpe sin una segunda imagen.
+
+```js
+heroe.setTint({ red: 1, green: 0.35, blue: 0.3 });          // herido
+heroe.setTint({ red: 1, green: 1, blue: 1, alpha: 0.45 });  // fantasma
+```
+
+### Voltear
+
+```js
+heroe.setFlip({ x: true });
+```
+
+Voltea la **imagen**, no la transformación: girar el sprite lo pondría boca
+abajo. Es lo que quieres cuando un personaje se da la vuelta.
+
+### Capas
+
+`setLayer(n)` decide el orden de dibujo: las capas bajas primero, y dentro de una
+capa manda el orden de inserción. El motor reordena solo cuando algo cambia, no
+en cada frame.
+
+```js
+const LAYER = { SUELO: -20, SOMBRA: -10, OBJETO: 0, ACTOR: 10, COPAS: 20 };
+```
+
+En la demo los troncos están por debajo del jugador y las copas por encima
+—aunque se añaden al revés—, así que puedes caminar *detrás* de un árbol. Sin
+capas, la única forma de poner un fondo detrás sería añadirlo primero y no
+cambiar de opinión nunca.
+
+Los sprites **no sustituyen** a las formas de color: la sombra del personaje es
+un `Circle` normal en la misma escena. Cada forma dice con qué programa de shader
+se dibuja y el motor cambia entre ellos.
+
+### Un detalle que se ve
+
+Los tiles del suelo se dibujan un 4% más grandes que la casilla que ocupan. Dos
+quads que comparten un borde caen sobre un límite de sub-píxel tras la división
+en perspectiva, y el rasterizador no le da ese píxel a ninguno: aparece una
+**costura** oscura recorriendo todo el mapa. Solaparlos un poco es la solución
+habitual; la otra es rellenar el borde de cada celda en la hoja.
 
 ## Formas disponibles
 

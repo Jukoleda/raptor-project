@@ -6,7 +6,7 @@
     <title>Raptor — Banco de pruebas: motor y caja</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/input/keyboard.js, components/input/touchpad.js, components/app.js, components/ui/index.js, components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/shapes/index.js, components/controls/tankController.js, components/controls/tankAI.js, components/controls/gearbox.js, components/controls/autoAim.js, components/controls/index.js, components/weapons/armor.js, components/vehicles/tank.js, components/vehicles/engine.js, components/vehicles/index.js, components/audio/engineSound.js, components/audio/index.js, vehicles/dynoDemo.js + vendor/gl-matrix-min.js
+        Source: components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/input/keyboard.js, components/input/touchpad.js, components/app.js, components/ui/index.js, components/render/shaders.js, components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/shapes/sprite.js, components/shapes/index.js, components/controls/tankController.js, components/controls/tankAI.js, components/controls/gearbox.js, components/controls/autoAim.js, components/controls/index.js, components/weapons/armor.js, components/vehicles/tank.js, components/vehicles/engine.js, components/vehicles/index.js, components/audio/engineSound.js, components/audio/index.js, vehicles/dynoDemo.js + vendor/gl-matrix-min.js
         Regenerate with: node tools/build.mjs
         This file is fully self-contained: open it directly in any browser.
     -->
@@ -147,9 +147,19 @@ function RaptorEngine() {
         this.context = context;
     };
 
+    // Entities are drawn in layer order, low to high, and in insertion order
+    // within a layer. The sort is lazy: it only happens when something is added
+    // or a layer changes, not every frame.
+    this._needsSort = false;
+
     // Registers a drawable entity. Returns it so calls can be chained.
     this.add = (entity) => {
         this.entities.push(entity);
+        if (entity.layer) this._needsSort = true;
+        // A shape can be re-layered long after it was added, and the engine has
+        // to hear about it — otherwise the change would only take effect the
+        // next time something else happened to trigger a sort.
+        entity._onLayerChange = () => { this._needsSort = true; };
         return entity;
     };
 
@@ -158,7 +168,16 @@ function RaptorEngine() {
         const index = this.entities.indexOf(entity);
         if (index !== -1) {
             this.entities.splice(index, 1);
+            entity._onLayerChange = null;
         }
+        return this;
+    };
+
+    // Stable sort by layer: Array.prototype.sort is required to be stable since
+    // ES2019, which is what keeps insertion order inside a layer.
+    this.sortEntities = () => {
+        this.entities.sort((a, b) => (a.layer || 0) - (b.layer || 0));
+        this._needsSort = false;
         return this;
     };
 
@@ -227,6 +246,8 @@ function RaptorEngine() {
         for (const update of this.updaters) {
             update(dt);
         }
+
+        if (this._needsSort) this.sortEntities();
 
         this.clearScreen();
 
@@ -881,15 +902,20 @@ class App {
 // ===== components/ui/index.js =====
 // Barrel for the UI layer.
 
-// ===== components/shapes/shape.js =====
-// Base class for every 2D shape the engine can draw.
+// ===== components/render/shaders.js =====
+// The shader programs, compiled once per WebGL context and shared.
 //
-// All shapes share the exact same vertex/fragment shaders and draw pipeline;
-// the only thing that changes from one shape to another is its geometry (the
-// vertices) and the primitive draw mode. Subclasses therefore only need to
-// implement `getVertices()` and set `this.drawMode`.
+// Raptor started with a single program — position + per-vertex colour — because
+// every shape was a flat polygon. Textures need a second one, so the cache is
+// keyed by (context, kind) instead of by context alone. Adding a third (a glow,
+// a mask) is now a matter of adding an entry to PROGRAMS.
+//
+// Both programs take the same two matrices and a per-vertex colour, which is
+// what lets a sprite be *tinted*: the fragment shader multiplies the texel by
+// that colour, so white leaves the image alone, a colour tints it and alpha
+// fades it. One uniform less to think about, and no separate "tinted sprite".
 
-const VS_SOURCE = `
+const COLOR_VS = `
     attribute vec4 aVertexPosition;
     attribute vec4 aVertexColor;
 
@@ -904,7 +930,7 @@ const VS_SOURCE = `
     }
 `;
 
-const FS_SOURCE = `
+const COLOR_FS = `
     varying lowp vec4 vColor;
 
     void main() {
@@ -912,62 +938,132 @@ const FS_SOURCE = `
     }
 `;
 
-function loadShader(gl, type, source) {
+const TEXTURE_VS = `
+    attribute vec4 aVertexPosition;
+    attribute vec4 aVertexColor;
+    attribute vec2 aTextureCoord;
+
+    uniform mat4 uModelViewMatrix;
+    uniform mat4 uProjectionMatrix;
+
+    varying lowp vec4 vTint;
+    varying highp vec2 vTextureCoord;
+
+    void main() {
+        gl_Position = uProjectionMatrix * uModelViewMatrix * aVertexPosition;
+        vTint = aVertexColor;
+        vTextureCoord = aTextureCoord;
+    }
+`;
+
+// The texel is multiplied by the tint, so a white tint is a no-op. Fully
+// transparent fragments are discarded rather than blended: without a depth
+// buffer to sort by, a transparent border would otherwise still write and
+// darken whatever is behind it at the edges.
+const TEXTURE_FS = `
+    precision mediump float;
+
+    varying lowp vec4 vTint;
+    varying highp vec2 vTextureCoord;
+
+    uniform sampler2D uSampler;
+
+    void main() {
+        vec4 texel = texture2D(uSampler, vTextureCoord);
+        if (texel.a < 0.01) discard;
+        gl_FragColor = texel * vTint;
+    }
+`;
+
+const PROGRAM_COLOR = "color";
+const PROGRAM_TEXTURE = "texture";
+
+const PROGRAMS = {
+    [PROGRAM_COLOR]: {
+        vertex: COLOR_VS,
+        fragment: COLOR_FS,
+        attributes: { vertexPosition: "aVertexPosition", vertexColor: "aVertexColor" },
+        uniforms: { projectionMatrix: "uProjectionMatrix", modelViewMatrix: "uModelViewMatrix" },
+    },
+    [PROGRAM_TEXTURE]: {
+        vertex: TEXTURE_VS,
+        fragment: TEXTURE_FS,
+        attributes: {
+            vertexPosition: "aVertexPosition",
+            vertexColor: "aVertexColor",
+            textureCoord: "aTextureCoord",
+        },
+        uniforms: {
+            projectionMatrix: "uProjectionMatrix",
+            modelViewMatrix: "uModelViewMatrix",
+            sampler: "uSampler",
+        },
+    },
+};
+
+function compile(gl, type, source, kind) {
     const shader = gl.createShader(type);
     gl.shaderSource(shader, source);
     gl.compileShader(shader);
-
     if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-        alert("An error occurred compiling the shaders: " + gl.getShaderInfoLog(shader));
+        const log = gl.getShaderInfoLog(shader);
         gl.deleteShader(shader);
-        return null;
+        // Throwing beats the old alert(): a framework has no business opening a
+        // modal, and a stack trace says which shape asked for the program.
+        throw new Error(`Raptor: no compila el shader "${kind}": ${log}`);
     }
-
     return shader;
 }
 
-function buildProgramInfo(gl) {
-    const vertexShader = loadShader(gl, gl.VERTEX_SHADER, VS_SOURCE);
-    const fragmentShader = loadShader(gl, gl.FRAGMENT_SHADER, FS_SOURCE);
+function build(gl, kind) {
+    const spec = PROGRAMS[kind];
+    if (!spec) throw new Error(`Raptor: programa de shader desconocido "${kind}"`);
 
     const program = gl.createProgram();
-    gl.attachShader(program, vertexShader);
-    gl.attachShader(program, fragmentShader);
+    gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, spec.vertex, kind));
+    gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, spec.fragment, kind));
     gl.linkProgram(program);
-
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-        alert("Unable to initialize the shader program: " + gl.getProgramInfoLog(program));
+        throw new Error(`Raptor: no enlaza el programa "${kind}": ${gl.getProgramInfoLog(program)}`);
     }
 
-    return {
-        program,
-        attribLocations: {
-            vertexPosition: gl.getAttribLocation(program, "aVertexPosition"),
-            vertexColor: gl.getAttribLocation(program, "aVertexColor"),
-        },
-        uniformLocations: {
-            projectionMatrix: gl.getUniformLocation(program, "uProjectionMatrix"),
-            modelViewMatrix: gl.getUniformLocation(program, "uModelViewMatrix"),
-        },
-    };
+    const attribLocations = {};
+    for (const [name, glslName] of Object.entries(spec.attributes)) {
+        attribLocations[name] = gl.getAttribLocation(program, glslName);
+    }
+    const uniformLocations = {};
+    for (const [name, glslName] of Object.entries(spec.uniforms)) {
+        uniformLocations[name] = gl.getUniformLocation(program, glslName);
+    }
+    return { kind, program, attribLocations, uniformLocations };
 }
 
-// The shader program is identical for every shape, so compile and link it once
-// per WebGL context and share it. Keyed by context so multiple canvases stay
-// independent.
-const programCache = new WeakMap();
+// Keyed by context so several canvases stay independent, then by kind.
+const cache = new WeakMap();
+
+function getProgramInfo(gl, kind = PROGRAM_COLOR) {
+    let byKind = cache.get(gl);
+    if (!byKind) { byKind = new Map(); cache.set(gl, byKind); }
+    if (!byKind.has(kind)) byKind.set(kind, build(gl, kind));
+    return byKind.get(kind);
+}
+
+// ===== components/shapes/shape.js =====
+// Base class for every 2D shape the engine can draw.
+//
+// Shapes share the draw pipeline — the same matrices, the same transform, the
+// same loop — and differ in three things a subclass can override:
+//
+//   getVertices()   the local-space geometry
+//   drawMode        TRIANGLES, TRIANGLE_STRIP, TRIANGLE_FAN…
+//   program         which shader to use (see components/render/shaders.js)
+//
+// Anything needing extra vertex data (a sprite's texture coordinates) adds it
+// in `initBuffers` and binds it in `bindAttributes`, without touching the
+// matrix maths. See components/shapes/sprite.js for the one that does.
 
 // Used when draw() is called without a camera: pan 0, zoom 1 (world == screen).
 const IDENTITY_CAMERA = { x: 0, y: 0, zoom: 1 };
-
-function getProgramInfo(gl) {
-    let info = programCache.get(gl);
-    if (!info) {
-        info = buildProgramInfo(gl);
-        programCache.set(gl, info);
-    }
-    return info;
-}
 
 class Shape {
     constructor(context) {
@@ -989,6 +1085,16 @@ class Shape {
         // outline from getColliderVertices) or "circle" (uses this.radius).
         this.colliderShape = "polygon";
 
+        // Which shader program to draw with. Subclasses override it; the
+        // default is flat per-vertex colour.
+        this.program = PROGRAM_COLOR;
+
+        // Draw order. Lower layers are drawn first, so higher ones land on top;
+        // within a layer, insertion order decides. Without this the only way to
+        // put a background behind a player is to add it first and never change
+        // your mind.
+        this.layer = 0;
+
         this.programInfo = null;
         this.buffers = null;
         this.vCount = 0;
@@ -1009,7 +1115,7 @@ class Shape {
 
     // Uploads geometry to the GPU. Call once, after configuring the shape.
     init() {
-        this.programInfo = getProgramInfo(this.context);
+        this.programInfo = getProgramInfo(this.context, this.program);
         this.initBuffers();
         return this;
     }
@@ -1069,7 +1175,26 @@ class Shape {
         mat4.rotate(modelViewMatrix, modelViewMatrix, (this.rotation * Math.PI) / 180, [0, 0, 1]);
         mat4.scale(modelViewMatrix, modelViewMatrix, [this.scale.x * zoom, this.scale.y * zoom, 1]);
 
-        const { attribLocations, uniformLocations, program } = this.programInfo;
+        const { uniformLocations, program } = this.programInfo;
+
+        gl.useProgram(program);
+        gl.uniformMatrix4fv(uniformLocations.projectionMatrix, false, projectionMatrix);
+        gl.uniformMatrix4fv(uniformLocations.modelViewMatrix, false, modelViewMatrix);
+
+        const enabled = this.bindAttributes(gl);
+        gl.drawArrays(this.drawMode, 0, this.vCount);
+
+        // Attribute arrays are global state, not part of the program: leaving
+        // one enabled makes the *next* shape read a buffer its shader never
+        // asked for. Now that there is more than one program, they have to be
+        // turned off again.
+        for (const location of enabled) gl.disableVertexAttribArray(location);
+    }
+
+    // Binds this shape's vertex data and returns the attribute locations it
+    // switched on, so draw() can switch them back off.
+    bindAttributes(gl) {
+        const { attribLocations } = this.programInfo;
 
         gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.position);
         gl.vertexAttribPointer(attribLocations.vertexPosition, 2, gl.FLOAT, false, 0, 0);
@@ -1079,11 +1204,7 @@ class Shape {
         gl.vertexAttribPointer(attribLocations.vertexColor, 4, gl.FLOAT, false, 0, 0);
         gl.enableVertexAttribArray(attribLocations.vertexColor);
 
-        gl.useProgram(program);
-        gl.uniformMatrix4fv(uniformLocations.projectionMatrix, false, projectionMatrix);
-        gl.uniformMatrix4fv(uniformLocations.modelViewMatrix, false, modelViewMatrix);
-
-        gl.drawArrays(this.drawMode, 0, this.vCount);
+        return [attribLocations.vertexPosition, attribLocations.vertexColor];
     }
 
     // --- Fluent configuration helpers (chainable) ---
@@ -1118,6 +1239,16 @@ class Shape {
 
     setDepth(depth) {
         this.depth = depth;
+        return this;
+    }
+
+    // Draw order. The engine re-sorts when this changes, so it is safe to call
+    // at any time — not just before the shape is added.
+    setLayer(layer) {
+        if (layer !== this.layer) {
+            this.layer = layer;
+            if (this._onLayerChange) this._onLayerChange(this);
+        }
         return this;
     }
 }
@@ -1268,6 +1399,210 @@ class Circle extends RegularPolygon {
         // Treated as a true circle by the physics layer (uses this.radius),
         // not as a 48-gon.
         this.colliderShape = "circle";
+    }
+}
+
+// ===== components/shapes/sprite.js =====
+// A textured quad: the shape you make a game out of.
+//
+// A Sprite is a rectangle that draws part of a Texture instead of a flat
+// colour. "Part of" is the important bit — real games keep every frame of every
+// animation in one image (an *atlas*, or a sprite sheet) and draw sub-rectangles
+// of it, because switching textures is the expensive thing in a renderer.
+// `setFrame({ x, y, width, height })` takes that rectangle **in pixels**, which
+// is how a sheet is actually measured, and converts it to the 0..1 texture
+// coordinates the GPU wants.
+//
+//     const sheet = Texture.fromImage(gl, "hero.png");
+//     const hero = new Sprite(gl, { texture: sheet, frame: { x: 0, y: 0, width: 16, height: 16 } })
+//         .setPosition({ x: 0, y: 0 })
+//         .init();
+//
+// Size: give `width`/`height` in world units, or let it derive them from the
+// frame's pixel size divided by `pixelsPerUnit`. The default of 32 means a
+// 32×32 frame is one world unit — pick whatever suits your art and stay
+// consistent, because that ratio *is* your game's scale.
+//
+// The colour set by `setColor` acts as a **tint**: the shader multiplies the
+// texel by it, so white draws the image untouched, a colour tints it, and
+// alpha < 1 fades it. That is how you flash a sprite red on a hit without a
+// second image.
+
+
+class Sprite extends Shape {
+    constructor(context, {
+        texture = null,
+        frame = null,              // { x, y, width, height } in texture pixels
+        width = null,              // world units; derived from the frame if null
+        height = null,
+        pixelsPerUnit = 32,
+        flipX = false,
+        flipY = false,
+    } = {}) {
+        super(context);
+        this.program = PROGRAM_TEXTURE;
+        this.drawMode = context.TRIANGLE_STRIP;
+
+        this.texture = texture;
+        this.frame = frame;
+        this.pixelsPerUnit = pixelsPerUnit;
+        this.flipX = flipX;
+        this.flipY = flipY;
+        this._width = width;
+        this._height = height;
+
+        // A sprite is white by default so the texture comes through unchanged —
+        // the inherited default would be opaque black, which multiplies the
+        // image away to nothing.
+        this.color = { red: 1, green: 1, blue: 1, alpha: 1 };
+
+        // A texture that is still loading has no size yet, so a sprite sized
+        // from its frame has to rebuild once the image lands.
+        if (texture && !texture.ready) {
+            texture.onLoad = () => { if (this.buffers) this.refresh(); };
+        }
+    }
+
+    // Size in world units, derived from the frame (or the whole texture) when
+    // not given explicitly.
+    get width() {
+        if (this._width !== null) return this._width;
+        const px = this.frame ? this.frame.width : (this.texture?.width ?? this.pixelsPerUnit);
+        return px / this.pixelsPerUnit;
+    }
+
+    get height() {
+        if (this._height !== null) return this._height;
+        const px = this.frame ? this.frame.height : (this.texture?.height ?? this.pixelsPerUnit);
+        return px / this.pixelsPerUnit;
+    }
+
+    // TRIANGLE_STRIP order: top-left, bottom-left, top-right, bottom-right.
+    getVertices() {
+        const hw = this.width / 2;
+        const hh = this.height / 2;
+        return [-hw, hh, -hw, -hh, hw, hh, hw, -hh];
+    }
+
+    getColliderVertices() {
+        const hw = this.width / 2;
+        const hh = this.height / 2;
+        // Counter-clockwise, which is what the collision and ballistics code
+        // assumes when it derives outward normals.
+        return [
+            { x: -hw, y: -hh },
+            { x: hw, y: -hh },
+            { x: hw, y: hh },
+            { x: -hw, y: hh },
+        ];
+    }
+
+    // The frame's pixel rectangle as 0..1 texture coordinates. The texture was
+    // uploaded Y-flipped, so a frame's `y` counts from the *top* of the image —
+    // the way a sprite sheet is laid out and the way anyone reading it counts.
+    getTextureCoords() {
+        const texture = this.texture;
+        const tw = texture?.width || 1;
+        const th = texture?.height || 1;
+        const frame = this.frame || { x: 0, y: 0, width: tw, height: th };
+
+        let u0 = frame.x / tw;
+        let u1 = (frame.x + frame.width) / tw;
+        let v1 = 1 - frame.y / th;
+        let v0 = 1 - (frame.y + frame.height) / th;
+
+        if (this.flipX) [u0, u1] = [u1, u0];
+        if (this.flipY) [v0, v1] = [v1, v0];
+
+        // Same order as getVertices().
+        return [u0, v1, u0, v0, u1, v1, u1, v0];
+    }
+
+    initBuffers() {
+        super.initBuffers();
+        const gl = this.context;
+        this.buffers.texCoord = gl.createBuffer();
+        this.uploadTextureCoords();
+    }
+
+    uploadTextureCoords() {
+        const gl = this.context;
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.texCoord);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(this.getTextureCoords()), gl.DYNAMIC_DRAW);
+        return this;
+    }
+
+    // Rebuilds geometry and texture coordinates. Called for you when the frame,
+    // the texture or a flip changes — animation goes through here every frame it
+    // advances, which is why the buffers are DYNAMIC_DRAW.
+    refresh() {
+        if (!this.buffers) return this;
+        const gl = this.context;
+        const vertices = this.getVertices();
+        this.vCount = vertices.length / 2;
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.position);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.DYNAMIC_DRAW);
+        this.uploadColors();
+        this.uploadTextureCoords();
+        return this;
+    }
+
+    bindAttributes(gl) {
+        const enabled = super.bindAttributes(gl);
+        const { attribLocations, uniformLocations } = this.programInfo;
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.texCoord);
+        gl.vertexAttribPointer(attribLocations.textureCoord, 2, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(attribLocations.textureCoord);
+        enabled.push(attribLocations.textureCoord);
+
+        // Unit 0 for everything: one texture per sprite is the whole point of
+        // an atlas.
+        if (this.texture) this.texture.bind(0);
+        gl.uniform1i(uniformLocations.sampler, 0);
+
+        return enabled;
+    }
+
+    // --- Fluent configuration (chainable) --------------------------------
+
+    setTexture(texture, { frame = null } = {}) {
+        this.texture = texture;
+        if (frame) this.frame = frame;
+        if (texture && !texture.ready) texture.onLoad = () => { if (this.buffers) this.refresh(); };
+        return this.refresh();
+    }
+
+    // The sub-rectangle to draw, in texture pixels. Passing a frame of a
+    // different size resizes the sprite too, unless width/height were pinned.
+    setFrame(frame) {
+        const resized = !this.frame || frame.width !== this.frame.width || frame.height !== this.frame.height;
+        this.frame = frame;
+        if (!this.buffers) return this;
+        // Only the vertices need rebuilding when the frame *size* changes;
+        // otherwise the texture coordinates are enough, which is the common case
+        // for an animation stepping through same-sized frames.
+        return resized ? this.refresh() : this.uploadTextureCoords();
+    }
+
+    setSize({ width, height } = {}) {
+        if (width !== undefined) this._width = width;
+        if (height !== undefined) this._height = height;
+        return this.refresh();
+    }
+
+    // Mirrors the image without touching the transform — which is what you want
+    // for a character turning around, because rotating would flip it over.
+    setFlip({ x = this.flipX, y = this.flipY } = {}) {
+        if (x === this.flipX && y === this.flipY) return this;
+        this.flipX = x;
+        this.flipY = y;
+        return this.buffers ? this.uploadTextureCoords() : this;
+    }
+
+    // Alias for setColor, because on a sprite that is what it does.
+    setTint(color) {
+        return this.setColor(color);
     }
 }
 

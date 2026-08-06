@@ -12,6 +12,7 @@ export { default as Camera } from "./camera.js";
 
 // --- Rendering primitives ----------------------------------------------
 export * from "./shapes/index.js";
+export * from "./render/index.js";
 
 // --- Simulation ---------------------------------------------------------
 export * from "./physics/index.js";
