@@ -78,6 +78,28 @@ const STYLES = `
     .legend { display: flex; gap: 14px; justify-content: center; font-size: 11.5px; color: #9aa0a6; margin-top: 6px; }
     .legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
 
+    /* On-screen controls overlaid on the canvas (touch + mouse). */
+    .pad { position: absolute; bottom: 14px; display: flex; gap: 10px; align-items: flex-end; }
+    .pad.left { left: 14px; }
+    .pad.right { right: 14px; }
+    .pad .col { display: flex; flex-direction: column; gap: 10px; }
+    .tbtn {
+        min-width: 62px; height: 62px; padding: 0 12px; border-radius: 12px;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 13px; font-weight: 700; letter-spacing: .04em; color: #e6e6e6;
+        background: rgba(38, 43, 51, .6); border: 1px solid rgba(255, 255, 255, .26);
+        -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+        touch-action: none; user-select: none; -webkit-user-select: none;
+        -webkit-tap-highlight-color: transparent; cursor: pointer;
+    }
+    .tbtn.small { min-width: 52px; height: 52px; font-size: 17px; border-radius: 10px; }
+    .tbtn.gas { background: rgba(38, 110, 60, .62); border-color: rgba(120, 220, 150, .45); }
+    .tbtn.gas.on { background: rgba(56, 170, 90, .88); border-color: #8fe6ad; }
+    .tbtn.brake { background: rgba(120, 44, 38, .62); border-color: rgba(230, 140, 130, .45); }
+    .tbtn.brake.on { background: rgba(185, 62, 50, .9); border-color: #f0a094; }
+    .tbtn.on { background: rgba(74, 127, 181, .8); border-color: #7fb2e6; }
+    .tbtn.off { opacity: .35; }
+
     .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
     .row label { width: 104px; font-size: 12px; color: #b9bfc6; }
     .row input[type=range] { flex: 1; min-width: 0; }
@@ -87,6 +109,14 @@ const STYLES = `
     @media (max-width: 720px) {
         #app { flex-direction: column; padding: 10px; gap: 10px; }
         #panel { width: 100%; }
+        /* The canvas is short in portrait, so keep the pad compact: the pedals
+           stay big enough to hit, the taps shrink out of the way. */
+        .pad { bottom: 10px; gap: 8px; }
+        .pad.left { left: 10px; }
+        .pad.right { right: 10px; }
+        .pad .col { gap: 8px; }
+        .tbtn { min-width: 66px; height: 56px; font-size: 13px; padding: 0 8px; }
+        .tbtn.small { min-width: 44px; height: 40px; font-size: 16px; }
     }
 `;
 
@@ -250,11 +280,62 @@ function startDemo() {
             resetBtn,
         ]),
         el("div", { className: "card" }, [
-            el("div", { className: "hint", style: "margin:0", textContent: "W/↑ acelera · S/↓ frena · R vuelve a la salida" }),
+            el("div", { className: "hint", style: "margin:0", textContent: "W/↑ acelera · S/↓ frena · R vuelve a la salida · o usa los botones sobre la pista (también en móvil)" }),
         ]),
     ]);
 
     document.body.append(el("div", { id: "app" }, [stage, panel]));
+
+    // --- On-screen controls, so the whole thing is drivable on a phone. -----
+    // Pedals are *held*; gear and reset are taps. Keyboard and touch feed the
+    // same `held` set, so neither one fights the other.
+    const held = new Set();
+    function syncPedals() {
+        throttle = held.has("w") || held.has("ArrowUp") || held.has("gas") ? 1 : 0;
+        brake = held.has("s") || held.has("ArrowDown") || held.has("brake") ? 1 : 0;
+        gasBtn.classList.toggle("on", throttle > 0);
+        brakeBtn.classList.toggle("on", brake > 0);
+    }
+
+    const tbtn = (label, cls = "") => el("div", { className: `tbtn ${cls}`.trim(), textContent: label });
+    const gasBtn = tbtn("GAS", "gas");
+    const brakeBtn = tbtn("FRENO", "brake");
+    const upTouch = tbtn("▲", "small");
+    const downTouch = tbtn("▼", "small");
+    const modeTouch = tbtn("AUTO", "small");
+    const resetTouch = tbtn("↺", "small");
+
+    stage.append(
+        el("div", { className: "pad left" }, [
+            el("div", { className: "col" }, [modeTouch, resetTouch]),
+            el("div", { className: "col" }, [upTouch, downTouch]),
+        ]),
+        el("div", { className: "pad right" }, [brakeBtn, gasBtn]),
+    );
+
+    // A pedal: pressed while the finger (or button) is down, released on any
+    // way out — including the pointer leaving the element mid-press.
+    function bindPedal(node, name) {
+        const press = (e) => {
+            e.preventDefault();
+            if (node.setPointerCapture && e.pointerId != null) {
+                try { node.setPointerCapture(e.pointerId); } catch { /* older browsers */ }
+            }
+            held.add(name);
+            syncPedals();
+        };
+        const release = () => { held.delete(name); syncPedals(); };
+        node.addEventListener("pointerdown", press);
+        for (const ev of ["pointerup", "pointercancel", "pointerleave"]) node.addEventListener(ev, release);
+    }
+    bindPedal(gasBtn, "gas");
+    bindPedal(brakeBtn, "brake");
+
+    const bindTap = (node, fn) => node.addEventListener("pointerdown", (e) => { e.preventDefault(); fn(); });
+    bindTap(upTouch, () => shift(1));
+    bindTap(downTouch, () => shift(-1));
+    bindTap(modeTouch, () => toggleMode());
+    bindTap(resetTouch, () => reset());
 
     window.raptorDyno = {
         game, engine, gearbox, reset, toggleMode, shift,
@@ -269,12 +350,7 @@ function startDemo() {
     game.addUpdater(update);
     game.start();
 
-    // --- Input -----------------------------------------------------------
-    const held = new Set();
-    const syncPedals = () => {
-        throttle = held.has("w") || held.has("ArrowUp") ? 1 : 0;
-        brake = held.has("s") || held.has("ArrowDown") ? 1 : 0;
-    };
+    // --- Keyboard --------------------------------------------------------
     window.addEventListener("keydown", (e) => {
         const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
         if (["w", "s", "ArrowUp", "ArrowDown"].includes(k)) { e.preventDefault(); held.add(k); syncPedals(); }
@@ -300,6 +376,11 @@ function startDemo() {
         const auto = mode === GEARBOX_MODE.AUTO;
         modeBtn.textContent = auto ? "Automática ⇄ pasar a manual" : "Manual ⇄ pasar a automática";
         upBtn.disabled = downBtn.disabled = auto;
+        // Mirror it on the canvas buttons: greyed out while the box shifts itself.
+        modeTouch.textContent = auto ? "AUTO" : "MAN";
+        modeTouch.classList.toggle("on", !auto);
+        upTouch.classList.toggle("off", auto);
+        downTouch.classList.toggle("off", auto);
     }
 
     // A declaration, not a const arrow: the debug handle above references it
