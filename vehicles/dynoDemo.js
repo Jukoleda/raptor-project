@@ -15,7 +15,8 @@
 // Controls: W/↑ throttle · S/↓ brake · G auto/manual · Z/X shift · R reset ·
 // M mute · F fullscreen.
 
-import RaptorEngine from "../components/raptorEngine.js";
+import App from "../components/app.js";
+import { el, kv, slider, card, button, hint } from "../components/ui/index.js";
 import { Rectangle } from "../components/shapes/index.js";
 import { Gearbox, GEARBOX_MODE } from "../components/controls/index.js";
 import { Engine } from "../components/vehicles/index.js";
@@ -40,24 +41,10 @@ const G = 9.81;
 
 const GEAR_RATIOS = [3.6, 2.1, 1.4, 1.0, 0.8];
 
+// Only what is specific to this page: the framework already ships the panel
+// chrome (cards, rows, sliders, readouts), the on-screen pad and the
+// fullscreen layout. See components/ui/ and components/input/.
 const STYLES = `
-    * { box-sizing: border-box; }
-    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color: #e6e6e6; background: #1b1d21; }
-    #app { display: flex; gap: 16px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
-    #stage { position: relative; background: #0a0d12; border-radius: 8px; overflow: hidden; box-shadow: 0 6px 24px rgba(0,0,0,.4); }
-    #stage canvas { display: block; max-width: 100%; height: auto; touch-action: none; }
-    #panel { width: 300px; display: flex; flex-direction: column; gap: 16px; }
-    h1 { font-size: 17px; margin: 0 0 4px; }
-    h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #9aa0a6; margin: 0 0 10px; }
-    .card { background: #26292e; border: 1px solid #33373d; border-radius: 8px; padding: 12px; }
-    .kv { display: flex; justify-content: space-between; font-size: 13px; margin: 5px 0; }
-    .kv .k { color: #9aa0a6; }
-    .kv .v { font-variant-numeric: tabular-nums; }
-    .hint { font-size: 12px; color: #7d838a; margin-top: 10px; text-align: center; }
-    button { cursor: pointer; border: 1px solid #3a3f45; background: #2f343a; color: #e6e6e6; border-radius: 6px; padding: 9px 10px; font-size: 13px; width: 100%; }
-    button:hover { background: #3a4047; }
-    button:disabled { opacity: .4; cursor: default; }
-
     /* Speed + gear headline. */
     .dash { display: flex; align-items: center; gap: 14px; }
     .dash .gear {
@@ -80,28 +67,11 @@ const STYLES = `
     .legend { display: flex; gap: 14px; justify-content: center; font-size: 11.5px; color: #9aa0a6; margin-top: 6px; }
     .legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
 
-    /* On-screen controls overlaid on the canvas (touch + mouse). */
-    .pad { position: absolute; bottom: 14px; display: flex; gap: 10px; align-items: flex-end; }
-    .pad.left { left: 14px; }
-    .pad.right { right: 14px; }
-    .pad .col { display: flex; flex-direction: column; gap: 10px; }
-    .tbtn {
-        min-width: 62px; height: 62px; padding: 0 12px; border-radius: 12px;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 13px; font-weight: 700; letter-spacing: .04em; color: #e6e6e6;
-        background: rgba(38, 43, 51, .6); border: 1px solid rgba(255, 255, 255, .26);
-        -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
-        touch-action: none; user-select: none; -webkit-user-select: none;
-        -webkit-tap-highlight-color: transparent; cursor: pointer;
-    }
-    .tbtn.small { min-width: 52px; height: 52px; font-size: 17px; border-radius: 10px; }
-    .tbtn.gas { background: rgba(38, 110, 60, .62); border-color: rgba(120, 220, 150, .45); }
+    /* Pedals: green go, red stop, lit while held. */
+    .tbtn.gas { background: rgba(38, 110, 60, .62); border-color: rgba(120, 220, 150, .45); font-size: 13px; font-weight: 700; }
     .tbtn.gas.on { background: rgba(56, 170, 90, .88); border-color: #8fe6ad; }
-    .tbtn.brake { background: rgba(120, 44, 38, .62); border-color: rgba(230, 140, 130, .45); }
+    .tbtn.brake { background: rgba(120, 44, 38, .62); border-color: rgba(230, 140, 130, .45); font-size: 13px; font-weight: 700; }
     .tbtn.brake.on { background: rgba(185, 62, 50, .9); border-color: #f0a094; }
-    .tbtn.on { background: rgba(74, 127, 181, .8); border-color: #7fb2e6; }
-    .tbtn.off { opacity: .35; }
-    .pad.top { top: 12px; bottom: auto; right: 12px; }
 
     /* Compact readout pinned to the canvas, so the essentials stay visible in
        fullscreen even when the panel is off to one side. */
@@ -116,60 +86,11 @@ const STYLES = `
     .hud .v small { font-size: 10px; color: #9aa0a6; margin-left: 3px; }
     .hud .r { width: 78px; height: 7px; background: #1b1d21; border-radius: 4px; overflow: hidden; border: 1px solid #3a3f45; }
     .hud .r > i { display: block; height: 100%; width: 0; background: #6aa9e0; }
-
-    /* Fullscreen: give the strip the whole height and keep the panel scrollable
-       beside it, instead of the page layout that assumes a document. */
-    #app:fullscreen { height: 100vh; padding: 10px; flex-wrap: nowrap; align-items: stretch; }
-    #app:fullscreen #stage { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; min-width: 0; }
-    #app:fullscreen #stage canvas { width: 100%; height: auto; max-height: 100%; max-width: 100%; }
-    #app:fullscreen #panel { overflow-y: auto; flex: none; }
-    @media (max-width: 720px) {
-        #app:fullscreen { flex-direction: column; }
-        #app:fullscreen #stage { flex: 0 0 auto; }
-    }
-
-    .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
-    .row label { width: 104px; font-size: 12px; color: #b9bfc6; }
-    .row input[type=range] { flex: 1; min-width: 0; }
-    .row .val { width: 60px; text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; color: #9aa0a6; }
-    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-
-    @media (max-width: 720px) {
-        #app { flex-direction: column; padding: 10px; gap: 10px; }
-        #panel { width: 100%; }
-        /* The canvas is short in portrait, so keep the pad compact: the pedals
-           stay big enough to hit, the taps shrink out of the way. */
-        .pad { bottom: 10px; gap: 8px; }
-        .pad.left { left: 10px; }
-        .pad.right { right: 10px; }
-        .pad .col { gap: 8px; }
-        .tbtn { min-width: 66px; height: 56px; font-size: 13px; padding: 0 8px; }
-        .tbtn.small { min-width: 44px; height: 40px; font-size: 16px; }
-    }
 `;
 
-function el(tag, props = {}, children = []) {
-    const node = Object.assign(document.createElement(tag), props);
-    for (const child of children) node.append(child);
-    return node;
-}
-
-function slider(label, min, max, step, value, apply, format = (v) => v) {
-    const input = el("input", { type: "range", min, max, step, value });
-    const val = el("span", { className: "val" });
-    const render = () => { val.textContent = format(+input.value); };
-    input.oninput = () => { render(); apply(+input.value); };
-    render();
-    return { row: el("div", { className: "row" }, [el("label", { textContent: label }), input, val]) };
-}
-
-function startDemo() {
-    document.head.append(el("style", { textContent: STYLES }));
-
-    const game = new RaptorEngine();
-    const stage = el("div", { id: "stage" });
-    game.createWindow(stage);
-    const gl = game.context;
+App.boot({ title: "Banco de pruebas · motor y caja", styles: STYLES }, (app) => {
+    const { gl, stage, keyboard, touch } = app;
+    const game = app;
 
     // --- The strip -------------------------------------------------------
     // Verge first, so the frame is not mostly void once the camera pulls back.
@@ -265,86 +186,70 @@ function startDemo() {
     const kSprint = kv("0 → 100 km/h"), kRun = kv(`${MEASURE_AT} m`), kTrap = kv("Velocidad de paso"),
           kDist = kv("Distancia"), kPeakG = kv("G máxima");
 
-    const modeBtn = el("button", { onclick: () => toggleMode() });
-    const upBtn = el("button", { textContent: "Subir ▲ (X)", onclick: () => shift(1) });
-    const downBtn = el("button", { textContent: "Bajar ▼ (Z)", onclick: () => shift(-1) });
-    const resetBtn = el("button", { textContent: "Volver a la salida (R)", onclick: () => reset() });
-    const soundBtn = el("button", { onclick: () => toggleSound() });
-    const fsBtn = el("button", { onclick: () => toggleFullscreen() });
+    const modeBtn = button("", () => toggleMode());
+    const upBtn = button("Subir ▲ (X)", () => shift(1));
+    const downBtn = button("Bajar ▼ (Z)", () => shift(-1));
+    const resetBtn = button("Volver a la salida (R)", () => reset());
+    const soundBtn = button("", () => toggleSound());
+    const fsBtn = button("", () => app.toggleFullscreen());
 
-    const torqueCtl = slider("Par máximo", 180, 600, 10, engine.peakTorque,
-        (v) => { engine.peakTorque = v; engine._peak = null; drawCurve(); }, (v) => `${v} Nm`);
-    const peakRpmCtl = slider("Par máx a", 1800, 5500, 100, engine.peakTorqueRpm,
-        (v) => { engine.peakTorqueRpm = v; engine._peak = null; drawCurve(); }, (v) => `${v} rpm`);
-    const redlineCtl = slider("Corte", 4000, 9500, 100, engine.redlineRpm,
-        (v) => { engine.redlineRpm = v; engine._peak = null; drawCurve(); }, (v) => `${v} rpm`);
-    const finalCtl = slider("Grupo final", 2.5, 5.5, 0.1, gearbox.finalDrive,
-        (v) => { gearbox.finalDrive = v; }, (v) => v.toFixed(1));
+    const retune = (apply) => (v) => { apply(v); engine._peak = null; drawCurve(); };
+    const torqueCtl = slider("Par máximo", { min: 180, max: 600, step: 10, value: engine.peakTorque,
+        apply: retune((v) => { engine.peakTorque = v; }), format: (v) => `${v} Nm` });
+    const peakRpmCtl = slider("Par máx a", { min: 1800, max: 5500, step: 100, value: engine.peakTorqueRpm,
+        apply: retune((v) => { engine.peakTorqueRpm = v; }), format: (v) => `${v} rpm` });
+    const redlineCtl = slider("Corte", { min: 4000, max: 9500, step: 100, value: engine.redlineRpm,
+        apply: retune((v) => { engine.redlineRpm = v; }), format: (v) => `${v} rpm` });
+    const finalCtl = slider("Grupo final", { min: 2.5, max: 5.5, step: 0.1, value: gearbox.finalDrive,
+        apply: (v) => { gearbox.finalDrive = v; }, format: (v) => v.toFixed(1) });
 
-    const panel = el("div", { id: "panel" }, [
-        el("h1", { textContent: "Banco de pruebas · motor y caja" }),
-        el("div", { className: "card" }, [
+    app.addPanel(
+        card(null, [
             el("div", { className: "dash" }, [gearBox, speedNum]),
             el("div", { className: "tach" }, [tachFill, redlineMark]),
             el("div", { className: "tachlbl" }, [rpmNum, redlineNum]),
             kTorque.row, kWheel.row, kPower.row, kRatio.row, kAccel.row,
         ]),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Curva de par y potencia" }), curve,
+        card("Curva de par y potencia", [
+            curve,
             el("div", { className: "legend" }, [
                 el("span", {}, [el("i", { style: "background:#e8c24a" }), document.createTextNode("Par (Nm)")]),
                 el("span", {}, [el("i", { style: "background:#6aa9e0" }), document.createTextNode("Potencia (CV)")]),
             ]),
         ]),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Caja de cambios" }),
+        card("Caja de cambios", [
             modeBtn,
             el("div", { className: "grid2", style: "margin-top:8px" }, [downBtn, upBtn]),
             finalCtl.row,
-            el("div", { className: "hint", textContent: "G alterna automática/manual · Z y X cambian de marcha" }),
+            hint("G alterna automática/manual · Z y X cambian de marcha"),
         ]),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Motor (juega con él)" }),
-            torqueCtl.row, peakRpmCtl.row, redlineCtl.row,
-        ]),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Cronómetro" }),
-            kSprint.row, kRun.row, kTrap.row, kDist.row, kPeakG.row,
-            resetBtn,
-        ]),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Pantalla y sonido" }),
+        card("Motor (juega con él)", [torqueCtl.row, peakRpmCtl.row, redlineCtl.row]),
+        card("Cronómetro", [kSprint.row, kRun.row, kTrap.row, kDist.row, kPeakG.row, resetBtn]),
+        card("Pantalla y sonido", [
             el("div", { className: "grid2" }, [soundBtn, fsBtn]),
-            el("div", { className: "hint", textContent: "M silencia · F pantalla completa" }),
+            hint("M silencia · F pantalla completa"),
         ]),
-        el("div", { className: "card" }, [
-            el("div", { className: "hint", style: "margin:0", textContent: "W/↑ acelera · S/↓ frena · R vuelve a la salida · M silencia · F pantalla completa · o usa los botones sobre la pista (también en móvil)" }),
-        ]),
-    ]);
+        card(null, [hint("W/↑ acelera · S/↓ frena · R vuelve a la salida · M silencia · F pantalla completa · o usa los botones sobre la pista (también en móvil)", { style: "margin:0" })]),
+    );
 
-    const app = el("div", { id: "app" }, [stage, panel]);
-    document.body.append(app);
+    // On-screen controls, so the whole thing is drivable on a phone. Pedals are
+    // *held*, gear and reset are taps. `touch` writes into the same held set as
+    // the keyboard, so a finger and a key can never disagree.
+    const gasBtn = touch.button("gas", "GAS", "gas");
+    const brakeBtn = touch.button("brake", "FRENO", "brake");
 
-    // --- On-screen controls, so the whole thing is drivable on a phone. -----
-    // Pedals are *held*; gear and reset are taps. Keyboard and touch feed the
-    // same `held` set, so neither one fights the other.
-    const held = new Set();
-    function syncPedals() {
-        throttle = held.has("w") || held.has("ArrowUp") || held.has("gas") ? 1 : 0;
-        brake = held.has("s") || held.has("ArrowDown") || held.has("brake") ? 1 : 0;
-        gasBtn.classList.toggle("on", throttle > 0);
-        brakeBtn.classList.toggle("on", brake > 0);
-    }
+    touch.pedal(gasBtn, "gas");
+    touch.pedal(brakeBtn, "brake");
+    touch.tap(touch.button("up", "▲", "small"), () => shift(1));
+    touch.tap(touch.button("down", "▼", "small"), () => shift(-1));
+    touch.tap(touch.button("mode", "AUTO", "small"), () => toggleMode());
+    touch.tap(touch.button("reset", "↺", "small"), () => reset());
+    touch.tap(touch.button("sound", "🔊", "small"), () => toggleSound());
+    touch.tap(touch.button("fullscreen", "⛶", "small"), () => app.toggleFullscreen());
 
-    const tbtn = (label, cls = "") => el("div", { className: `tbtn ${cls}`.trim(), textContent: label });
-    const gasBtn = tbtn("GAS", "gas");
-    const brakeBtn = tbtn("FRENO", "brake");
-    const upTouch = tbtn("▲", "small");
-    const downTouch = tbtn("▼", "small");
-    const modeTouch = tbtn("AUTO", "small");
-    const resetTouch = tbtn("↺", "small");
-    const soundTouch = tbtn("🔊", "small");
-    const fsTouch = tbtn("⛶", "small");
+    touch.pad("top-right", [touch.get("sound"), touch.get("fullscreen")]);
+    touch.pad("left", [[touch.get("mode"), touch.get("reset")], [touch.get("up"), touch.get("down")]]);
+    touch.pad("right", [brakeBtn, gasBtn]);
 
     // Compact readout on the canvas: in fullscreen the panel can be off to the
     // side or scrolled away, and gear/speed/revs are the ones you actually watch.
@@ -354,42 +259,7 @@ function startDemo() {
         el("small", { textContent: "KM/H" }),
     ]);
     const hudTach = el("i");
-
-    stage.append(
-        el("div", { className: "hud" }, [hudGear, hudSpeed, el("div", { className: "r" }, [hudTach])]),
-        el("div", { className: "pad top" }, [soundTouch, fsTouch]),
-        el("div", { className: "pad left" }, [
-            el("div", { className: "col" }, [modeTouch, resetTouch]),
-            el("div", { className: "col" }, [upTouch, downTouch]),
-        ]),
-        el("div", { className: "pad right" }, [brakeBtn, gasBtn]),
-    );
-
-    // A pedal: pressed while the finger (or button) is down, released on any
-    // way out — including the pointer leaving the element mid-press.
-    function bindPedal(node, name) {
-        const press = (e) => {
-            e.preventDefault();
-            if (node.setPointerCapture && e.pointerId != null) {
-                try { node.setPointerCapture(e.pointerId); } catch { /* older browsers */ }
-            }
-            held.add(name);
-            syncPedals();
-        };
-        const release = () => { held.delete(name); syncPedals(); };
-        node.addEventListener("pointerdown", press);
-        for (const ev of ["pointerup", "pointercancel", "pointerleave"]) node.addEventListener(ev, release);
-    }
-    bindPedal(gasBtn, "gas");
-    bindPedal(brakeBtn, "brake");
-
-    const bindTap = (node, fn) => node.addEventListener("pointerdown", (e) => { e.preventDefault(); fn(); });
-    bindTap(upTouch, () => shift(1));
-    bindTap(downTouch, () => shift(-1));
-    bindTap(modeTouch, () => toggleMode());
-    bindTap(resetTouch, () => reset());
-    bindTap(soundTouch, () => toggleSound());
-    bindTap(fsTouch, () => toggleFullscreen());
+    app.addOverlay(el("div", { className: "hud" }, [hudGear, hudSpeed, el("div", { className: "r" }, [hudTach])]));
 
     // Browsers only let audio start from a gesture, so the first click, tap or
     // key press anywhere wakes it up — after that the listeners are gone.
@@ -398,45 +268,35 @@ function startDemo() {
     }
 
     window.raptorDyno = {
-        game, engine, gearbox, sound, reset, toggleMode, shift, toggleSound, toggleFullscreen, wakeAudio,
+        app, game, engine, gearbox, sound, reset, toggleMode, shift, toggleSound, wakeAudio,
+        toggleFullscreen: () => app.toggleFullscreen(),
         get state() { return { speed, distance, runTime, sprintTime, measureTime, trapSpeed, peakG, throttle, brake }; },
-        set throttle(v) { throttle = v; },
-        set brake(v) { brake = v; },
+        // Driving from a test or the console goes through the same held set as
+        // a finger or a key, so nothing is special-cased in the update loop.
+        set throttle(v) { v ? keyboard.press("gas") : keyboard.release("gas"); },
+        set brake(v) { v ? keyboard.press("brake") : keyboard.release("brake"); },
     };
 
     setMode(GEARBOX_MODE.AUTO);
     renderSoundLabel();
     renderFullscreenLabel();
-    for (const ev of ["fullscreenchange", "webkitfullscreenchange"]) {
-        document.addEventListener(ev, renderFullscreenLabel);
-    }
+    app.on("fullscreenchange", renderFullscreenLabel);
     drawCurve();
     reset();
-    game.addUpdater(update);
-    game.start();
+    app.onUpdate(update);
 
     // --- Keyboard --------------------------------------------------------
-    window.addEventListener("keydown", (e) => {
-        const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-        if (["w", "s", "ArrowUp", "ArrowDown"].includes(k)) { e.preventDefault(); held.add(k); syncPedals(); }
-        else if (k === "g") toggleMode();
-        else if (k === "x") shift(1);
-        else if (k === "z") shift(-1);
-        else if (k === "r") reset();
-        else if (k === "m") toggleSound();
-        else if (k === "f") toggleFullscreen();
-    });
-    window.addEventListener("keyup", (e) => {
-        held.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key);
-        syncPedals();
-    });
+    // Pedals are read from the held set every frame (see update); only the
+    // one-shot actions need a binding.
+    keyboard
+        .on("g", () => toggleMode())
+        .on("x", () => shift(1))
+        .on("z", () => shift(-1))
+        .on("r", () => reset())
+        .on("m", () => toggleSound())
+        .on("f", () => app.toggleFullscreen());
 
     // --- Behaviour -------------------------------------------------------
-
-    function kv(label) {
-        const v = el("span", { className: "v", textContent: "—" });
-        return { row: el("div", { className: "kv" }, [el("span", { className: "k", textContent: label }), v]), v };
-    }
 
     function setMode(mode) {
         gearbox.setMode(mode);
@@ -444,10 +304,8 @@ function startDemo() {
         modeBtn.textContent = auto ? "Automática ⇄ pasar a manual" : "Manual ⇄ pasar a automática";
         upBtn.disabled = downBtn.disabled = auto;
         // Mirror it on the canvas buttons: greyed out while the box shifts itself.
-        modeTouch.textContent = auto ? "AUTO" : "MAN";
-        modeTouch.classList.toggle("on", !auto);
-        upTouch.classList.toggle("off", auto);
-        downTouch.classList.toggle("off", auto);
+        touch.setLabel("mode", auto ? "AUTO" : "MAN").setActive("mode", !auto)
+            .setEnabled("up", !auto).setEnabled("down", !auto);
     }
 
     // A declaration, not a const arrow: the debug handle above references it
@@ -479,36 +337,17 @@ function startDemo() {
     function renderSoundLabel() {
         const on = !sound.muted;
         soundBtn.textContent = on ? "🔊 Sonido (M)" : "🔇 Silencio (M)";
-        soundTouch.textContent = on ? "🔊" : "🔇";
-        soundTouch.classList.toggle("off", !on);
+        touch.setLabel("sound", on ? "🔊" : "🔇").setEnabled("sound", on);
     }
 
     // --- Fullscreen ------------------------------------------------------
-    // Vendor prefixes are still what Safari answers to, so go through both.
-
-    function fullscreenElement() {
-        return document.fullscreenElement || document.webkitFullscreenElement || null;
-    }
-
-    function toggleFullscreen() {
-        if (fullscreenElement()) {
-            const exit = document.exitFullscreen || document.webkitExitFullscreen;
-            if (exit) Promise.resolve(exit.call(document)).catch(() => {});
-        } else {
-            const request = app.requestFullscreen || app.webkitRequestFullscreen;
-            if (request) Promise.resolve(request.call(app)).catch(() => {});
-        }
-        // Safari fires the change event late; the listener corrects the label.
-        renderFullscreenLabel();
-    }
+    // The prefixed API and the change event live in the framework; all that is
+    // left here is what the labels should say.
 
     function renderFullscreenLabel() {
-        const on = !!fullscreenElement();
+        const on = app.isFullscreen;
         fsBtn.textContent = on ? "⛶ Salir (F)" : "⛶ Pantalla completa (F)";
-        fsTouch.classList.toggle("on", on);
-        // The canvas is a fixed-size backing store; resizing the box around it
-        // changes the aspect the CSS shows, so re-fit the camera bounds.
-        if (game.canvas) game.canvas.style.maxHeight = on ? "100%" : "";
+        touch.setActive("fullscreen", on);
     }
 
     function reset() {
@@ -593,6 +432,13 @@ function startDemo() {
     }
 
     function update(dt) {
+        // One source of truth for the pedals: whatever is held, whether it got
+        // there from a key, a finger or the debug handle. Reading it here means
+        // there is nothing to keep in sync.
+        throttle = keyboard.isDown("w", "ArrowUp", "gas") ? 1 : 0;
+        brake = keyboard.isDown("s", "ArrowDown", "brake") ? 1 : 0;
+        touch.setActive("gas", throttle > 0).setActive("brake", brake > 0);
+
         // The gearbox reads road speed and decides the gear; we read back what
         // the drivetrain is putting down.
         gearbox.update(dt, { speed, throttle });
@@ -672,10 +518,4 @@ function startDemo() {
         kDist.v.textContent = `${distance.toFixed(0)} m`;
         kPeakG.v.textContent = `${peakG.toFixed(2)} g`;
     }
-}
-
-if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", startDemo);
-} else {
-    startDemo();
-}
+});

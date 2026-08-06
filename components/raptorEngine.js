@@ -15,12 +15,12 @@ function RaptorEngine() {
 
     // Creates the canvas and WebGL context. Pass a `mount` element to place the
     // canvas inside it (e.g. an editor layout); defaults to document.body.
-    this.createWindow = (mount) => {
+    this.createWindow = (mount, { width = 800, height = 600 } = {}) => {
         var gameWindow = document.createElement("canvas");
 
         gameWindow.id = "gameWindow";
-        gameWindow.width = 800;
-        gameWindow.height = 600;
+        gameWindow.width = width;
+        gameWindow.height = height;
 
         (mount || document.body).appendChild(gameWindow);
 
@@ -78,16 +78,34 @@ function RaptorEngine() {
 
     this._lastTime = undefined;
 
-    // Configures GL state and starts the render loop.
+    // Whether the loop is scheduling frames. Read it; use start/stop to change.
+    this.running = false;
+
+    // Configures GL state and starts the render loop. Calling it twice is safe:
+    // a second loop would double every delta-time.
     this.start = () => {
+        if (this.running) return this;
         this.configure();
+        this.running = true;
+        // Dropping the timestamp means the frame after a pause gets dt = 0
+        // rather than "everything that happened while you were away".
+        this._lastTime = undefined;
         requestAnimationFrame(this.renderLoop);
+        return this;
+    };
+
+    // Stops scheduling frames. The last one stays on screen — nothing clears.
+    this.stop = () => {
+        this.running = false;
+        return this;
     };
 
     // Single render loop for the whole engine: update -> clear -> draw every
     // entity -> schedule the next frame, in that order. `now` is the timestamp
     // requestAnimationFrame passes in, used to derive delta-time.
     this.renderLoop = (now) => {
+        if (!this.running) return;
+
         // Delta-time in seconds, clamped so a background tab / long stall does
         // not produce a huge jump that tunnels bodies through each other.
         let dt = this._lastTime === undefined ? 0 : (now - this._lastTime) / 1000;

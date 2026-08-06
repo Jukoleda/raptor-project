@@ -4,6 +4,72 @@ Todos los cambios notables de este proyecto se documentan en este archivo.
 
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/).
 
+## [0.1.0] - 2026-08-06
+
+Raptor pasa de ser un montón de componentes con demos alrededor a ser un
+**framework**: una superficie pública, un shell de aplicación y un build que
+sigue el grafo de módulos.
+
+### Añadido (El framework)
+- **`raptor.js`** — entrada única: `import { App, Rectangle } from "./raptor.js"`.
+  Junto a **`components/index.js`** define la **superficie pública** (61 nombres):
+  si algo está ahí, se puede usar y no se mueve sin una nota aquí; si no está, es
+  detalle interno.
+- **`package.json`** con `type: module`, versión y un **mapa de `exports` por
+  capa**, así que se puede importar todo (`raptor-engine`) o solo una parte
+  (`raptor-engine/physics`).
+- **`components/app.js`** — `App`, el shell. `App.boot(opciones, setup)` espera al
+  documento, inyecta los estilos, monta `#app`/`#stage`/`#panel`, crea el canvas y
+  el contexto, engancha teclado y mandos táctiles, y arranca el bucle **después**
+  de que `setup` termine. Expone `add`, `onUpdate`, `addPanel`, `addOverlay`,
+  `pause`/`resume`, `toggleFullscreen`, `resize`/`watchResize` y eventos
+  `resize`/`fullscreenchange`. **`app.use(plugin)`** es el punto de extensión: con
+  `install(app)` el plugin se configura solo; con `step(dt)` o `update(dt)` entra
+  directamente en el bucle (un `World` de física cumple lo segundo).
+- **`components/ui/`** — `el()`, `card()`, `kv()`, `slider()`, `select()`,
+  `button()`, `hint()`, `injectStyles()` y `BASE_STYLES`, más `fullscreen.js` con
+  la API prefijada de Safari y un `onFullscreenChange` (hace falta: se puede salir
+  con Escape sin tocar el botón).
+- **`components/input/`** — `Keyboard` separa **teclas mantenidas** (`isDown`,
+  `axis`) de **acciones** (`on`, una vez por pulsación, ignorando la repetición
+  automática), y suelta todo al perder el foco, que es lo que evita que cambiar de
+  pestaña acelerando deje el acelerador pegado. `TouchPad` monta los mandos sobre
+  el canvas y **escribe en el mismo conjunto de teclas**, así que dedo y teclado
+  no pueden contradecirse; los pedales capturan el puntero y los taps van en
+  `pointerdown`, no en `click`.
+- **`dist/raptor.js`** (librería ESM) y **`dist/raptor.global.js`** (para
+  `<script src>`, deja `window.Raptor`), generados por el build.
+- **`tools/test.mjs`** y `npm test`: 51 comprobaciones que ejecutan las páginas
+  generadas en un Chromium real (SwiftShader, sin GPU). Si Playwright no está
+  instalado lo dice y sale con 0 en vez de romper el checkout.
+
+### Cambiado
+- **El build sigue los `import`, no una lista.** `tools/build-standalone.mjs` pasa
+  a ser **`tools/build.mjs`**: lee el grafo de módulos desde cada entrada, los
+  ordena por dependencias y **falla** —diciendo qué dos archivos— si dos declaran
+  el mismo nombre de nivel superior. Las páginas generadas son un `<script>`
+  plano, donde eso es un `SyntaxError` que deja la página en blanco (`const`,
+  `class`) o un solapamiento silencioso (`function`); las listas escritas a mano
+  hicieron que ocurriera más de una vez. Añadir un módulo a una demo es ahora
+  importarlo. También detecta ciclos y comprueba que cada nombre público existe
+  de verdad en el bundle.
+- **Las cinco demos pasan por el framework.** `el()` estaba copiado literalmente
+  en cuatro archivos, `kv()` en tres, `slider()` en tres, el arranque en cuatro y
+  el conjunto de teclas pulsadas en tres; las demos sumaban 2682 líneas frente a
+  2709 del motor. Ahora suman **2344** y ninguna vuelve a escribir ese armazón.
+  `components/main.js` se convierte en el hola-mundo del framework.
+- **Teclas mantenidas en lugar de eventos repetidos**: las flechas del demo de
+  blindaje y la torreta manual (Q/E) de la batalla se leen del estado del teclado
+  en cada frame, así que giran a velocidad constante en grados por segundo en vez
+  de depender de la configuración de repetición del sistema — y no hay forma de
+  que se queden girando.
+- **`RaptorEngine`** gana `stop()` y `running`, y `start()` es idempotente (dos
+  bucles duplicarían cada delta). Al reanudar se descarta la marca de tiempo, de
+  modo que el frame siguiente a una pausa recibe `dt = 0` y no todo el rato que
+  estuviste fuera. `createWindow(mount, { width, height })` acepta el tamaño.
+- `.github/workflows/deploy.yml` construye con `tools/build.mjs`, así que un
+  despliegue ya no puede salir con una página en blanco por nombres duplicados.
+
 ## [Sin publicar] - 2026-07-22
 
 ### Añadido (Banco de pruebas: motor y caja)

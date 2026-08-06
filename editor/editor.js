@@ -6,7 +6,8 @@
 // run the simulation: dynamic bodies fall (if gravity is on), collide and bounce
 // off each other, static bodies and the world bounds.
 
-import RaptorEngine from "../components/raptorEngine.js";
+import App from "../components/app.js";
+import { el, slider, select, card, button } from "../components/ui/index.js";
 import { Rectangle, Square, Triangle, Circle, RegularPolygon } from "../components/shapes/index.js";
 import { World, Body, STATIC, DYNAMIC } from "../components/physics/index.js";
 
@@ -16,37 +17,18 @@ const GRAVITY_Y = -6;
 
 // --- Styles -----------------------------------------------------------------
 
+// Only the editor's own chrome. The page layout, cards, rows, sliders and
+// buttons all come from the framework (components/ui/).
 const STYLES = `
-    * { box-sizing: border-box; }
-    body {
-        margin: 0;
-        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-        color: #e6e6e6;
-        background: #1b1d21;
-    }
-    #editor { display: flex; gap: 16px; padding: 16px; align-items: flex-start; flex-wrap: wrap; }
-    #stage { background: #000; border-radius: 8px; overflow: hidden; box-shadow: 0 6px 24px rgba(0,0,0,.4); }
-    #stage canvas { display: block; max-width: 100%; height: auto; }
-    #panel { width: 300px; display: flex; flex-direction: column; gap: 18px; }
-    h1 { font-size: 18px; margin: 0 0 4px; }
-    h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #9aa0a6; margin: 0 0 10px; }
-    .card { background: #26292e; border: 1px solid #33373d; border-radius: 8px; padding: 12px; }
+    #panel { gap: 18px; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    button {
-        cursor: pointer; border: 1px solid #3a3f45; background: #2f343a; color: #e6e6e6;
-        border-radius: 6px; padding: 8px 10px; font-size: 13px;
-    }
-    button:hover { background: #3a4047; }
     button.primary { border-color: #3a5bbf; background: #35507f; }
     button.primary:hover { background: #3d5f96; }
-    button.danger { border-color: #6b2f2f; background: #3a2626; width: 100%; }
+    button.danger { border-color: #6b2f2f; background: #3a2626; }
     button.danger:hover { background: #4a2c2c; }
-    .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
-    .row label { width: 78px; font-size: 12px; color: #b9bfc6; }
-    .row input[type=range] { flex: 1; min-width: 0; }
+    .row label { width: 78px; }
     .row input[type=color] { width: 44px; height: 26px; padding: 0; border: none; background: none; }
-    .row select { flex: 1; min-width: 0; background: #2f343a; color: #e6e6e6; border: 1px solid #3a3f45; border-radius: 6px; padding: 6px; }
-    .row .val { width: 42px; text-align: right; font-variant-numeric: tabular-nums; font-size: 12px; color: #9aa0a6; }
+    .row .val { width: 42px; }
     #list { display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow: auto; }
     .item {
         display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 6px;
@@ -74,37 +56,11 @@ function rgb01ToHex({ red, green, blue }) {
     return `#${h(red)}${h(green)}${h(blue)}`;
 }
 
-function el(tag, props = {}, children = []) {
-    const node = Object.assign(document.createElement(tag), props);
-    for (const child of children) node.append(child);
-    return node;
-}
-
-function slider(labelText, min, max, step, apply) {
-    const input = el("input", { type: "range", min, max, step });
-    const val = el("span", { className: "val" });
-    input.oninput = () => { val.textContent = (+input.value).toFixed(2); apply(+input.value); };
-    const row = el("div", { className: "row" }, [el("label", { textContent: labelText }), input, val]);
-    return { row, input, val };
-}
-
-function select(labelText, options, apply) {
-    const node = el("select");
-    for (const [value, text] of options) node.append(el("option", { value: String(value), textContent: text }));
-    node.onchange = () => apply(node.value);
-    const row = el("div", { className: "row" }, [el("label", { textContent: labelText }), node]);
-    return { row, node };
-}
-
 // --- Editor -----------------------------------------------------------------
 
-function startEditor() {
-    document.head.append(el("style", { textContent: STYLES }));
-
-    const game = new RaptorEngine();
-    const stage = el("div", { id: "stage" });
-    game.createWindow(stage);
-    const gl = game.context;
+App.boot({ title: "Raptor Editor", styles: STYLES, touch: false, keyboard: false }, (app) => {
+    const { gl } = app;
+    const game = app;
 
     const world = new World({ gravity: { x: 0, y: 0 }, bounds: BOUNDS, linearDamping: 0.05 });
 
@@ -112,7 +68,7 @@ function startEditor() {
     let snapshot = null; // captured transforms to restore on reset
 
     // Physics stepping is driven by the engine loop but only while playing.
-    game.addUpdater((dt) => { if (playing) world.step(dt); });
+    app.onUpdate((dt) => { if (playing) world.step(dt); });
 
     const FACTORIES = {
         "Rectángulo": () => new Rectangle(gl, { width: 1.2, height: 0.8 }),
@@ -129,26 +85,26 @@ function startEditor() {
     const color = el("input", { type: "color", value: "#ffffff" });
     color.oninput = () => selected && selected.setColor({ ...hexToRgb01(color.value), alpha: 1 });
 
-    const posX = slider("Posición X", -3, 3, 0.05, (v) => selected && selected.setPosition({ x: v }));
-    const posY = slider("Posición Y", -2.5, 2.5, 0.05, (v) => selected && selected.setPosition({ y: v }));
-    const rot = slider("Rotación", 0, 360, 1, (v) => selected && selected.setRotation(v));
-    const scale = slider("Escala", 0.1, 3, 0.05, (v) => selected && selected.setScale({ x: v, y: v }));
+    const posX = slider("Posición X", { min: -3, max: 3, step: 0.05, value: -3, apply: (v) => selected && selected.setPosition({ x: v }), format: (v) => v.toFixed(2) });
+    const posY = slider("Posición Y", { min: -2.5, max: 2.5, step: 0.05, value: -2.5, apply: (v) => selected && selected.setPosition({ y: v }), format: (v) => v.toFixed(2) });
+    const rot = slider("Rotación", { min: 0, max: 360, step: 1, value: 0, apply: (v) => selected && selected.setRotation(v), format: (v) => v.toFixed(2) });
+    const scale = slider("Escala", { min: 0.1, max: 3, step: 0.05, value: 0.1, apply: (v) => selected && selected.setScale({ x: v, y: v }), format: (v) => v.toFixed(2) });
 
     const bodyType = select("Cuerpo", [
         [DYNAMIC, "Dinámico (rigid)"],
         [STATIC, "Estático"],
         ["none", "Sin física"],
-    ], (v) => selected && setBodyType(entries.get(selected), v));
+    ], { apply: (v) => selected && setBodyType(entries.get(selected), v) });
 
     const group = select("Grupo", [
         [0, "Ninguno"],
         [-1, "Equipo 1 (se ignoran)"],
         [-2, "Equipo 2 (se ignoran)"],
-    ], (v) => { if (selected) entries.get(selected).body.groupIndex = parseInt(v, 10); });
+    ], { apply: (v) => { if (selected) entries.get(selected).body.groupIndex = parseInt(v, 10); } });
 
-    const bounce = slider("Rebote", 0, 1, 0.05, (v) => { if (selected) entries.get(selected).body.restitution = v; });
+    const bounce = slider("Rebote", { min: 0, max: 1, step: 0.05, value: 0, apply: (v) => { if (selected) entries.get(selected).body.restitution = v; }, format: (v) => v.toFixed(2) });
 
-    const delBtn = el("button", { className: "danger", textContent: "Eliminar forma", onclick: deleteSelected });
+    const delBtn = button("Eliminar forma", deleteSelected, { className: "danger" });
 
     const props = el("div", { id: "props", className: "disabled" }, [
         el("div", { className: "row" }, [el("label", { textContent: "Color" }), color]),
@@ -163,32 +119,21 @@ function startEditor() {
     list.append(emptyHint);
 
     // --- Add buttons ---
-    const addButtons = Object.keys(FACTORIES).map((name) =>
-        el("button", { textContent: name, onclick: () => addShape(name) })
-    );
+    const addButtons = Object.keys(FACTORIES).map((name) => button(name, () => addShape(name)));
 
     // --- Simulation controls ---
-    const playBtn = el("button", { className: "primary", textContent: "▶ Play", onclick: togglePlay });
-    const resetBtn = el("button", { textContent: "↺ Reiniciar", onclick: reset });
+    const playBtn = button("▶ Play", togglePlay, { className: "primary" });
+    const resetBtn = button("↺ Reiniciar", reset);
     const gravityChk = el("input", { type: "checkbox" });
     gravityChk.onchange = () => { world.gravity.y = gravityChk.checked ? GRAVITY_Y : 0; };
     const gravityRow = el("label", { className: "row" }, [gravityChk, el("span", { textContent: "Gravedad" })]);
 
-    const panel = el("div", { id: "panel" }, [
-        el("h1", { textContent: "Raptor Editor" }),
-        el("div", { className: "card" }, [
-            el("h2", { textContent: "Simulación" }),
-            el("div", { className: "grid" }, [playBtn, resetBtn]),
-            gravityRow,
-        ]),
-        el("div", { className: "card" }, [el("h2", { textContent: "Añadir" }), el("div", { className: "grid" }, addButtons)]),
-        el("div", { className: "card" }, [el("h2", { textContent: "Escena" }), list]),
-        el("div", { className: "card" }, [el("h2", { textContent: "Propiedades" }), props]),
-    ]);
-
-    document.body.append(el("div", { id: "editor" }, [stage, panel]));
-
-    game.start();
+    app.addPanel(
+        card("Simulación", [el("div", { className: "grid" }, [playBtn, resetBtn]), gravityRow]),
+        card("Añadir", [el("div", { className: "grid" }, addButtons)]),
+        card("Escena", [list]),
+        card("Propiedades", [props]),
+    );
 
     // Debug handle (useful from the console or automated tests).
     window.raptorEditor = { game, world, entries };
@@ -286,14 +231,7 @@ function startEditor() {
         }
     }
 
-    function setSlider(s, value) {
-        s.input.value = value;
-        s.val.textContent = (+value).toFixed(2);
+    function setSlider(control, value) {
+        control.set(value);
     }
-}
-
-if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", startEditor);
-} else {
-    startEditor();
-}
+});
