@@ -3,10 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Raptor Editor</title>
+    <title>Raptor — Carga de assets</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/ui/loadingScreen.js, components/scenes/sceneManager.js, components/input/keyboard.js, components/input/touchpad.js, components/render/texture.js, components/assets/assets.js, components/app.js, components/ui/index.js, components/render/shaders.js, components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/shapes/sprite.js, components/shapes/index.js, components/physics/body.js, components/physics/collision.js, components/physics/world.js, components/physics/index.js, editor/editor.js + vendor/gl-matrix-min.js
+        Source: components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/ui/loadingScreen.js, components/scenes/sceneManager.js, components/input/keyboard.js, components/input/touchpad.js, components/render/texture.js, components/assets/assets.js, components/app.js, components/ui/index.js, components/render/shaders.js, components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/shapes/sprite.js, components/shapes/index.js, components/render/spriteSheet.js, components/render/index.js, components/physics/body.js, components/physics/collision.js, components/physics/world.js, components/physics/index.js, components/input/index.js, components/audio/engineSound.js, components/audio/index.js, components/assets/index.js, components/scenes/scene.js, components/scenes/index.js, components/controls/tankController.js, components/controls/tankAI.js, components/controls/gearbox.js, components/controls/autoAim.js, components/controls/index.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/armor.js, components/weapons/index.js, components/vehicles/tank.js, components/vehicles/engine.js, components/vehicles/index.js, components/index.js, assets/assetsDemo.js + vendor/gl-matrix-min.js
         Regenerate with: node tools/build.mjs
         This file is fully self-contained: open it directly in any browser.
     -->
@@ -2350,6 +2350,152 @@ class Sprite extends Shape {
 // ===== components/shapes/index.js =====
 // Convenience barrel for every shape primitive the engine ships with.
 
+// ===== components/render/spriteSheet.js =====
+// Slicing a texture into frames, and playing them back.
+//
+// A sheet is a grid: every frame the same size, optionally with a margin around
+// the edge and spacing between cells (exporters add those to stop neighbouring
+// frames bleeding into each other when filtering is on).
+//
+//     const sheet = new SpriteSheet(texture, { frameWidth: 16, frameHeight: 16 });
+//     sheet.frame(0)            // by index, left to right then down
+//     sheet.frame(2, 1)         // by column and row
+//     sheet.range(0, 3)         // [0,1,2,3] as frame rectangles
+//
+// An Animation is a list of those rectangles plus a frame rate. It holds *time*,
+// not a frame counter, so playback speed does not depend on the refresh rate:
+// at 8 fps a walk cycle takes the same wall-clock time at 30 Hz and at 144 Hz.
+
+class SpriteSheet {
+    constructor(texture, { frameWidth, frameHeight, margin = 0, spacing = 0 } = {}) {
+        this.texture = texture;
+        this.frameWidth = frameWidth;
+        this.frameHeight = frameHeight;
+        this.margin = margin;
+        this.spacing = spacing;
+    }
+
+    get columns() {
+        const usable = (this.texture.width - this.margin * 2) + this.spacing;
+        return Math.max(1, Math.floor(usable / (this.frameWidth + this.spacing)));
+    }
+
+    get rows() {
+        const usable = (this.texture.height - this.margin * 2) + this.spacing;
+        return Math.max(1, Math.floor(usable / (this.frameHeight + this.spacing)));
+    }
+
+    get count() {
+        return this.columns * this.rows;
+    }
+
+    // `frame(i)` walks the grid in reading order; `frame(col, row)` is explicit.
+    frame(a, b = null) {
+        const [col, row] = b === null ? [a % this.columns, Math.floor(a / this.columns)] : [a, b];
+        return {
+            x: this.margin + col * (this.frameWidth + this.spacing),
+            y: this.margin + row * (this.frameHeight + this.spacing),
+            width: this.frameWidth,
+            height: this.frameHeight,
+        };
+    }
+
+    // Inclusive range of indices, as frame rectangles — the usual way to say
+    // "frames 4 through 7 are the walk cycle".
+    range(from, to) {
+        const frames = [];
+        for (let i = from; i <= to; i++) frames.push(this.frame(i));
+        return frames;
+    }
+
+    // Convenience: build an Animation straight from indices.
+    animation(from, to, options = {}) {
+        return new Animation(this.range(from, to), options);
+    }
+}
+
+class Animation {
+    constructor(frames, { fps = 8, loop = true, onEnd = null } = {}) {
+        this.frames = frames;
+        this.fps = fps;
+        this.loop = loop;
+        this.onEnd = onEnd;
+        this.time = 0;
+        this.index = 0;
+        this.finished = false;
+    }
+
+    get frame() {
+        return this.frames[this.index];
+    }
+
+    reset() {
+        this.time = 0;
+        this.index = 0;
+        this.finished = false;
+        return this;
+    }
+
+    // Advances by dt seconds and returns true if the frame changed, so callers
+    // only touch the GPU when there is something new to show.
+    update(dt) {
+        if (this.finished || this.frames.length < 2) return false;
+        const previous = this.index;
+        this.time += dt;
+
+        const step = 1 / this.fps;
+        while (this.time >= step) {
+            this.time -= step;
+            if (this.index + 1 < this.frames.length) {
+                this.index++;
+            } else if (this.loop) {
+                this.index = 0;
+            } else {
+                this.finished = true;
+                if (this.onEnd) this.onEnd(this);
+                break;
+            }
+        }
+        return this.index !== previous;
+    }
+}
+
+// Drives a Sprite from named animations, which is the shape gameplay code
+// actually wants: `animator.play("walk")`, not a frame index.
+class Animator {
+    constructor(sprite, animations = {}, { initial = null } = {}) {
+        this.sprite = sprite;
+        this.animations = animations;
+        this.current = null;
+        this.name = null;
+        const first = initial || Object.keys(animations)[0];
+        if (first) this.play(first);
+    }
+
+    // Replaying the animation that is already running is a no-op, so calling
+    // `play("walk")` every frame while a key is held does not reset it to frame
+    // zero forever — the mistake that makes a character look frozen mid-stride.
+    play(name, { restart = false } = {}) {
+        if (this.name === name && !restart) return this;
+        const animation = this.animations[name];
+        if (!animation) return this;
+        this.name = name;
+        this.current = animation.reset();
+        this.sprite.setFrame(animation.frame);
+        return this;
+    }
+
+    update(dt) {
+        if (this.current && this.current.update(dt)) {
+            this.sprite.setFrame(this.current.frame);
+        }
+        return this;
+    }
+}
+
+// ===== components/render/index.js =====
+// Barrel for the render layer.
+
 // ===== components/physics/body.js =====
 // A physics body attached to a shape. The shape remains the source of truth for
 // the transform (position/rotation/scale); the body adds the dynamics on top:
@@ -2747,240 +2893,2195 @@ class World {
 // ===== components/physics/index.js =====
 // Barrel for the physics layer.
 
-// ===== editor/editor.js =====
-// Basic visual editor for RaptorEngine, with a physics layer.
+// ===== components/input/index.js =====
+// Barrel for the input layer.
+
+// ===== components/audio/engineSound.js =====
+// Engine note, synthesised from revs. No audio files: the pages are
+// self-contained and open from file://, so everything is built with Web Audio.
 //
-// It renders the engine canvas next to a control panel. You can add shapes,
-// select them from the scene list and edit their color, position, rotation,
-// scale and physics (body type, collision group, restitution). Press Play to
-// run the simulation: dynamic bodies fall (if gravity is on), collide and bounce
-// off each other, static bodies and the world bounds.
+// An engine's pitch is its *firing frequency* — how often a cylinder fires:
+//
+//   f = rpm / 60 · cilindros / 2        (four-stroke: one bang every two turns)
+//
+// For a four-cylinder that is rpm/30, so 800 rpm ≈ 27 Hz and 6800 rpm ≈ 227 Hz.
+// Those fundamentals are too low for a phone speaker on their own, which is why
+// the note is stacked from several sawtooth partials — the harmonics are what
+// you actually hear. A touch of filtered noise adds the intake/exhaust rasp, and
+// a lowpass that opens with load is what makes the difference between a distant
+// hum and something under full throttle.
+//
+// Browsers refuse to start audio without a user gesture, so `start()` has to be
+// called from a click or a tap. Everything degrades to a no-op if Web Audio is
+// missing, so callers never need to guard.
 
+const PARTIALS = [
+    { mul: 1, gain: 0.55, type: "sawtooth" },
+    { mul: 2, gain: 0.32, type: "sawtooth", detune: 6 },
+    { mul: 3, gain: 0.18, type: "sawtooth", detune: -8 },
+    { mul: 0.5, gain: 0.30, type: "square" }, // the rumble underneath
+];
 
+const SMOOTH = 0.05; // seconds — how fast parameters chase their target
 
-
-// Visible world area at the default camera depth (used as physics bounds).
-const BOUNDS = { minX: -3.2, maxX: 3.2, minY: -2.4, maxY: 2.4 };
-const GRAVITY_Y = -6;
-
-// --- Styles -----------------------------------------------------------------
-
-// Only the editor's own chrome. The page layout, cards, rows, sliders and
-// buttons all come from the framework (components/ui/).
-const STYLES = `
-    #panel { gap: 18px; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    button.primary { border-color: #3a5bbf; background: #35507f; }
-    button.primary:hover { background: #3d5f96; }
-    button.danger { border-color: #6b2f2f; background: #3a2626; }
-    button.danger:hover { background: #4a2c2c; }
-    .row label { width: 78px; }
-    .row input[type=color] { width: 44px; height: 26px; padding: 0; border: none; background: none; }
-    .row .val { width: 42px; }
-    #list { display: flex; flex-direction: column; gap: 6px; max-height: 180px; overflow: auto; }
-    .item {
-        display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 6px;
-        background: #2f343a; border: 1px solid transparent; cursor: pointer; font-size: 13px;
+class EngineSound {
+    constructor({ cylinders = 4, strokes = 4, volume = 0.5 } = {}) {
+        this.cylinders = cylinders;
+        this.strokes = strokes;
+        this.volume = volume;
+        this.muted = false;
+        this.ctx = null;
+        this.nodes = null;
     }
-    .item:hover { background: #363c43; }
-    .item.selected { border-color: #5b8def; background: #2b3547; }
-    .swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(255,255,255,.2); flex: none; }
-    .empty { color: #7d838a; font-size: 13px; font-style: italic; }
-    #props.disabled { opacity: .4; pointer-events: none; }
+
+    get running() {
+        return !!this.ctx && this.ctx.state === "running";
+    }
+
+    // Firing frequency for a given engine speed, in Hz.
+    firingHz(rpm) {
+        return (rpm / 60) * (this.cylinders / (this.strokes / 2));
+    }
+
+    // Must be called from a user gesture. Safe to call again: it just resumes.
+    start() {
+        const AudioCtx = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
+        if (!AudioCtx) return false;
+        if (!this.ctx) {
+            try { this.ctx = new AudioCtx(); } catch { return false; }
+            this._build();
+        }
+        if (this.ctx.state === "suspended") this.ctx.resume();
+        return true;
+    }
+
+    _build() {
+        const ctx = this.ctx;
+
+        const master = ctx.createGain();
+        master.gain.value = 0;
+        master.connect(ctx.destination);
+
+        // One lowpass for the lot: opening it with load is most of the "effort".
+        const filter = ctx.createBiquadFilter();
+        filter.type = "lowpass";
+        filter.frequency.value = 500;
+        filter.Q.value = 0.9;
+        filter.connect(master);
+
+        const oscillators = PARTIALS.map((p) => {
+            const osc = ctx.createOscillator();
+            osc.type = p.type;
+            osc.frequency.value = 40;
+            if (p.detune) osc.detune.value = p.detune;
+            const gain = ctx.createGain();
+            gain.gain.value = p.gain;
+            osc.connect(gain).connect(filter);
+            osc.start();
+            return { osc, gain, mul: p.mul };
+        });
+
+        // Two seconds of white noise on a loop, band-passed into a rasp.
+        const frames = ctx.sampleRate * 2;
+        const buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < frames; i++) data[i] = Math.random() * 2 - 1;
+        const noise = ctx.createBufferSource();
+        noise.buffer = buffer;
+        noise.loop = true;
+        const noiseBand = ctx.createBiquadFilter();
+        noiseBand.type = "bandpass";
+        noiseBand.frequency.value = 900;
+        noiseBand.Q.value = 0.7;
+        const noiseGain = ctx.createGain();
+        noiseGain.gain.value = 0;
+        noise.connect(noiseBand).connect(noiseGain).connect(filter);
+        noise.start();
+
+        this.nodes = { master, filter, oscillators, noiseGain };
+    }
+
+    // Feed it the drivetrain each frame. `load` is 0..1 (throttle); `cut` mutes
+    // the drive for a moment, which is what a gearshift sounds like.
+    update({ rpm = 0, redlineRpm = 7000, load = 0, cut = false } = {}) {
+        if (!this.nodes || !this.ctx) return;
+        const { master, filter, oscillators, noiseGain } = this.nodes;
+        const now = this.ctx.currentTime;
+        const revs = Math.max(0, Math.min(1, rpm / redlineRpm));
+        const base = Math.max(12, this.firingHz(rpm));
+
+        for (const { osc, mul } of oscillators) {
+            osc.frequency.setTargetAtTime(base * mul, now, SMOOTH);
+        }
+
+        // Louder with revs and throttle; a shift drops it out entirely.
+        const level = this.muted || cut ? 0 : this.volume * (0.09 + 0.16 * load + 0.1 * revs);
+        master.gain.setTargetAtTime(level, now, SMOOTH);
+
+        // The filter opening under load is what sells the effort.
+        filter.frequency.setTargetAtTime(320 + 2600 * revs * (0.45 + 0.55 * load), now, SMOOTH);
+        noiseGain.gain.setTargetAtTime(this.muted || cut ? 0 : 0.05 + 0.12 * load * revs, now, SMOOTH);
+    }
+
+    // Muting takes effect at once; unmuting is left to the next `update()`,
+    // which is the only thing that knows what the level should be.
+    setMuted(muted) {
+        this.muted = muted;
+        if (muted && this.nodes && this.ctx) {
+            this.nodes.master.gain.setTargetAtTime(0, this.ctx.currentTime, SMOOTH);
+            this.nodes.noiseGain.gain.setTargetAtTime(0, this.ctx.currentTime, SMOOTH);
+        }
+        return this;
+    }
+
+    toggleMuted() {
+        return this.setMuted(!this.muted);
+    }
+
+    stop() {
+        if (!this.ctx) return;
+        this.ctx.close();
+        this.ctx = null;
+        this.nodes = null;
+    }
+}
+
+// ===== components/audio/index.js =====
+// Barrel for the audio layer.
+
+// ===== components/assets/index.js =====
+// Barrel for the assets layer.
+
+// ===== components/scenes/scene.js =====
+// A scene: one self-contained screen of a game.
+//
+// Until now a Raptor page *was* a game — one setup function, one world, and no
+// way to get from a menu to a match to a game-over. A Scene is that missing
+// unit: it builds itself when entered and takes itself apart when left.
+//
+//     class Menu extends Scene {
+//         enter() {
+//             this.add(new Sprite(this.gl, { texture: this.assets.texture("logo") }).init());
+//             this.onKey("Enter", () => this.go("juego"));
+//         }
+//     }
+//
+// The part that matters is the taking apart. Everything a scene creates has to
+// be undone on the way out — entities, per-frame callbacks, key bindings, DOM
+// overlays — and forgetting any one of them is a leak you notice three scene
+// changes later, when the menu music is still playing over the boss fight and
+// the old update loop is still moving a player who no longer exists.
+//
+// So a Scene does not let you register those things directly. `this.add`,
+// `this.onUpdate`, `this.onKey` and `this.overlay` each record what they did,
+// and leaving undoes all of it. If you reach past them to `app.onUpdate`, you
+// own the cleanup — which is exactly the trade you should have to make on
+// purpose rather than by accident.
+
+class Scene {
+    constructor(name = "escena") {
+        this.name = name;
+        this.app = null;        // set by the SceneManager on the way in
+        this.manager = null;
+        this.active = false;
+
+        this._entities = [];
+        this._updaters = [];
+        this._keys = [];
+        this._overlays = [];
+        this._panels = [];
+    }
+
+    // --- Hooks a subclass overrides ---------------------------------------
+
+    // Declare assets this scene needs. Called once, before the first enter, so
+    // a menu can start instantly while the level's art loads on the way in.
+    preload() {}
+
+    // Build the scene. `data` is whatever the previous scene passed to `go()`.
+    enter() {}
+
+    // Per frame, in seconds. Registered and unregistered for you.
+    update() {}
+
+    // Extra teardown, for anything the recording helpers do not cover — a timer
+    // you started, a sound you are playing.
+    exit() {}
+
+    // --- What a scene reaches for ------------------------------------------
+
+    get gl() { return this.app.gl; }
+    get assets() { return this.app.assets; }
+    get camera() { return this.app.camera; }
+    get keyboard() { return this.app.keyboard; }
+    get touch() { return this.app.touch; }
+    get stage() { return this.app.stage; }
+
+    // Adds a drawable, and remembers to remove it.
+    add(entity) {
+        this._entities.push(entity);
+        return this.app.add(entity);
+    }
+
+    remove(entity) {
+        const index = this._entities.indexOf(entity);
+        if (index !== -1) this._entities.splice(index, 1);
+        this.app.remove(entity);
+        return this;
+    }
+
+    // An extra per-frame callback, on top of `update()`.
+    onUpdate(fn) {
+        this._updaters.push(fn);
+        this.app.onUpdate(fn);
+        return fn;
+    }
+
+    // A one-shot key action, unbound when the scene leaves.
+    onKey(keys, handler) {
+        for (const key of [].concat(keys)) {
+            this.keyboard.on(key, handler);
+            this._keys.push([key, handler]);
+        }
+        return this;
+    }
+
+    // A DOM node over the canvas: a title screen, a HUD, a banner.
+    overlay(node) {
+        this._overlays.push(node);
+        this.app.addOverlay(node);
+        return node;
+    }
+
+    // A card in the side panel, if the page has one.
+    panel(node) {
+        this._panels.push(node);
+        this.app.addPanel(node);
+        return node;
+    }
+
+    // Leaves for another scene. `data` is handed to its `enter()`.
+    go(name, data) {
+        return this.manager.go(name, data);
+    }
+
+    // --- Lifecycle, driven by the manager ---------------------------------
+
+    _enter(app, manager, data) {
+        this.app = app;
+        this.manager = manager;
+        this.active = true;
+        this._boundUpdate = (dt) => { if (this.active) this.update(dt); };
+        this.app.onUpdate(this._boundUpdate);
+        this._updaters.push(this._boundUpdate);
+        this.enter(data);
+        return this;
+    }
+
+    _exit() {
+        this.active = false;
+        // The subclass gets to run first, while its things still exist.
+        this.exit();
+        for (const entity of this._entities) this.app.remove(entity);
+        for (const fn of this._updaters) this.app.removeUpdate(fn);
+        for (const [key, handler] of this._keys) this.keyboard.off(key, handler);
+        for (const node of this._overlays) node.remove();
+        for (const node of this._panels) node.remove();
+        this._entities = [];
+        this._updaters = [];
+        this._keys = [];
+        this._overlays = [];
+        this._panels = [];
+        return this;
+    }
+}
+
+// ===== components/scenes/index.js =====
+// Barrel for the scenes layer.
+
+// ===== components/controls/tankController.js =====
+// Tank-style movement for any shape.
+//
+// Drives a shape like a tracked vehicle: throttle accelerates it forward/back
+// along the way it is facing, and steering rotates the hull in place (tanks can
+// neutral-steer). Coasting bleeds speed off with friction, so it stops shortly
+// after you let go — that heavy, planted feel a car controller wouldn't have.
+//
+// It is input-agnostic. Feed it `setInput({ forward, turn })` each frame from
+// whatever you like, or use the built-in bindings that both drive the same set
+// of held directions:
+//   - `bindKeys()`  — WASD + arrow keys (desktop)
+//   - `bindTouch()` — on-screen buttons via pointer events (touch / mouse)
+// `update(dt)` moves the shape.
+//
+// Facing follows the engine's convention: rotation is CCW degrees and local +Y
+// is "forward", so at rotation 0 the shape drives up the screen.
+
+class TankController {
+    constructor(shape, {
+        accel = 5,           // forward acceleration (world units / s²)
+        maxSpeed = 3,        // top forward speed (world units / s)
+        reverseFactor = 0.5, // reverse is weaker and slower, like real tracks
+        friction = 5,        // how hard it decelerates while coasting
+        turnSpeed = 140,     // steering rate (degrees / s)
+        bounds = null,       // optional { minX, maxX, minY, maxY } to stay inside
+        gearbox = null,      // optional Gearbox; without one the drive is flat
+    } = {}) {
+        this.shape = shape;
+        this.accel = accel;
+        this.maxSpeed = maxSpeed;
+        this.reverseFactor = reverseFactor;
+        this.friction = friction;
+        this.turnSpeed = turnSpeed;
+        this.bounds = bounds;
+
+        // The gearbox needs to know the vehicle's top speed to size its gears.
+        this.gearbox = gearbox;
+        if (gearbox) gearbox.maxSpeed = maxSpeed;
+
+        this.speed = 0;                       // signed scalar along the heading
+        this.input = { forward: 0, turn: 0 }; // each clamped to [-1, 1]
+
+        // Directions currently held down, from any input source. Keyboard and
+        // touch both toggle these, so combining sources "just works".
+        this._held = { forward: false, back: false, left: false, right: false };
+        this._unbindKeys = null;
+        this._unbindTouch = null;
+    }
+
+    // Heading in radians (from the shape's rotation).
+    get heading() {
+        return (this.shape.rotation * Math.PI) / 180;
+    }
+
+    // Unit vector the tank is facing (local +Y rotated by the heading).
+    get forward() {
+        const h = this.heading;
+        return { x: -Math.sin(h), y: Math.cos(h) };
+    }
+
+    // Current world velocity (forward * speed), handy for cameras or collisions.
+    get velocity() {
+        const f = this.forward;
+        return { x: f.x * this.speed, y: f.y * this.speed };
+    }
+
+    // forward/turn in [-1, 1]. Only the given fields change.
+    setInput({ forward = this.input.forward, turn = this.input.turn } = {}) {
+        this.input.forward = Math.max(-1, Math.min(1, forward));
+        this.input.turn = Math.max(-1, Math.min(1, turn));
+        return this;
+    }
+
+    // Presses/releases a logical direction ("forward" | "back" | "left" |
+    // "right"). Any input source can call this; it recomputes setInput.
+    hold(dir, on) {
+        if (!(dir in this._held)) return this;
+        this._held[dir] = !!on;
+        const forward = (this._held.forward ? 1 : 0) - (this._held.back ? 1 : 0);
+        const turn = (this._held.left ? 1 : 0) - (this._held.right ? 1 : 0);
+        return this.setInput({ forward, turn });
+    }
+
+    // Bleeds speed toward zero at `rate` without overshooting past it.
+    _slow(rate, dt) {
+        const drop = rate * dt;
+        this.speed = Math.abs(this.speed) <= drop ? 0 : this.speed - Math.sign(this.speed) * drop;
+    }
+
+    update(dt) {
+        // Steer: rotate the hull. Independent of speed so it can pivot on the spot.
+        this.shape.rotation += this.input.turn * this.turnSpeed * dt;
+
+        const throttle = this.input.forward;
+
+        if (this.gearbox) {
+            // With a gearbox the drive comes from the selected gear: how hard it
+            // pulls (torque) and how fast it can go (the gear's speed limit).
+            const gb = this.gearbox;
+            gb.update(dt, { speed: this.speed, throttle });
+            const dir = gb.direction;
+
+            if (throttle !== 0 && dir !== 0 && Math.sign(throttle) === dir) {
+                this.speed += this.accel * gb.torque * dir * dt;
+            } else if (throttle !== 0 && dir !== 0) {
+                // Asking to go the other way to the selected gear is braking.
+                this._slow(this.friction * 2.2, dt);
+            } else {
+                this._slow(this.friction, dt);
+            }
+
+            const limit = gb.speedLimit;
+            this.speed = Math.max(-limit, Math.min(limit, this.speed));
+        } else if (throttle !== 0) {
+            // Flat drive: reverse pulls with less force than forward.
+            const gain = throttle > 0 ? 1 : this.reverseFactor;
+            this.speed += this.accel * gain * throttle * dt;
+            this.speed = Math.max(-this.maxSpeed * this.reverseFactor, Math.min(this.maxSpeed, this.speed));
+        } else {
+            this._slow(this.friction, dt);
+            this.speed = Math.max(-this.maxSpeed * this.reverseFactor, Math.min(this.maxSpeed, this.speed));
+        }
+
+        // Advance along the heading.
+        const f = this.forward;
+        let x = this.shape.position.x + f.x * this.speed * dt;
+        let y = this.shape.position.y + f.y * this.speed * dt;
+
+        if (this.bounds) {
+            const b = this.bounds;
+            const cx = Math.max(b.minX, Math.min(b.maxX, x));
+            const cy = Math.max(b.minY, Math.min(b.maxY, y));
+            // Bumping a wall scrubs off most of the speed instead of gluing to it.
+            if (cx !== x || cy !== y) this.speed *= 0.3;
+            x = cx;
+            y = cy;
+        }
+
+        this.shape.setPosition({ x, y });
+        return this;
+    }
+
+    // Binds WASD + arrow keys on `target` (default: window). W/↑ and S/↓ drive,
+    // A/← and D/→ steer. Returns an unbind function; also stored for unbind().
+    bindKeys(target = window) {
+        const map = {
+            w: "forward", ArrowUp: "forward",
+            s: "back", ArrowDown: "back",
+            a: "left", ArrowLeft: "left",
+            d: "right", ArrowRight: "right",
+        };
+        const keyOf = (e) => (e.key.length === 1 ? e.key.toLowerCase() : e.key);
+        const onDown = (e) => {
+            const dir = map[keyOf(e)];
+            if (!dir) return;
+            e.preventDefault();
+            this.hold(dir, true);
+        };
+        const onUp = (e) => {
+            const dir = map[keyOf(e)];
+            if (dir) this.hold(dir, false);
+        };
+
+        target.addEventListener("keydown", onDown);
+        target.addEventListener("keyup", onUp);
+        if (this._unbindKeys) this._unbindKeys();
+        this._unbindKeys = () => {
+            target.removeEventListener("keydown", onDown);
+            target.removeEventListener("keyup", onUp);
+            this._unbindKeys = null;
+        };
+        return this._unbindKeys;
+    }
+
+    // Binds on-screen buttons for touch (and mouse) via pointer events. `buttons`
+    // maps a direction to a DOM element: { forward, back, left, right }; any
+    // subset is fine. Multi-touch works — hold two buttons to drive and turn at
+    // once. Returns an unbind function; also stored for unbind().
+    bindTouch(buttons = {}) {
+        const teardown = [];
+        for (const dir of Object.keys(buttons)) {
+            const node = buttons[dir];
+            if (!node || !(dir in this._held)) continue;
+
+            const press = (e) => {
+                e.preventDefault();
+                if (node.setPointerCapture && e.pointerId != null) {
+                    try { node.setPointerCapture(e.pointerId); } catch { /* older browsers */ }
+                }
+                this.hold(dir, true);
+            };
+            const release = () => this.hold(dir, false);
+
+            node.addEventListener("pointerdown", press);
+            node.addEventListener("pointerup", release);
+            node.addEventListener("pointercancel", release);
+            node.addEventListener("pointerleave", release);
+            // Keep touches from scrolling / selecting / zooming the page.
+            node.style.touchAction = "none";
+            node.style.userSelect = "none";
+
+            teardown.push(() => {
+                node.removeEventListener("pointerdown", press);
+                node.removeEventListener("pointerup", release);
+                node.removeEventListener("pointercancel", release);
+                node.removeEventListener("pointerleave", release);
+            });
+        }
+
+        if (this._unbindTouch) this._unbindTouch();
+        this._unbindTouch = () => {
+            for (const fn of teardown) fn();
+            this._unbindTouch = null;
+        };
+        return this._unbindTouch;
+    }
+
+    // Removes any keyboard and touch bindings installed above.
+    unbind() {
+        if (this._unbindKeys) this._unbindKeys();
+        if (this._unbindTouch) this._unbindTouch();
+        return this;
+    }
+}
+
+// ===== components/controls/tankAI.js =====
+// A finite state machine that drives an enemy tank.
+//
+// The AI never touches the engine or the weapons module: it reads the world,
+// writes throttle/steering into a TankController, aims the tank's turret, and
+// raises `wantsToFire` when it has a shot. Whoever owns the tank decides what
+// firing actually means, which keeps this file about behaviour only.
+//
+//   PATROL  wander between random waypoints, gun forward
+//   ADVANCE take the ground it was given (`objective`) and hold it — this is
+//           what replaces aimless patrolling once there is something to contest
+//     │  target within sight
+//     ▼
+//   CHASE   drive at the target, gun tracking it
+//     │  target within attack range          ▲ target slips out of range
+//     ▼                                      │
+//   ATTACK  hold the range, aim, fire when lined up
+//     │  health drops below the retreat threshold
+//     ▼
+//   RETREAT back away while still facing the threat, until it is far behind
+//
+// A tank that cannot make progress (nose against a wall) briefly reverses and
+// turns — without that, a stuck tank grinds forever and the FSM looks broken.
+
+const AI_STATE = {
+    PATROL: "patrol",
+    ADVANCE: "advance",
+    CHASE: "chase",
+    ATTACK: "attack",
+    RETREAT: "retreat",
+    DEAD: "dead",
+};
+
+// Readable Spanish labels, handy for HUDs.
+const AI_STATE_LABEL = {
+    patrol: "Patrulla",
+    advance: "Avanza",
+    chase: "Persigue",
+    attack: "Ataca",
+    retreat: "Se retira",
+    dead: "Destruido",
+};
+
+const DEG = 180 / Math.PI;
+
+// Shortest signed difference between two angles, in degrees, within (-180, 180].
+function angleDiff(from, to) {
+    return (((to - from + 180) % 360) + 360) % 360 - 180;
+}
+
+// Engine convention: local +Y is forward, so the angle whose (-sin, cos) points
+// from `a` to `b`.
+function angleToward(a, b) {
+    return Math.atan2(-(b.x - a.x), b.y - a.y) * DEG;
+}
+
+function distance(a, b) {
+    return Math.hypot(b.x - a.x, b.y - a.y);
+}
+
+class TankAI {
+    constructor(tank, driver, {
+        bounds,                 // { minX, maxX, minY, maxY } to wander inside
+        sightRange = 6.5,       // starts chasing a target this close
+        attackRange = 4.5,      // stops and shoots inside this
+        keepDistance = 0.55,    // backs off below attackRange * this
+        retreatAt = 0.3,        // retreats under this fraction of health
+        fireArc = 7,            // degrees of aim error it will still fire within
+        isBlocked = null,       // optional (from, to) => bool line-of-sight test
+        objective = null,       // optional ground to take and hold: { x, y }
+        objectiveRadius = 1.2,  // how close counts as "holding" it
+    } = {}) {
+        this.tank = tank;
+        this.driver = driver;
+        this.bounds = bounds;
+        this.sightRange = sightRange;
+        this.attackRange = attackRange;
+        this.keepDistance = keepDistance;
+        this.retreatAt = retreatAt;
+        this.fireArc = fireArc;
+        this.isBlocked = isBlocked;
+        this.objective = objective;
+        this.objectiveRadius = objectiveRadius;
+
+        this.state = AI_STATE.PATROL;
+        this.wantsToFire = false;
+        this.waypoint = this._randomWaypoint();
+
+        // Stuck detection.
+        this._lastPos = { x: tank.position.x, y: tank.position.y };
+        this._stuckFor = 0;
+        this._unstickFor = 0;
+    }
+
+    _randomWaypoint() {
+        const b = this.bounds;
+        if (!b) return { x: this.tank.position.x, y: this.tank.position.y };
+        return {
+            x: b.minX + Math.random() * (b.maxX - b.minX),
+            y: b.minY + Math.random() * (b.maxY - b.minY),
+        };
+    }
+
+    // Steering that turns the hull toward `heading` (degrees). It pivots on the
+    // spot when badly misaligned instead of driving a wide arc.
+    _turnToward(heading, forwardWhenAligned = 1) {
+        const diff = angleDiff(this.tank.rotation, heading);
+        return {
+            turn: Math.abs(diff) < 3 ? 0 : Math.sign(diff),
+            forward: Math.abs(diff) < 55 ? forwardWhenAligned : 0,
+        };
+    }
+
+    // Head for a point, nose first.
+    _driveTo(point) {
+        return this._turnToward(angleToward(this.tank.position, point));
+    }
+
+    // Give ground without turning your back: keep the hull facing the threat and
+    // reverse. Slower than fleeing, but it stays covered — used to hold range.
+    _backAwayFrom(point) {
+        const diff = angleDiff(this.tank.rotation, angleToward(this.tank.position, point));
+        return { turn: Math.abs(diff) < 3 ? 0 : Math.sign(diff), forward: -1 };
+    }
+
+    // Run: turn the hull away and drive forward (faster than reverse). The
+    // turret is independent, so the gun can still cover the retreat.
+    _fleeFrom(point) {
+        return this._turnToward(angleToward(point, this.tank.position));
+    }
+
+    // True when the gun is lined up on `point` closely enough to shoot.
+    _onTarget(point) {
+        return this.tank.aimErrorTo(point) <= this.fireArc;
+    }
+
+    _canSee(target) {
+        if (!this.isBlocked) return true;
+        return !this.isBlocked(this.tank.position, target.position);
+    }
+
+    // What it does with nobody to shoot at: take the ground it was given, or
+    // wander if it was given none.
+    get _idleState() {
+        return this.objective ? AI_STATE.ADVANCE : AI_STATE.PATROL;
+    }
+
+    // Picks the state for this frame from distance, health and visibility.
+    _transition(target, dist) {
+        if (!this.tank.alive) return AI_STATE.DEAD;
+        const idle = this._idleState;
+        if (!target || !target.alive) return idle;
+
+        // Wounded tanks disengage, whatever else is going on.
+        if (this.tank.hpRatio < this.retreatAt) {
+            return dist > this.sightRange ? idle : AI_STATE.RETREAT;
+        }
+
+        switch (this.state) {
+            case AI_STATE.PATROL:
+            case AI_STATE.ADVANCE:
+                return dist <= this.sightRange && this._canSee(target) ? AI_STATE.CHASE : idle;
+            case AI_STATE.CHASE:
+                if (dist > this.sightRange * 1.35) return idle;
+                return dist <= this.attackRange ? AI_STATE.ATTACK : AI_STATE.CHASE;
+            case AI_STATE.ATTACK:
+                return dist > this.attackRange * 1.25 ? AI_STATE.CHASE : AI_STATE.ATTACK;
+            case AI_STATE.RETREAT:
+                // Recovered range (health cannot go back up) — back to the job.
+                return dist > this.sightRange ? idle : AI_STATE.RETREAT;
+            default:
+                return idle;
+        }
+    }
+
+    // Runs one frame of behaviour. `target` is the tank it hunts (the player).
+    update(dt, target = null) {
+        this.wantsToFire = false;
+
+        if (!this.tank.alive) {
+            this.state = AI_STATE.DEAD;
+            this.driver.setInput({ forward: 0, turn: 0 });
+            return this;
+        }
+
+        const pos = this.tank.position;
+        const dist = target && target.alive ? distance(pos, target.position) : Infinity;
+        this.state = this._transition(target, dist);
+
+        // --- Nudge out of whatever it is grinding against. ---
+        const moved = distance(pos, this._lastPos);
+        this._lastPos = { x: pos.x, y: pos.y };
+        if (this._unstickFor > 0) {
+            this._unstickFor -= dt;
+            this.driver.setInput({ forward: -1, turn: 1 });
+            const idling = this.state === AI_STATE.PATROL || this.state === AI_STATE.ADVANCE;
+            if (!idling && target) this.tank.aimAt(target.position, dt);
+            return this;
+        }
+        if (this.driver.input.forward !== 0 && moved < 0.004) {
+            this._stuckFor += dt;
+            if (this._stuckFor > 0.7) {
+                this._stuckFor = 0;
+                this._unstickFor = 0.6;
+                this.waypoint = this._randomWaypoint();
+            }
+        } else {
+            this._stuckFor = 0;
+        }
+
+        // --- Act on the current state. ---
+        switch (this.state) {
+            case AI_STATE.PATROL: {
+                if (distance(pos, this.waypoint) < 0.6) this.waypoint = this._randomWaypoint();
+                this.driver.setInput(this._driveTo(this.waypoint));
+                // Gun rests forward while nothing is in sight.
+                this.tank.turnTurretTo(this.tank.rotation, dt);
+                break;
+            }
+
+            case AI_STATE.ADVANCE: {
+                // Head for the ground it was sent to, then sit on it and watch.
+                if (distance(pos, this.objective) > this.objectiveRadius) {
+                    this.driver.setInput(this._driveTo(this.objective));
+                } else {
+                    this.driver.setInput({ forward: 0, turn: 0 });
+                }
+                this.tank.turnTurretTo(this.tank.rotation, dt);
+                break;
+            }
+
+            case AI_STATE.CHASE: {
+                this.driver.setInput(this._driveTo(target.position));
+                this.tank.aimAt(target.position, dt);
+                break;
+            }
+
+            case AI_STATE.ATTACK: {
+                // Hold a firing distance: give ground when the target crowds it,
+                // otherwise stand still, face it and let the turret do the work.
+                const tooClose = dist < this.attackRange * this.keepDistance;
+                const steer = tooClose ? this._backAwayFrom(target.position) : this._driveTo(target.position);
+                this.driver.setInput({ forward: tooClose ? steer.forward : 0, turn: steer.turn });
+                this.tank.aimAt(target.position, dt);
+                this.wantsToFire = this._onTarget(target.position) && this._canSee(target);
+                break;
+            }
+
+            case AI_STATE.RETREAT: {
+                // Break contact, gun still trained on the threat.
+                this.driver.setInput(this._fleeFrom(target.position));
+                this.tank.aimAt(target.position, dt);
+                break;
+            }
+        }
+
+        return this;
+    }
+}
+
+// ===== components/controls/gearbox.js =====
+// A gearbox for the drivetrain: what turns a flat "hold W to accelerate" into
+// something that feels mechanical.
+//
+// Each forward gear reaches a fraction of the vehicle's top speed (`ratios`).
+// Short gears pull hard but run out of revs early; the top gear barely pulls but
+// is the only way to reach full speed. Engine revs (`rpm`, normalised 0..1) come
+// from how far into the current gear's speed band you are, and a torque curve
+// makes the engine bog down under load and taper off near the redline. Changing
+// gear cuts the drive for `shiftTime`, which is what you actually feel.
+//
+// Two modes:
+//   AUTO    shifts by itself on revs (with hysteresis so it does not hunt), and
+//           picks reverse when you ask to back up from a standstill.
+//   MANUAL  you pick the gear: R · N · 1 · 2 · … Leave it in too high a gear and
+//           it bogs; hold it too long and you bounce off the limiter.
+//
+// It knows nothing about input — a TankController feeds it the current speed and
+// throttle, and reads back `torque` and `speedLimit`.
+//
+// Given real gear ratios and an Engine it switches to a *mechanical* mode: revs
+// come from road speed through the drivetrain (`engineRpm`), and `wheelTorque` /
+// `wheelForce` say what actually reaches the ground, so a caller can integrate
+// real vehicle physics. Without them it keeps the light normalised model above.
+
+const GEARBOX_MODE = { AUTO: "auto", MANUAL: "manual" };
+
+// Revs below this count as "about to stall", above as "into the limiter".
+const TORQUE_PEAK = 0.65;   // revs where the engine pulls hardest
+const TORQUE_SPREAD = 1.7;  // how quickly torque falls away from the peak
+const TORQUE_FLOOR = 0.45;  // never less than this fraction of the gear's pull
+const STOPPED = 0.15;       // speed under which the vehicle counts as stopped
+// Inverse of the engine module's rad/s conversion, named apart from it: both
+// become globals in the standalone build and a clash there is fatal.
+const RPM_PER_RAD = 60 / (2 * Math.PI);
+
+class Gearbox {
+    constructor({
+        ratios = [0.3, 0.52, 0.75, 1.0], // fraction of top speed per forward gear
+        reverseRatio = 0.4,
+        maxSpeed = 3,          // vehicle top speed; the controller keeps this in sync
+        shiftTime = 0.25,      // seconds of cut drive while changing gear
+        upshiftAt = 0.88,      // revs that trigger an automatic upshift
+        downshiftAt = 0.35,    // revs that trigger an automatic downshift
+        mode = GEARBOX_MODE.AUTO,
+
+        // --- Mechanical mode (optional) -------------------------------------
+        // Give it real gear ratios and an Engine and it stops guessing: revs
+        // come from road speed through the drivetrain, and `wheelTorque` is what
+        // actually reaches the ground. `ratios` above is then unused.
+        engine = null,
+        gearRatios = null,     // e.g. [3.6, 2.1, 1.4, 1.0, 0.8]
+        reverseGearRatio = 3.2,
+        finalDrive = 3.9,
+        wheelRadius = 0.34,    // metres
+    } = {}) {
+        this.ratios = ratios;
+        this.reverseRatio = reverseRatio;
+        this.maxSpeed = maxSpeed;
+        this.engine = engine;
+        this.gearRatios = gearRatios;
+        this.reverseGearRatio = reverseGearRatio;
+        this.finalDrive = finalDrive;
+        this.wheelRadius = wheelRadius;
+        this.shiftTime = shiftTime;
+        this.upshiftAt = upshiftAt;
+        this.downshiftAt = downshiftAt;
+        this.mode = mode;
+
+        this.gear = 1;      // -1 reverse · 0 neutral · 1..N forward
+        this.speed = 0;     // last speed the controller reported
+        this._shiftFor = 0; // seconds left of the current gear change
+        this.shifts = 0;    // how many changes so far (handy for HUDs/tests)
+    }
+
+    // True when it is driven by a real engine and real ratios.
+    get mechanical() {
+        return !!(this.engine && this.gearRatios);
+    }
+
+    // Selectable gears in order, so manual shifting can walk the list.
+    get sequence() {
+        return [-1, 0, ...Array.from({ length: this.topGear }, (_, i) => i + 1)];
+    }
+
+    get topGear() {
+        return (this.mechanical ? this.gearRatios : this.ratios).length;
+    }
+
+    // Gear ratio actually turning the driveshaft (mechanical mode only).
+    get gearRatio() {
+        if (!this.mechanical || this.gear === 0) return 0;
+        return this.gear === -1 ? this.reverseGearRatio : this.gearRatios[this.gear - 1];
+    }
+
+    // Total reduction from crank to wheel.
+    get driveRatio() {
+        return this.gearRatio * this.finalDrive;
+    }
+
+    // Engine revs for the current road speed and gear. Idles when the clutch is
+    // out (neutral or mid-shift) or when the wheels are barely turning.
+    get engineRpm() {
+        if (!this.mechanical) return 0;
+        const { idleRpm, redlineRpm } = this.engine;
+        if (this.gear === 0) return idleRpm;
+        const wheelRadPerSec = Math.abs(this.speed) / this.wheelRadius;
+        const rpm = wheelRadPerSec * Math.abs(this.driveRatio) * RPM_PER_RAD;
+        return Math.max(idleRpm, Math.min(redlineRpm, rpm));
+    }
+
+    // Torque reaching the wheels, in N·m. Zero with the drive cut.
+    get wheelTorque() {
+        if (!this.mechanical || this.shifting || this.gear === 0) return 0;
+        return this.engine.torqueAt(this.engineRpm) * Math.abs(this.driveRatio);
+    }
+
+    // Tractive force at the contact patch, in newtons.
+    get wheelForce() {
+        return this.wheelTorque / this.wheelRadius;
+    }
+
+    // What the engine is making right now, for a readout.
+    get power() {
+        return this.mechanical ? this.engine.powerAt(this.engineRpm) : 0;
+    }
+
+    // Road speed the current gear tops out at (redline in that gear).
+    get gearTopSpeed() {
+        if (!this.mechanical || this.gear === 0) return Infinity;
+        return (this.engine.redlineRpm / RPM_PER_RAD) * this.wheelRadius / Math.abs(this.driveRatio);
+    }
+
+    get inReverse() {
+        return this.gear === -1;
+    }
+
+    get inNeutral() {
+        return this.gear === 0;
+    }
+
+    // Which way the current gear drives: +1 forward, -1 reverse, 0 in neutral.
+    get direction() {
+        return this.gear === 0 ? 0 : Math.sign(this.gear);
+    }
+
+    // Fraction of top speed the current gear can reach.
+    get ratio() {
+        if (this.gear === -1) return this.reverseRatio;
+        if (this.gear === 0) return 0;
+        return this.ratios[this.gear - 1];
+    }
+
+    // Fastest the vehicle can go in this gear. Neutral does not drive, but it
+    // must not brake either — coasting keeps whatever speed it had.
+    get speedLimit() {
+        if (this.mechanical) return this.gear === 0 ? Infinity : this.gearTopSpeed;
+        return this.gear === 0 ? this.maxSpeed : this.maxSpeed * this.ratio;
+    }
+
+    // Revs as a 0..1 fraction of the redline — what the shift logic and the
+    // tachometer both read, in either mode.
+    get rpm() {
+        if (this.mechanical) return this.engineRpm / this.engine.redlineRpm;
+        const limit = this.maxSpeed * this.ratio;
+        if (limit <= 0) return 0;
+        return Math.min(1, Math.abs(this.speed) / limit);
+    }
+
+    get shifting() {
+        return this._shiftFor > 0;
+    }
+
+    // Multiplier the controller applies to its acceleration. Zero while the
+    // drive is cut (mid-shift or in neutral).
+    get torque() {
+        if (this.shifting || this.gear === 0) return 0;
+        // Short gears multiply the pull; the top gear barely does.
+        const gearPull = 0.5 / this.ratio;
+        const off = this.rpm - TORQUE_PEAK;
+        const curve = Math.max(TORQUE_FLOOR, 1 - TORQUE_SPREAD * off * off);
+        return gearPull * curve;
+    }
+
+    // Readable gear for a HUD: "R", "N", "1", "2", ...
+    get label() {
+        if (this.gear === -1) return "R";
+        if (this.gear === 0) return "N";
+        return String(this.gear);
+    }
+
+    setMode(mode) {
+        this.mode = mode;
+        return this;
+    }
+
+    toggleMode() {
+        return this.setMode(this.mode === GEARBOX_MODE.AUTO ? GEARBOX_MODE.MANUAL : GEARBOX_MODE.AUTO);
+    }
+
+    // Engages a gear, cutting the drive while the change happens.
+    shiftTo(gear) {
+        const target = Math.max(-1, Math.min(this.topGear, gear));
+        if (target === this.gear || this.shifting) return this;
+        this.gear = target;
+        this._shiftFor = this.shiftTime;
+        this.shifts++;
+        return this;
+    }
+
+    // Manual shifting: step through R · N · 1 · 2 · …
+    shiftUp() {
+        const seq = this.sequence;
+        const i = seq.indexOf(this.gear);
+        return i < seq.length - 1 ? this.shiftTo(seq[i + 1]) : this;
+    }
+
+    shiftDown() {
+        const seq = this.sequence;
+        const i = seq.indexOf(this.gear);
+        return i > 0 ? this.shiftTo(seq[i - 1]) : this;
+    }
+
+    // Called once per frame by the controller with the current drivetrain state.
+    // `throttle` is the driver's demand in [-1, 1].
+    update(dt, { speed = 0, throttle = 0 } = {}) {
+        this.speed = speed;
+        if (this._shiftFor > 0) {
+            this._shiftFor = Math.max(0, this._shiftFor - dt);
+            return this;
+        }
+        if (this.mode === GEARBOX_MODE.AUTO) this._autoShift(throttle);
+        return this;
+    }
+
+    // Automatic logic: pick reverse/forward from a standstill, then ride the
+    // revs. The gap between upshiftAt and downshiftAt stops it hunting.
+    _autoShift(throttle) {
+        const stopped = Math.abs(this.speed) < STOPPED;
+
+        if (throttle < 0 && stopped && !this.inReverse) return void this.shiftTo(-1);
+        if (throttle >= 0 && this.inReverse && stopped) return void this.shiftTo(1);
+        if (this.inReverse || this.inNeutral) return;
+
+        const revs = this.rpm;
+        if (revs > this.upshiftAt && this.gear < this.topGear) this.shiftTo(this.gear + 1);
+        else if (revs < this.downshiftAt && this.gear > 1) this.shiftTo(this.gear - 1);
+    }
+}
+
+// ===== components/controls/autoAim.js =====
+// Auto-aim: hands the turret over to a target-picking policy.
+//
+// One button cycles through the policies, so the driver can go from "point at
+// whatever is closest" to "finish off the wounded one" to "deal with the big
+// one" without ever letting go of the wheel:
+//
+//   OFF → NEAREST → WEAKEST → TOUGHEST → STRONGEST → OFF …
+//
+//   NEAREST    the closest target — the one most likely to be shooting at you
+//   WEAKEST    the least health left — finish it off
+//   TOUGHEST   the most health left — chip away at the one that will last
+//   STRONGEST  the biggest threat by design (durability × damage per second),
+//              regardless of how hurt it currently is
+//
+// It only picks the target and points the gun; it never fires. Ties break by
+// distance, and the current target wins an exact tie so the gun does not
+// twitch between two equal candidates.
+
+const AIM_MODE = {
+    OFF: "off",
+    NEAREST: "nearest",
+    WEAKEST: "weakest",
+    TOUGHEST: "toughest",
+    STRONGEST: "strongest",
+};
+
+// Order the button walks through.
+const AIM_CYCLE = [AIM_MODE.OFF, AIM_MODE.NEAREST, AIM_MODE.WEAKEST, AIM_MODE.TOUGHEST, AIM_MODE.STRONGEST];
+
+const AIM_MODE_LABEL = {
+    off: "Desactivado",
+    nearest: "Más cercano",
+    weakest: "Menos vida",
+    toughest: "Más vida",
+    strongest: "Más fuerte",
+};
+
+// How each mode scores a candidate. Higher score wins; distance is passed in so
+// modes can use it directly or just as a tie-breaker.
+const SCORES = {
+    [AIM_MODE.NEAREST]: (tank, dist) => -dist,
+    [AIM_MODE.WEAKEST]: (tank) => -tank.hp,
+    [AIM_MODE.TOUGHEST]: (tank) => tank.hp,
+    [AIM_MODE.STRONGEST]: (tank) => tank.power,
+};
+
+class AutoAim {
+    constructor(tank, { mode = AIM_MODE.OFF, cycle = AIM_CYCLE } = {}) {
+        this.tank = tank;
+        this.cycleOrder = cycle;
+        this.mode = mode;
+        this.target = null;
+    }
+
+    get enabled() {
+        return this.mode !== AIM_MODE.OFF;
+    }
+
+    get label() {
+        return AIM_MODE_LABEL[this.mode];
+    }
+
+    setMode(mode) {
+        this.mode = mode;
+        if (!this.enabled) this.target = null;
+        return this;
+    }
+
+    // Advances to the next policy — this is what the button is wired to.
+    cycle() {
+        const i = this.cycleOrder.indexOf(this.mode);
+        return this.setMode(this.cycleOrder[(i + 1) % this.cycleOrder.length]);
+    }
+
+    // Best candidate under the current policy, or null when off / none alive.
+    pick(candidates = []) {
+        const score = SCORES[this.mode];
+        if (!score) return null;
+
+        const from = this.tank.position;
+        let best = null;
+        let bestScore = -Infinity;
+        let bestDist = Infinity;
+
+        for (const candidate of candidates) {
+            if (!candidate || !candidate.alive || candidate === this.tank) continue;
+            const dist = Math.hypot(candidate.position.x - from.x, candidate.position.y - from.y);
+            const value = score(candidate, dist);
+            // Break ties by distance, then keep the current target so the gun
+            // does not flick between two identical candidates.
+            const better = value > bestScore
+                || (value === bestScore && dist < bestDist)
+                || (value === bestScore && dist === bestDist && candidate === this.target);
+            if (better) {
+                best = candidate;
+                bestScore = value;
+                bestDist = dist;
+            }
+        }
+        return best;
+    }
+
+    // Picks a target and swings the turret onto it. Returns the target (or null),
+    // so the caller can draw a reticle on it. Does not fire.
+    update(dt, candidates = []) {
+        if (!this.enabled) {
+            this.target = null;
+            return null;
+        }
+        this.target = this.pick(candidates);
+        if (this.target) this.tank.aimAt(this.target.position, dt);
+        return this.target;
+    }
+}
+
+// ===== components/controls/index.js =====
+// Barrel for the controls layer.
+
+// ===== components/weapons/ballistics.js =====
+// Ballistics: where bullets meet armor.
+//
+// Bullets are treated as swept segments (raycast from their previous to their
+// current position), not as physics bodies. That avoids fast bullets tunnelling
+// through thin armor and gives us the exact hit point and, crucially, the
+// surface normal — which is what the angle-based penetration model needs.
+//
+// Penetration model (arcade, à la World of Tanks):
+//   effectiveArmor = nominalArmor / cos(theta)
+//   theta = angle between the shell's path and the surface normal
+//   - ricochet if theta >= ricochetAngle (too steep, shell skips off)
+//   - penetration if shellPenetration >= effectiveArmor
+//   - block otherwise (shell stops, no damage)
+
+// Transforms a shape's local collider outline into world space. Mirrors the
+// transform used by Shape.draw and the physics layer (rotation is CCW degrees).
+// Named apart from the physics layer's equivalent: both end up as globals in the
+// standalone build, and one silently overwriting the other is a trap.
+function hullOutline(shape) {
+    const angle = (shape.rotation * Math.PI) / 180;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    return shape.getColliderVertices().map((p) => {
+        const x = p.x * shape.scale.x;
+        const y = p.y * shape.scale.y;
+        return {
+            x: shape.position.x + x * cos - y * sin,
+            y: shape.position.y + x * sin + y * cos,
+        };
+    });
+}
+
+// Intersection of segment A->B with segment P->Q. Returns { t, point } where t
+// is the position along A->B in [0, 1], or null when they do not cross.
+function segmentIntersect(a, b, p, q) {
+    const r = { x: b.x - a.x, y: b.y - a.y };
+    const s = { x: q.x - p.x, y: q.y - p.y };
+    const denom = r.x * s.y - r.y * s.x;
+    if (Math.abs(denom) < 1e-9) return null; // parallel
+
+    const t = ((p.x - a.x) * s.y - (p.y - a.y) * s.x) / denom;
+    const u = ((p.x - a.x) * r.y - (p.y - a.y) * r.x) / denom;
+    if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+
+    return { t, point: { x: a.x + r.x * t, y: a.y + r.y * t } };
+}
+
+// Casts the segment a->b against a polygon shape. Returns the first face hit as
+// { point, normal, edgeIndex, t } (normal points outward), or null.
+function raycastShape(a, b, shape) {
+    const poly = hullOutline(shape);
+    let best = null;
+
+    for (let i = 0; i < poly.length; i++) {
+        const p = poly[i];
+        const q = poly[(i + 1) % poly.length];
+        const hit = segmentIntersect(a, b, p, q);
+        if (hit && (!best || hit.t < best.t)) {
+            const dx = q.x - p.x;
+            const dy = q.y - p.y;
+            const len = Math.hypot(dx, dy) || 1;
+            // Outward normal for a counter-clockwise winding.
+            const normal = { x: dy / len, y: -dx / len };
+            best = { point: hit.point, normal, edgeIndex: i, t: hit.t };
+        }
+    }
+    return best;
+}
+
+// Decides what happens when a shell of `penetration` mm hits `armor` mm of plate
+// whose outward `normal` is hit head-on by a shell travelling along `direction`.
+// `normalizes` controls the slope model: true (solid shot) makes sloped armor
+// count more (effective = nominal / cosθ); false (shaped charge / HE) defeats the
+// nominal thickness regardless of slope.
+// Returns { result: "penetration" | "ricochet" | "block", angle, effectiveArmor }.
+function evaluateImpact({ direction, normal, penetration, armor, ricochetAngle = 70, normalizes = true }) {
+    // cos of the impact angle measured from the surface normal.
+    const cos = -(direction.x * normal.x + direction.y * normal.y);
+    const angle = (Math.acos(Math.max(-1, Math.min(1, cos))) * 180) / Math.PI;
+
+    if (cos <= 1e-4) {
+        // Grazing or hitting the inside of a face — treat as a ricochet.
+        return { result: "ricochet", angle, effectiveArmor: Infinity };
+    }
+
+    const effectiveArmor = normalizes ? armor / cos : armor;
+    if (angle >= ricochetAngle) {
+        return { result: "ricochet", angle, effectiveArmor };
+    }
+    if (penetration >= effectiveArmor) {
+        return { result: "penetration", angle, effectiveArmor };
+    }
+    return { result: "block", angle, effectiveArmor };
+}
+
+// Reflects a velocity vector off a surface with the given unit normal.
+function reflect(velocity, normal) {
+    const dot = velocity.x * normal.x + velocity.y * normal.y;
+    return { x: velocity.x - 2 * dot * normal.x, y: velocity.y - 2 * dot * normal.y };
+}
+
+// ===== components/weapons/projectiles.js =====
+// Basic projectile (shell) types and the damage scheme that turns a ballistics
+// result into hit points.
+//
+// Every type bends the shared penetration model (see ballistics.js) and decides
+// how a hit becomes damage. The fields:
+//
+//   id / name         identifier and readable Spanish label
+//   penMultiplier     scales the gun's nominal penetration (mm)
+//   damageMultiplier  scales the gun's nominal damage on a clean penetration
+//   ricochetAngle     impact angle from the surface normal beyond which the
+//                     shell skips off (90 = never ricochets)
+//   normalizes        true  -> sloped armor counts more (effective = nominal/cosθ)
+//                     false -> the shell defeats the nominal thickness regardless
+//                              of slope (shaped charge / surface burst)
+//   splash            fraction of damage that still leaks through on a non-pen,
+//                     i.e. fragments spraying past un-breached plate (HE)
+//
+// The four staples of arcade tank games:
+//   AP    Perforante     — the all-rounder: solid shot, slope matters, skips off
+//                          steep plates.
+//   APCR  Subcalibre     — more penetration, less damage, ricochets sooner.
+//   HEAT  Carga hueca    — shaped charge: ignores slope, never ricochets, steady
+//                          damage; the answer to angled armor.
+//   HE    Alto explosivo — little penetration but a big punch, and even a non-pen
+//                          chips the target with fragments.
+
+const PROJECTILES = {
+    AP:   { id: "AP",   name: "Perforante",     penMultiplier: 1.0,  damageMultiplier: 1.0, ricochetAngle: 70, normalizes: true,  splash: 0 },
+    APCR: { id: "APCR", name: "Subcalibre",     penMultiplier: 1.4,  damageMultiplier: 0.7, ricochetAngle: 68, normalizes: true,  splash: 0 },
+    HEAT: { id: "HEAT", name: "Carga hueca",    penMultiplier: 1.2,  damageMultiplier: 1.1, ricochetAngle: 90, normalizes: false, splash: 0 },
+    HE:   { id: "HE",   name: "Alto explosivo", penMultiplier: 0.35, damageMultiplier: 1.8, ricochetAngle: 90, normalizes: false, splash: 0.25 },
+};
+
+// Default type when a weapon / bullet does not name one.
+const DEFAULT_PROJECTILE = PROJECTILES.AP;
+
+// Resolves a shot end to end: runs the penetration model tuned for the shell
+// `type`, then applies its damage scheme. Returns the ballistics result extended
+// with `damage` (hit points actually dealt to the plate):
+//   penetration -> full damage
+//   block       -> splash * damage (HE fragments; 0 for solid shot)
+//   ricochet    -> no damage
+function resolveShot({ type = DEFAULT_PROJECTILE, penetration, damage, direction, normal, armor }) {
+    const impact = evaluateImpact({
+        direction,
+        normal,
+        penetration,
+        armor,
+        ricochetAngle: type.ricochetAngle,
+        normalizes: type.normalizes,
+    });
+
+    let dealt = 0;
+    if (impact.result === "penetration") {
+        dealt = damage;
+    } else if (impact.result === "block") {
+        dealt = Math.round(damage * type.splash);
+    }
+
+    return { ...impact, type, damage: dealt };
+}
+
+// ===== components/weapons/bullet.js =====
+// A shell in flight. It stores its previous position so the ballistics layer can
+// raycast the segment travelled during the last frame (continuous collision).
+
+class Bullet {
+    constructor({ x, y, vx, vy, penetration, damage = 100, owner = null, life = 3, type = DEFAULT_PROJECTILE }) {
+        this.position = { x, y };
+        this.prev = { x, y };
+        this.velocity = { x: vx, y: vy };
+        this.penetration = penetration;
+        this.damage = damage;
+        this.type = type; // projectile type (AP / APCR / HEAT / HE), drives the damage scheme
+        this.owner = owner;
+        this.alive = true;
+        this.life = life; // seconds before it despawns
+    }
+
+    // Unit vector of travel.
+    get direction() {
+        const speed = Math.hypot(this.velocity.x, this.velocity.y) || 1;
+        return { x: this.velocity.x / speed, y: this.velocity.y / speed };
+    }
+
+    get speed() {
+        return Math.hypot(this.velocity.x, this.velocity.y);
+    }
+
+    update(dt) {
+        this.prev.x = this.position.x;
+        this.prev.y = this.position.y;
+        this.position.x += this.velocity.x * dt;
+        this.position.y += this.velocity.y * dt;
+        this.life -= dt;
+        if (this.life <= 0) this.alive = false;
+    }
+}
+
+// ===== components/weapons/weapon.js =====
+// A gun that fires shells. Tracks its own reload cooldown; call update(dt) each
+// frame and fire(...) to shoot when ready. `penetration` and `damage` are the
+// gun's nominal values; each projectile type scales them by its own multipliers.
+
+class Weapon {
+    constructor({ penetration = 100, muzzleSpeed = 12, reload = 1.0, damage = 34, type = DEFAULT_PROJECTILE } = {}) {
+        this.penetration = penetration; // mm the shell can defeat head-on
+        this.muzzleSpeed = muzzleSpeed; // world units / second
+        this.reload = reload;           // seconds between shots
+        this.damage = damage;           // hit points on penetration
+        this.type = type;               // loaded projectile type (AP / APCR / HEAT / HE)
+        this.cooldown = 0;
+    }
+
+    update(dt) {
+        if (this.cooldown > 0) this.cooldown -= dt;
+    }
+
+    get ready() {
+        return this.cooldown <= 0;
+    }
+
+    // Progress of the current reload in [0, 1] (1 = ready).
+    get reloadProgress() {
+        return this.reload <= 0 ? 1 : Math.min(1, 1 - this.cooldown / this.reload);
+    }
+
+    // Fires a shell from (x, y) toward (dirX, dirY) using projectile `type`
+    // (defaults to the loaded one). The type's multipliers scale the gun's
+    // nominal penetration and damage. Returns a Bullet, or null if reloading.
+    fire(x, y, dirX, dirY, owner = null, type = this.type) {
+        if (!this.ready) return null;
+        this.cooldown = this.reload;
+        const len = Math.hypot(dirX, dirY) || 1;
+        return new Bullet({
+            x,
+            y,
+            vx: (dirX / len) * this.muzzleSpeed,
+            vy: (dirY / len) * this.muzzleSpeed,
+            penetration: this.penetration * type.penMultiplier,
+            damage: this.damage * type.damageMultiplier,
+            type,
+            owner,
+        });
+    }
+}
+
+// ===== components/weapons/armor.js =====
+// Per-face armor for a target shape. Each collider edge (in getColliderVertices
+// order) has a nominal armor thickness in mm and a readable face name. The armor
+// travels with the shape's rotation, so angling the hull changes which value a
+// shell meets — exactly what drives the penetration model.
+
+class Armor {
+    // faces: array aligned to the shape's collider edges, each { armor, name }.
+    constructor(shape, faces, { hp = 100 } = {}) {
+        this.shape = shape;
+        this.faces = faces;
+        this.maxHp = hp;
+        this.hp = hp;
+        this.alive = true;
+    }
+
+    faceForEdge(index) {
+        return this.faces[index];
+    }
+
+    takeDamage(amount) {
+        this.hp = Math.max(0, this.hp - amount);
+        if (this.hp === 0) this.alive = false;
+        return this.hp;
+    }
+
+    // Builds per-face armor for any convex hull by looking at where each face
+    // actually points in the shape's local space: faces within `frontArc` of
+    // local +Y (forward) are frontal, those as far from it are the rear, and the
+    // rest are sides. Works for a rectangle, a wedge, a hexagon — anything with
+    // a counter-clockwise collider outline, which is what the raycast assumes.
+    static forHull(shape, { front, side, rear, hp = 100, frontArc = 75 } = {}) {
+        const points = shape.getColliderVertices();
+        const faces = points.map((p, i) => {
+            const q = points[(i + 1) % points.length];
+            const dx = q.x - p.x;
+            const dy = q.y - p.y;
+            const len = Math.hypot(dx, dy) || 1;
+            // Outward normal of a CCW edge is (dy, -dx); we only need its Y to
+            // know how far the face is turned away from "forward".
+            const ny = -dx / len;
+            const angle = (Math.acos(Math.max(-1, Math.min(1, ny))) * 180) / Math.PI;
+            if (angle <= frontArc) return { armor: front, name: "Frontal" };
+            if (angle >= 180 - frontArc) return { armor: rear, name: "Trasera" };
+            return { armor: side, name: "Lateral" };
+        });
+        return new Armor(shape, faces, { hp });
+    }
+
+    // Convenience for a rectangular hull. `frontEdge` is the collider edge that
+    // faces the enemy; its opposite becomes the rear, the other two the sides.
+    static rectangle(shape, { front, side, rear, frontEdge = 3, hp = 100 } = {}) {
+        const faces = [];
+        for (let i = 0; i < 4; i++) faces.push({ armor: side, name: "Lateral" });
+        faces[frontEdge % 4] = { armor: front, name: "Frontal" };
+        faces[(frontEdge + 2) % 4] = { armor: rear, name: "Trasera" };
+        return new Armor(shape, faces, { hp });
+    }
+}
+
+// ===== components/weapons/index.js =====
+// Barrel for the weapons / ballistics layer.
+
+// ===== components/vehicles/tank.js =====
+// A tank built out of engine shapes: a hull that drives, plus a turret and a
+// barrel that rotate on top of it *independently* of the hull. That split is
+// the point — a real tank can keep its aim while the hull turns away.
+//
+// Angles follow the engine convention: degrees, counter-clockwise, and local
+// +Y is "forward", so 0° faces up the screen. The turret stores an absolute
+// world angle (not one relative to the hull), which is what you want for
+// aiming: the gun keeps pointing at a target while the hull manoeuvres.
+//
+// Designs (TANK_DESIGNS) vary the *shape* of the hull and turret — rectangle,
+// triangle, hexagon, wedge — along with the driving and traverse stats, so each
+// one handles differently. Feed `design.drive` straight into a TankController.
+
+
+
+
+
+
+// Every design: hull/turret shape factories, a collision radius, the barrel
+// geometry, driving stats (for TankController) and the turret traverse rate.
+const TANK_DESIGNS = {
+    medium: {
+        id: "medium",
+        name: "Medio",
+        hint: "Equilibrado. Casco rectangular.",
+        radius: 0.42,
+        hull: (gl) => new Rectangle(gl, { width: 0.55, height: 0.8 }),
+        turret: (gl) => new Circle(gl, { radius: 0.22 }),
+        barrel: { width: 0.1, length: 0.5, offset: 0.42 },
+        colors: {
+            hull: { red: 0.27, green: 0.5, blue: 0.32 },
+            turret: { red: 0.22, green: 0.42, blue: 0.28 },
+            barrel: { red: 0.16, green: 0.3, blue: 0.2 },
+        },
+        drive: { accel: 5, maxSpeed: 3, turnSpeed: 140, friction: 5 },
+        traverse: 120,
+        hp: 100,
+        gearbox: { ratios: [0.3, 0.52, 0.75, 1.0], reverseRatio: 0.4, shiftTime: 0.25 },
+        armor: { front: 65, side: 38, rear: 28 },
+        weapon: { damage: 25, reload: 1.1, muzzleSpeed: 11, penetration: 95 },
+        ammo: "AP",
+    },
+
+    light: {
+        id: "light",
+        name: "Ligero",
+        hint: "Rápido y ágil. Casco triangular.",
+        radius: 0.34,
+        hull: (gl) => new Triangle(gl, { width: 0.6, height: 0.85 }),
+        turret: (gl) => new RegularPolygon(gl, { sides: 5, radius: 0.17 }),
+        barrel: { width: 0.08, length: 0.42, offset: 0.36 },
+        colors: {
+            hull: { red: 0.85, green: 0.66, blue: 0.24 },
+            turret: { red: 0.7, green: 0.53, blue: 0.18 },
+            barrel: { red: 0.5, green: 0.38, blue: 0.14 },
+        },
+        drive: { accel: 7.5, maxSpeed: 4.4, turnSpeed: 200, friction: 6 },
+        traverse: 180,
+        hp: 65,
+        gearbox: { ratios: [0.26, 0.45, 0.63, 0.82, 1.0], reverseRatio: 0.45, shiftTime: 0.16 },
+        armor: { front: 30, side: 18, rear: 14 },
+        weapon: { damage: 13, reload: 0.55, muzzleSpeed: 13, penetration: 55 },
+        ammo: "APCR",
+    },
+
+    heavy: {
+        id: "heavy",
+        name: "Pesado",
+        hint: "Lento y macizo. Casco hexagonal.",
+        radius: 0.52,
+        hull: (gl) => new RegularPolygon(gl, { sides: 6, radius: 0.56 }),
+        turret: (gl) => new Circle(gl, { radius: 0.3 }),
+        barrel: { width: 0.13, length: 0.62, offset: 0.54 },
+        colors: {
+            hull: { red: 0.42, green: 0.3, blue: 0.34 },
+            turret: { red: 0.34, green: 0.24, blue: 0.28 },
+            barrel: { red: 0.24, green: 0.17, blue: 0.2 },
+        },
+        drive: { accel: 3, maxSpeed: 1.9, turnSpeed: 80, friction: 4 },
+        traverse: 60,
+        hp: 170,
+        gearbox: { ratios: [0.36, 0.68, 1.0], reverseRatio: 0.32, shiftTime: 0.5 },
+        armor: { front: 105, side: 62, rear: 45 },
+        weapon: { damage: 42, reload: 2.2, muzzleSpeed: 9, penetration: 145 },
+        ammo: "AP",
+    },
+
+    hunter: {
+        id: "hunter",
+        name: "Cazacarros",
+        hint: "Nariz en cuña, torreta lenta.",
+        radius: 0.44,
+        // A convex wedge: pointed nose, wide tail. Wound counter-clockwise so the
+        // ballistics layer derives outward face normals (it assumes CCW).
+        hull: (gl) => new Polygon(gl, {
+            points: [
+                { x: -0.36, y: 0.06 },
+                { x: -0.3, y: -0.46 },
+                { x: 0.3, y: -0.46 },
+                { x: 0.36, y: 0.06 },
+                { x: 0, y: 0.52 },
+            ],
+        }),
+        turret: (gl) => new Square(gl, { size: 0.34 }),
+        barrel: { width: 0.11, length: 0.7, offset: 0.5 },
+        colors: {
+            hull: { red: 0.29, green: 0.38, blue: 0.5 },
+            turret: { red: 0.23, green: 0.31, blue: 0.42 },
+            barrel: { red: 0.16, green: 0.22, blue: 0.31 },
+        },
+        drive: { accel: 5.5, maxSpeed: 3.4, turnSpeed: 105, friction: 5 },
+        traverse: 45,
+        hp: 90,
+        gearbox: { ratios: [0.28, 0.5, 0.74, 1.0], reverseRatio: 0.4, shiftTime: 0.32 },
+        armor: { front: 85, side: 42, rear: 30 },
+        weapon: { damage: 36, reload: 1.7, muzzleSpeed: 14, penetration: 125 },
+        ammo: "APCR",
+    },
+};
+
+const DEFAULT_DESIGN = TANK_DESIGNS.medium;
+
+// Shortest signed difference between two angles, in degrees, within (-180, 180].
+function angleDelta(from, to) {
+    return (((to - from + 180) % 360) + 360) % 360 - 180;
+}
+
+// Health bar geometry, in world units. The bar floats above the hull and never
+// rotates with it, so it stays readable however the tank is facing.
+const BAR_HEIGHT = 0.11;
+const BAR_GAP = 0.3;
+const BAR_BACK_COLOR = { red: 0.1, green: 0.11, blue: 0.13 };
+// Fill color by remaining health: healthy, hurt, critical.
+const BAR_FILL_COLORS = [
+    { at: 0.5, color: { red: 0.26, green: 0.75, blue: 0.41 } },
+    { at: 0.2, color: { red: 0.85, green: 0.69, blue: 0.23 } },
+    { at: 0, color: { red: 0.85, green: 0.29, blue: 0.24 } },
+];
+
+class Tank {
+    constructor(gl, { design = DEFAULT_DESIGN, x = 0, y = 0, rotation = 0, turretAngle = null, colors = design.colors } = {}) {
+        this.design = design;
+
+        this.hull = design.hull(gl).setColor(colors.hull)
+            .setPosition({ x, y }).setRotation(rotation).init();
+        this.barrel = new Rectangle(gl, { width: design.barrel.width, height: design.barrel.length })
+            .setColor(colors.barrel).init();
+        this.turret = design.turret(gl).setColor(colors.turret).init();
+
+        // Absolute world angle of the gun; starts aligned with the hull.
+        this.turretAngle = turretAngle ?? rotation;
+
+        // Health. `maxHp` comes from the design; the bar reflects the ratio.
+        this.maxHp = design.hp ?? 100;
+        this.hp = this.maxHp;
+        this.alive = true;
+
+        // Per-face armor derived from the hull's own outline, so angling the
+        // hull changes which plate a shell meets. See Armor.forHull.
+        this.armor = design.armor ? Armor.forHull(this.hull, design.armor) : null;
+
+        // Health bar: a dark backing plate with a colored fill on top. The fill
+        // is scaled horizontally (and nudged left) so it empties from the right.
+        this.barWidth = Math.max(0.62, design.radius * 1.9);
+        this.barBack = new Rectangle(gl, { width: this.barWidth + 0.04, height: BAR_HEIGHT + 0.04 })
+            .setColor(BAR_BACK_COLOR).init();
+        this.barFill = new Rectangle(gl, { width: this.barWidth, height: BAR_HEIGHT })
+            .setColor(BAR_FILL_COLORS[0].color).init();
+        this._barBucket = 0; // index into BAR_FILL_COLORS, to avoid re-uploading
+
+        // Draw order: hull, barrel, turret, then the bar on top of everything.
+        this.parts = [this.hull, this.barrel, this.turret, this.barBack, this.barFill];
+        this.sync();
+    }
+
+    get hpRatio() {
+        return this.maxHp > 0 ? Math.max(0, this.hp) / this.maxHp : 0;
+    }
+
+    // Applies damage. Returns true while the tank is still alive.
+    takeDamage(amount) {
+        if (!this.alive) return false;
+        this.hp -= amount;
+        if (this.hp <= 0) {
+            this.hp = 0;
+            this.alive = false;
+        }
+        return this.alive;
+    }
+
+    // How dangerous this design is, regardless of current damage: durability
+    // times sustained damage output. Used by auto-aim to rank threats.
+    get power() {
+        const w = this.design.weapon;
+        return w ? (this.maxHp * w.damage) / w.reload : this.maxHp;
+    }
+
+    // The hull carries the tank's transform — drive it with a TankController.
+    get position() { return this.hull.position; }
+    get rotation() { return this.hull.rotation; }
+    get radius() { return this.design.radius; }
+
+    // Unit vector the gun points along.
+    get turretForward() {
+        const a = (this.turretAngle * Math.PI) / 180;
+        return { x: -Math.sin(a), y: Math.cos(a) };
+    }
+
+    // Where a shell would leave the gun, for wiring up the weapons module.
+    get muzzle() {
+        const f = this.turretForward;
+        const d = this.design.barrel.offset + this.design.barrel.length / 2;
+        return { x: this.position.x + f.x * d, y: this.position.y + f.y * d };
+    }
+
+    addTo(game) {
+        for (const part of this.parts) game.add(part);
+        return this;
+    }
+
+    removeFrom(game) {
+        for (const part of this.parts) game.remove(part);
+        return this;
+    }
+
+    // Rotates the gun toward an absolute angle, capped by the traverse rate.
+    turnTurretTo(angle, dt) {
+        const diff = angleDelta(this.turretAngle, angle);
+        const max = this.design.traverse * dt;
+        this.turretAngle += Math.abs(diff) <= max ? diff : Math.sign(diff) * max;
+        return this;
+    }
+
+    // Nominal armor of the hull face a shell came through (by collider edge).
+    faceForEdge(index) {
+        return this.armor ? this.armor.faceForEdge(index) : null;
+    }
+
+    // How far off the gun is from a world point, in degrees (0 = dead on).
+    // Lets callers decide whether it is worth pulling the trigger yet.
+    aimErrorTo(point) {
+        const dx = point.x - this.position.x;
+        const dy = point.y - this.position.y;
+        if (dx === 0 && dy === 0) return 0;
+        const bearing = (Math.atan2(-dx, dy) * 180) / Math.PI;
+        return Math.abs(angleDelta(this.turretAngle, bearing));
+    }
+
+    // Aims the gun at a world point (the mouse, a target, ...).
+    aimAt(point, dt) {
+        const dx = point.x - this.position.x;
+        const dy = point.y - this.position.y;
+        if (dx === 0 && dy === 0) return this;
+        // Inverse of turretForward: the angle whose (-sin, cos) points at (dx, dy).
+        return this.turnTurretTo((Math.atan2(-dx, dy) * 180) / Math.PI, dt);
+    }
+
+    // Manual traverse: dir > 0 turns the gun left (CCW), dir < 0 right.
+    traverse(dir, dt) {
+        this.turretAngle += dir * this.design.traverse * dt;
+        return this;
+    }
+
+    // Places the turret and barrel on the hull, following the gun's own angle.
+    // Call once per frame, after the hull has moved.
+    sync() {
+        const p = this.position;
+        const f = this.turretForward;
+        this.turret.setPosition({ x: p.x, y: p.y }).setRotation(this.turretAngle);
+        this.barrel
+            .setPosition({ x: p.x + f.x * this.design.barrel.offset, y: p.y + f.y * this.design.barrel.offset })
+            .setRotation(this.turretAngle);
+
+        // Health bar, level above the hull whatever way the tank points.
+        const ratio = this.hpRatio;
+        const barY = p.y + this.design.radius + BAR_GAP;
+        this.barBack.setPosition({ x: p.x, y: barY });
+        this.barFill
+            .setScale({ x: ratio, y: 1 })
+            .setPosition({ x: p.x - (this.barWidth * (1 - ratio)) / 2, y: barY });
+
+        // Recolor only when crossing a threshold — setColor re-uploads a buffer.
+        const bucket = BAR_FILL_COLORS.findIndex((b) => ratio > b.at);
+        const next = bucket === -1 ? BAR_FILL_COLORS.length - 1 : bucket;
+        if (next !== this._barBucket) {
+            this._barBucket = next;
+            this.barFill.setColor(BAR_FILL_COLORS[next].color);
+        }
+        return this;
+    }
+}
+
+// ===== components/vehicles/engine.js =====
+// A combustion engine: revs in, torque out, power derived.
+//
+// Torque is not flat — it climbs off idle, peaks somewhere in the mid range and
+// falls away toward the redline. That shape is the whole reason gears exist, so
+// the curve here is the thing worth getting right:
+//
+//   torque(rpm) = peakTorque · (1 − k · offset²)
+//
+// with a different k below and above the peak, chosen so the curve passes
+// exactly through the idle and redline values you specify. Smooth, monotonic on
+// each side, and tunable with numbers a person can reason about.
+//
+// Power is not an independent setting — it *falls out* of torque and revs:
+//
+//   P [W] = T [N·m] · ω [rad/s],   ω = rpm · 2π / 60
+//
+// which is why peak power always sits at higher revs than peak torque: torque is
+// sagging, but ω is climbing faster. `peakPower` finds that point by sampling.
+
+const RPM_TO_RAD = (2 * Math.PI) / 60;
+const W_PER_HP = 735.5; // metric horsepower (CV)
+
+class Engine {
+    constructor({
+        idleRpm = 800,
+        redlineRpm = 6800,
+        peakTorque = 340,        // N·m
+        peakTorqueRpm = 3400,
+        torqueAtIdle = 0.55,     // fraction of peak torque down at idle
+        torqueAtRedline = 0.74,  // ... and up at the limiter
+    } = {}) {
+        this.idleRpm = idleRpm;
+        this.redlineRpm = redlineRpm;
+        this.peakTorque = peakTorque;
+        this.peakTorqueRpm = peakTorqueRpm;
+        this.torqueAtIdle = torqueAtIdle;
+        this.torqueAtRedline = torqueAtRedline;
+    }
+
+    // Torque in N·m at the crank.
+    torqueAt(rpm) {
+        const r = Math.max(0, Math.min(this.redlineRpm, rpm));
+        if (r <= this.peakTorqueRpm) {
+            const span = this.peakTorqueRpm - this.idleRpm || 1;
+            const off = Math.max(0, (this.peakTorqueRpm - r) / span); // 1 at idle, 0 at peak
+            return this.peakTorque * (1 - (1 - this.torqueAtIdle) * off * off);
+        }
+        const span = this.redlineRpm - this.peakTorqueRpm || 1;
+        const off = (r - this.peakTorqueRpm) / span;                   // 0 at peak, 1 at redline
+        return this.peakTorque * (1 - (1 - this.torqueAtRedline) * off * off);
+    }
+
+    // Power in watts — torque times angular velocity, nothing more.
+    powerAt(rpm) {
+        return this.torqueAt(rpm) * rpm * RPM_TO_RAD;
+    }
+
+    powerHpAt(rpm) {
+        return this.powerAt(rpm) / W_PER_HP;
+    }
+
+    // Where the engine makes the most power, found by sampling the curve.
+    get peakPower() {
+        if (this._peak) return this._peak;
+        let best = { rpm: this.idleRpm, watts: 0 };
+        for (let rpm = this.idleRpm; rpm <= this.redlineRpm; rpm += 10) {
+            const watts = this.powerAt(rpm);
+            if (watts > best.watts) best = { rpm, watts };
+        }
+        this._peak = { rpm: best.rpm, watts: best.watts, hp: best.watts / W_PER_HP };
+        return this._peak;
+    }
+}
+
+// ===== components/vehicles/index.js =====
+// Barrel for the vehicles layer.
+
+// ===== components/index.js =====
+// Everything Raptor exports, in one place.
+//
+// This is the framework's public surface: if a name is here it is meant to be
+// used and will not move without a note in the CHANGELOG; if it is not, it is
+// an internal detail. Import from the root (`raptor.js`) in applications, or
+// from a single layer (`components/physics/index.js`) when you only want one.
+
+// --- Core: the loop, the view, the shell -------------------------------
+
+
+
+// --- Rendering primitives ----------------------------------------------
+
+
+// --- Simulation ---------------------------------------------------------
+
+// --- Input --------------------------------------------------------------
+
+// --- Interface ----------------------------------------------------------
+
+// --- Audio --------------------------------------------------------------
+
+// --- Assets -------------------------------------------------------------
+
+// --- Scenes -------------------------------------------------------------
+
+// --- Gameplay kit -------------------------------------------------------
+// Not part of the engine proper: batteries that happen to ship in the box,
+// built on the layers above. Ignore them and nothing below changes.
+
+// ===== assets/assetsDemo.js =====
+// The asset loader, with the loading visible instead of hidden.
+//
+// A loader is the one system whose whole job is to happen before you can see
+// anything, so this demo turns it inside out: the manifest is a table you watch
+// fill in, with the state, the URL and the time each asset took, plus one entry
+// pointed at a file that does not exist so the failure path is on screen rather
+// than described.
+//
+// The assets are **built at startup and served as `data:` URIs** — a real PNG
+// through a real `<img>`, real JSON through `fetch`, a real WAV decoded by Web
+// Audio. So the async path is genuinely exercised while the page stays a single
+// file you can open from `file://`. Pointing the same manifest at real files is
+// a change of URL and nothing else.
+//
+// Controls: R recarga · S suena la moneda · espacio pausa.
+
+
+
+
+const CELL = 32;
+const PPU = 32;
+const LAYER = { GROUND: 0, PROP: 10, ACTOR: 20 };
+
+const STYLES = `
+    .rows { display: flex; flex-direction: column; gap: 4px; }
+    .arow {
+        display: grid; grid-template-columns: 12px 1fr auto auto; gap: 8px; align-items: center;
+        font-size: 12px; padding: 5px 7px; border-radius: 5px; background: #2f343a;
+        border: 1px solid transparent;
+    }
+    .arow .dot { width: 8px; height: 8px; border-radius: 50%; background: #4a4f57; }
+    .arow.loading .dot { background: #e8c24a; }
+    .arow.ready   .dot { background: #43c06a; }
+    .arow.error   .dot { background: #d84a3a; }
+    .arow.error { border-color: #6b2f2f; background: #3a2626; }
+    .arow .name { font-weight: 600; }
+    .arow .kind { color: #7d838a; font-size: 11px; }
+    .arow .ms { color: #9aa0a6; font-variant-numeric: tabular-nums; font-size: 11px; }
+    .arow .why { grid-column: 2 / -1; color: #f0a094; font-size: 11px; }
+
+    .prog { height: 8px; border-radius: 4px; overflow: hidden; background: #1b1d21; border: 1px solid #3a3f45; margin: 10px 0 6px; }
+    .prog > i { display: block; height: 100%; width: 0; background: #6aa9e0; transition: width .12s ease; }
+    .prog.failed > i { background: #d84a3a; }
 `;
 
-// --- Helpers ----------------------------------------------------------------
+// --- Building the "files" ------------------------------------------------
+// Everything below produces a data: URI. It is the only unusual thing here, and
+// it exists so the page needs nothing next to it.
 
-const PALETTE = ["#e0533d", "#22b573", "#3d7fe0", "#f2c518", "#8e44e0", "#26c1a3"];
-let colorIndex = 0;
+function sheetDataUrl() {
+    const canvas = document.createElement("canvas");
+    canvas.width = CELL * 4;
+    canvas.height = CELL;
+    const ctx = canvas.getContext("2d");
+    const px = (x, y, w, h, c) => { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); };
 
-function hexToRgb01(hex) {
-    const n = parseInt(hex.slice(1), 16);
-    return { red: ((n >> 16) & 255) / 255, green: ((n >> 8) & 255) / 255, blue: (n & 255) / 255 };
+    px(0, 0, CELL, CELL, "#2f6b3a");                                     // 0 hierba
+    for (const [x, y] of [[5, 7], [19, 4], [11, 20], [25, 24]]) px(x, y, 3, 3, "#387d45");
+    px(CELL, 0, CELL, CELL, "#4a4f57");                                  // 1 muro
+    px(CELL + 2, 2, CELL - 4, 12, "#585e68");
+    px(CELL + 2, 17, CELL - 4, 12, "#585e68");
+    px(CELL * 2 + 11, 6, 10, 20, "#f2c518");                             // 2 moneda
+    px(CELL * 2 + 14, 9, 4, 14, "#c9a10f");
+    px(CELL * 3 + 10, 9, 12, 13, "#e0533d");                             // 3 héroe
+    px(CELL * 3 + 12, 4, 8, 6, "#f2a58c");
+    px(CELL * 3 + 13, 6, 2, 2, "#1b1d21");
+    px(CELL * 3 + 17, 6, 2, 2, "#1b1d21");
+    px(CELL * 3 + 11, 22, 4, 7, "#35507f");
+    px(CELL * 3 + 17, 22, 4, 7, "#35507f");
+
+    return canvas.toDataURL("image/png");
 }
 
-function rgb01ToHex({ red, green, blue }) {
-    const h = (v) => Math.round(v * 255).toString(16).padStart(2, "0");
-    return `#${h(red)}${h(green)}${h(blue)}`;
-}
-
-// --- Editor -----------------------------------------------------------------
-
-App.boot({ title: "Raptor Editor", styles: STYLES, touch: false, keyboard: false }, (app) => {
-    const { gl } = app;
-    const game = app;
-
-    const world = new World({ gravity: { x: 0, y: 0 }, bounds: BOUNDS, linearDamping: 0.05 });
-
-    let playing = false;
-    let snapshot = null; // captured transforms to restore on reset
-
-    // Physics stepping is driven by the engine loop but only while playing.
-    app.onUpdate((dt) => { if (playing) world.step(dt); });
-
-    const FACTORIES = {
-        "Rectángulo": () => new Rectangle(gl, { width: 1.2, height: 0.8 }),
-        "Cuadrado": () => new Square(gl, { size: 1 }),
-        "Triángulo": () => new Triangle(gl, { width: 1.2, height: 1.2 }),
-        "Círculo": () => new Circle(gl, { radius: 0.5 }),
-        "Hexágono": () => new RegularPolygon(gl, { sides: 6, radius: 0.6 }),
+function levelDataUrl() {
+    // 1 = muro, 0 = suelo. Small enough to read at a glance in the panel.
+    const level = {
+        nombre: "Patio",
+        tileSize: CELL,
+        tiles: [
+            "1111111111111",
+            "1000000000001",
+            "1011110011101",
+            "1000000000001",
+            "1001100111001",
+            "1000000000001",
+            "1110011110001",
+            "1000000000001",
+            "1111111111111",
+        ],
+        monedas: [[3, 3], [9, 3], [6, 5], [2, 7], [11, 7]],
+        inicio: [1, 1],
     };
+    return "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(level));
+}
 
-    const entries = new Map(); // shape -> { shape, item, body, type, inWorld }
-    let selected = null;       // selected shape or null
+// A short chime, written out as an actual RIFF/WAV file so the loader has to
+// fetch bytes and hand them to decodeAudioData — the real path, not a shortcut.
+function coinDataUrl() {
+    const rate = 22050;
+    const seconds = 0.28;
+    const frames = Math.floor(rate * seconds);
+    const bytes = new Uint8Array(44 + frames * 2);
+    const view = new DataView(bytes.buffer);
+    const ascii = (offset, text) => { for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i)); };
 
-    // --- Property controls ---
-    const color = el("input", { type: "color", value: "#ffffff" });
-    color.oninput = () => selected && selected.setColor({ ...hexToRgb01(color.value), alpha: 1 });
+    ascii(0, "RIFF");
+    view.setUint32(4, 36 + frames * 2, true);
+    ascii(8, "WAVEfmt ");
+    view.setUint32(16, 16, true);        // tamaño del bloque fmt
+    view.setUint16(20, 1, true);         // PCM
+    view.setUint16(22, 1, true);         // mono
+    view.setUint32(24, rate, true);
+    view.setUint32(28, rate * 2, true);  // bytes por segundo
+    view.setUint16(32, 2, true);         // alineación de bloque
+    view.setUint16(34, 16, true);        // bits por muestra
+    ascii(36, "data");
+    view.setUint32(40, frames * 2, true);
 
-    const posX = slider("Posición X", { min: -3, max: 3, step: 0.05, value: -3, apply: (v) => selected && selected.setPosition({ x: v }), format: (v) => v.toFixed(2) });
-    const posY = slider("Posición Y", { min: -2.5, max: 2.5, step: 0.05, value: -2.5, apply: (v) => selected && selected.setPosition({ y: v }), format: (v) => v.toFixed(2) });
-    const rot = slider("Rotación", { min: 0, max: 360, step: 1, value: 0, apply: (v) => selected && selected.setRotation(v), format: (v) => v.toFixed(2) });
-    const scale = slider("Escala", { min: 0.1, max: 3, step: 0.05, value: 0.1, apply: (v) => selected && selected.setScale({ x: v, y: v }), format: (v) => v.toFixed(2) });
+    // Two notes a fifth apart, with a decay: the universal "picked something up".
+    for (let i = 0; i < frames; i++) {
+        const t = i / rate;
+        const hz = t < 0.08 ? 988 : 1319;
+        const decay = Math.exp(-t * 11);
+        const sample = Math.sin(2 * Math.PI * hz * t) * decay * 0.5;
+        view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, sample)) * 32767, true);
+    }
 
-    const bodyType = select("Cuerpo", [
-        [DYNAMIC, "Dinámico (rigid)"],
-        [STATIC, "Estático"],
-        ["none", "Sin física"],
-    ], { apply: (v) => selected && setBodyType(entries.get(selected), v) });
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return "data:audio/wav;base64," + btoa(binary);
+}
 
-    const group = select("Grupo", [
-        [0, "Ninguno"],
-        [-1, "Equipo 1 (se ignoran)"],
-        [-2, "Equipo 2 (se ignoran)"],
-    ], { apply: (v) => { if (selected) entries.get(selected).body.groupIndex = parseInt(v, 10); } });
+// Declares the manifest. Shared by the boot load and the "recargar" button, so
+// both go through exactly the same code.
+function declare(assets, { includeBroken = true } = {}) {
+    const sheet = sheetDataUrl();
+    assets.add({
+        texture: { hoja: sheet },
+        json: { nivel: levelDataUrl() },
+        sound: { moneda: coinDataUrl() },
+        text: { creditos: "data:text/plain;charset=utf-8," + encodeURIComponent("Raptor — demo de carga de assets") },
+    });
+    // The same file under a second name: the loader must fetch, decode and
+    // upload it once, not twice.
+    assets.texture("hoja_alias", sheet);
+    // And one that is not there, to put the failure path on screen.
+    if (includeBroken) assets.texture("retrato", "no-existe/retrato.png");
+    return assets;
+}
 
-    const bounce = slider("Rebote", { min: 0, max: 1, step: 0.05, value: 0, apply: (v) => { if (selected) entries.get(selected).body.restitution = v; }, format: (v) => v.toFixed(2) });
+App.boot({
+    title: "Carga de assets",
+    styles: STYLES,
+    touch: false,
+    loadingTitle: "Cargando el nivel…",
+    // A missing asset must not stop the demo whose subject is missing assets.
+    tolerantAssets: true,
+    assets: (assets) => declare(assets),
+}, (app) => {
+    const { gl, keyboard } = app;
 
-    const delBtn = button("Eliminar forma", deleteSelected, { className: "danger" });
+    const texture = app.assets.texture("hoja");
+    const level = app.assets.json("nivel");
+    const sheet = new SpriteSheet(texture, { frameWidth: CELL, frameHeight: CELL });
 
-    const props = el("div", { id: "props", className: "disabled" }, [
-        el("div", { className: "row" }, [el("label", { textContent: "Color" }), color]),
-        posX.row, posY.row, rot.row, scale.row,
-        bodyType.row, group.row, bounce.row,
-        el("div", { className: "row" }, [delBtn]),
+    // --- The scene, built from the JSON that was just loaded --------------
+    const rows = level.tiles.length;
+    const cols = level.tiles[0].length;
+    const originX = -(cols - 1) / 2;
+    const originY = (rows - 1) / 2;
+    const place = (frameIndex, col, row, layer, size = null) =>
+        app.add(new Sprite(gl, {
+            texture, frame: sheet.frame(frameIndex), pixelsPerUnit: PPU, width: size, height: size,
+        }).setPosition({ x: originX + col, y: originY - row }).setLayer(layer).init());
+
+    for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+            place(level.tiles[row][col] === "1" ? 1 : 0, col, row, LAYER.GROUND, 1.04);
+        }
+    }
+
+    const coins = level.monedas.map(([col, row]) => place(2, col, row, LAYER.PROP));
+    const hero = place(3, level.inicio[0], level.inicio[1], LAYER.ACTOR);
+
+    // The coins bob, so it is obvious the scene is live and not a screenshot.
+    const bobbing = coins.map((coin, i) => ({ coin, base: coin.position.y, phase: i * 0.7 }));
+
+    app.camera.zoom = 0.62;
+    app.camera.centerOn(0, 0);
+
+    // --- Panel -------------------------------------------------------------
+    const rowsBox = el("div", { className: "rows" });
+    const progFill = el("i");
+    const progBar = el("div", { className: "prog" }, [progFill]);
+    const kTotal = kv("Assets"), kTime = kv("Tiempo total"), kFailed = kv("Fallidos"),
+          kCache = kv("Descargas evitadas"), kLevel = kv("Nivel");
+
+    const reloadBtn = button("Recargar todo (R)", () => reload());
+    const soundBtn = button("Sonar moneda (S)", () => playCoin());
+    const brokenBox = el("input", { type: "checkbox", checked: true });
+    const brokenRow = el("label", { className: "row" }, [
+        brokenBox, el("span", { textContent: "Incluir un asset roto" }),
     ]);
 
-    // --- Scene list ---
-    const list = el("div", { id: "list" });
-    const emptyHint = el("div", { className: "empty", textContent: "Escena vacía. Añade una forma." });
-    list.append(emptyHint);
-
-    // --- Add buttons ---
-    const addButtons = Object.keys(FACTORIES).map((name) => button(name, () => addShape(name)));
-
-    // --- Simulation controls ---
-    const playBtn = button("▶ Play", togglePlay, { className: "primary" });
-    const resetBtn = button("↺ Reiniciar", reset);
-    const gravityChk = el("input", { type: "checkbox" });
-    gravityChk.onchange = () => { world.gravity.y = gravityChk.checked ? GRAVITY_Y : 0; };
-    const gravityRow = el("label", { className: "row" }, [gravityChk, el("span", { textContent: "Gravedad" })]);
-
     app.addPanel(
-        card("Simulación", [el("div", { className: "grid" }, [playBtn, resetBtn]), gravityRow]),
-        card("Añadir", [el("div", { className: "grid" }, addButtons)]),
-        card("Escena", [list]),
-        card("Propiedades", [props]),
+        card("Manifiesto", [
+            progBar, rowsBox,
+            kTotal.row, kTime.row, kFailed.row, kCache.row,
+            hint("Cada fila es un asset: el punto es su estado y el número, lo que tardó."),
+        ]),
+        card("Volver a cargar", [
+            reloadBtn,
+            el("div", { style: "margin-top:8px" }, [soundBtn]),
+            brokenRow,
+            hint("Recargar usa un Assets nuevo con el mismo manifiesto, para poder ver el proceso en vez de solo el resultado."),
+        ]),
+        card("Lo que se cargó", [
+            kLevel.row,
+            el("div", { className: "hint", style: "margin-top:6px; text-align:left" }, [
+                el("div", { textContent: app.assets.text("creditos") }),
+            ]),
+            hint("El mapa de arriba está construido a partir del JSON, con la textura del PNG y el sonido del WAV. Nada de eso venía en el HTML."),
+        ]),
     );
 
-    // Debug handle (useful from the console or automated tests).
-    window.raptorEditor = { game, world, entries };
+    keyboard.on("r", () => reload()).on("s", () => playCoin());
 
-    // --- Behaviour ---
+    renderManifest(app.assets);
+    kLevel.set(`${level.nombre} · ${cols}×${rows}`);
 
-    function addShape(name) {
-        const hex = PALETTE[colorIndex++ % PALETTE.length];
-        const shape = FACTORIES[name]()
-            .setColor({ ...hexToRgb01(hex), alpha: 1 })
-            .setPosition({ x: 0, y: 0 })
-            .init();
-        game.add(shape);
+    window.raptorAssets = {
+        app, texture, level, sheet, coins, hero,
+        get manifest() { return app.assets.manifest; },
+        get failed() { return app.assets.failed.map((e) => ({ key: e.key, error: e.error.message })); },
+        reload, playCoin, declare,
+        Assets,
+    };
 
-        const body = new Body(shape, { type: DYNAMIC, restitution: 0.4 });
-        world.add(body);
+    app.onUpdate((dt) => {
+        elapsed += dt;
+        for (const { coin, base, phase } of bobbing) {
+            coin.setPosition({ y: base + Math.sin(elapsed * 3 + phase) * 0.09 });
+        }
+        hero.setRotation(Math.sin(elapsed * 2) * 4);
+    });
+    let elapsed = 0;
 
-        const swatch = el("span", { className: "swatch" });
-        swatch.style.background = hex;
-        const item = el("div", { className: "item" }, [swatch, el("span", { textContent: name })]);
-        item.onclick = () => selectShape(shape);
+    // --- Behaviour ---------------------------------------------------------
 
-        const entry = { shape, item, body, type: DYNAMIC, inWorld: true };
-        emptyHint.remove();
-        list.append(item);
-        entries.set(shape, entry);
+    function renderManifest(assets, { progress = null } = {}) {
+        rowsBox.replaceChildren();
+        const manifest = assets.manifest;
+        for (const entry of manifest) {
+            const row = el("div", { className: `arow ${entry.status}` }, [
+                el("span", { className: "dot" }),
+                el("span", { className: "name", textContent: entry.key }),
+                el("span", { className: "kind", textContent: entry.kind }),
+                el("span", { className: "ms", textContent: entry.status === "ready" || entry.status === "error" ? `${entry.ms} ms` : "—" }),
+            ]);
+            if (entry.error) row.append(el("span", { className: "why", textContent: entry.error }));
+            rowsBox.append(row);
+        }
 
-        selectShape(shape);
+        const ready = manifest.filter((e) => e.status === "ready").length;
+        const failed = manifest.filter((e) => e.status === "error").length;
+        const ratio = progress ? progress.ratio : (ready + failed) / Math.max(1, manifest.length);
+        progFill.style.width = `${Math.round(ratio * 100)}%`;
+        progBar.classList.toggle("failed", failed > 0);
+
+        kTotal.set(`${ready} de ${manifest.length} listos`);
+        kTime.set(`${manifest.reduce((sum, e) => sum + e.ms, 0)} ms`);
+        kFailed.set(failed ? `${failed} — mira las filas rojas` : "ninguno");
+        // Two keys pointing at one URL: the second is served from the cache, so
+        // it costs a lookup rather than a download.
+        const urls = new Set(manifest.filter((e) => e.url).map((e) => `${e.kind}:${e.url}`));
+        kCache.set(`${manifest.filter((e) => e.url).length - urls.size}`);
     }
 
-    function selectShape(shape) {
-        selected = shape;
-        const entry = entries.get(shape);
-        for (const [s, e] of entries) e.item.classList.toggle("selected", s === shape);
-        props.classList.remove("disabled");
-
-        color.value = rgb01ToHex(shape.color);
-        setSlider(posX, shape.position.x);
-        setSlider(posY, shape.position.y);
-        setSlider(rot, shape.rotation);
-        setSlider(scale, shape.scale.x);
-        bodyType.node.value = entry.type;
-        group.node.value = String(entry.body.groupIndex);
-        setSlider(bounce, entry.body.restitution);
-    }
-
-    function setBodyType(entry, type) {
-        entry.type = type;
-        if (type === "none") {
-            if (entry.inWorld) { world.remove(entry.body); entry.inWorld = false; }
-        } else {
-            if (!entry.inWorld) { world.add(entry.body); entry.inWorld = true; }
-            entry.body.setType(type);
+    async function reload() {
+        reloadBtn.disabled = true;
+        const fresh = new Assets({ gl });
+        declare(fresh, { includeBroken: brokenBox.checked });
+        renderManifest(fresh);
+        try {
+            await fresh.load({
+                tolerant: true,
+                onProgress: (progress) => renderManifest(fresh, { progress }),
+            });
+        } finally {
+            renderManifest(fresh);
+            // The scene keeps using the textures it already has; this pass is
+            // about watching the loader work. Free the new GPU copies so a
+            // dozen reloads do not leak a dozen textures.
+            fresh.dispose();
+            reloadBtn.disabled = false;
         }
     }
 
-    function deleteSelected() {
-        if (!selected) return;
-        const entry = entries.get(selected);
-        game.remove(selected);
-        world.remove(entry.body);
-        entry.item.remove();
-        entries.delete(selected);
-        selected = null;
-        props.classList.add("disabled");
-        if (entries.size === 0) list.append(emptyHint);
-    }
-
-    function togglePlay() {
-        playing = !playing;
-        if (playing && !snapshot) snapshot = capture();
-        playBtn.textContent = playing ? "⏸ Pausa" : "▶ Play";
-    }
-
-    function reset() {
-        playing = false;
-        playBtn.textContent = "▶ Play";
-        if (snapshot) restore(snapshot);
-        snapshot = null;
-        for (const entry of entries.values()) entry.body.setVelocity(0, 0);
-    }
-
-    function capture() {
-        const state = new Map();
-        for (const entry of entries.values()) {
-            state.set(entry, { x: entry.shape.position.x, y: entry.shape.position.y, rot: entry.shape.rotation });
-        }
-        return state;
-    }
-
-    function restore(state) {
-        for (const [entry, t] of state) {
-            entry.shape.setPosition({ x: t.x, y: t.y });
-            entry.shape.setRotation(t.rot);
-        }
-    }
-
-    function setSlider(control, value) {
-        control.set(value);
+    // Playing needs a user gesture — decoding did not, which is why the buffer
+    // was already sitting there when the button was first clicked.
+    function playCoin() {
+        const context = app.assets.audioContext;
+        const buffer = app.assets.status("moneda") === "ready" ? app.assets.sound("moneda") : null;
+        if (!context || !buffer) return false;
+        if (context.state === "suspended") context.resume();
+        const source = context.createBufferSource();
+        source.buffer = buffer;
+        const gain = context.createGain();
+        gain.gain.value = 0.5;
+        source.connect(gain).connect(context.destination);
+        source.start();
+        return true;
     }
 });
     </script>

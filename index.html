@@ -4,12 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Raptor — Framework 2D sobre WebGL</title>
-    <meta name="description" content="Framework 2D sobre WebGL: formas, sprites y animación, cámara, física de colisiones, entrada y audio sintetizado. Demos que se ejecutan en el navegador.">
+    <meta name="description" content="Framework 2D sobre WebGL: formas, sprites y animación, cámara, física de colisiones, entrada, carga de assets, escenas y audio sintetizado. Incluye El Bosque, un juego completo. Demos que se ejecutan en el navegador.">
     <!--
         Portada del proyecto (página de inicio de GitHub Pages). Es un archivo
         estático escrito a mano: NO lo genera tools/build.mjs. Enlaza las demos
-        autocontenidas (engine, editor, tanks, dyno, sprites, drive), que sí son
-        generadas. Edítalo directamente si cambian las demos.
+        autocontenidas (bosque, engine, editor, tanks, dyno, sprites, assets, drive),
+        que sí son generadas. Edítalo directamente si cambian las demos.
     -->
     <style>
         :root {
@@ -59,6 +59,9 @@
         .card p { font-size: 14px; color: var(--muted); margin: 0; }
         .card .go { margin-top: auto; padding-top: 10px; font-size: 13px; font-weight: 600; color: #6aa9e0; }
         a.card:hover .go { color: #8fc0ef; }
+        a.card.feature { grid-column: 1 / -1; border-color: #3d6b48; background: linear-gradient(135deg, #24352a 0%, #23262b 60%); }
+        a.card.feature:hover { border-color: #4fa661; }
+        a.card.feature .go { color: #7fe0a0; }
         footer { margin-top: 44px; text-align: center; color: var(--muted); font-size: 13px; }
         footer a { color: var(--muted); }
         footer a:hover { color: var(--text); }
@@ -71,14 +74,20 @@
             <div class="logo"><span class="dot"></span> Raptor Project</div>
             <h1>Framework <span class="grad">2D sobre WebGL</span></h1>
             <p class="tagline">
-                Un framework 2D escrito a mano: formas, cámara, física de colisiones,
-                entrada, interfaz y audio sintetizado, con un shell que lo conecta todo.
-                Las demos de abajo están construidas con él y se ejecutan en el
-                navegador, sin instalar nada.
+                Un framework 2D escrito a mano: formas y sprites, cámara, física de
+                colisiones, entrada, interfaz, carga de assets, escenas y audio
+                sintetizado, con un shell que lo conecta todo. Todo lo de abajo está
+                construido con él y se ejecuta en el navegador, sin instalar nada.
             </p>
         </header>
 
         <main class="grid">
+            <a class="card feature" href="bosque.html">
+                <span class="icon">🌲</span>
+                <h2>El Bosque — juego completo</h2>
+                <p>Menú, partida y resultado: junta las bellotas antes de que se acabe el tiempo, esquivando los árboles. Hecho entero con Raptor.</p>
+                <span class="go">Jugar →</span>
+            </a>
             <a class="card" href="engine.html">
                 <span class="icon">🔺</span>
                 <h2>Formas — hola mundo</h2>
@@ -107,6 +116,12 @@
                 <span class="icon">🧩</span>
                 <h2>Sprites y animación</h2>
                 <p>Texturas, hojas de sprites, fotogramas, tinte y capas de dibujo: camina detrás de un árbol con un personaje animado.</p>
+                <span class="go">Abrir demo →</span>
+            </a>
+            <a class="card" href="assets.html">
+                <span class="icon">📦</span>
+                <h2>Carga de assets</h2>
+                <p>El manifiesto como tabla que se llena: PNG, JSON, WAV y texto con su progreso, su caché y un fallo a la vista.</p>
                 <span class="go">Abrir demo →</span>
             </a>
             <a class="card" href="drive.html">

@@ -36,6 +36,8 @@ Raptor está hecho de piezas que se usan juntas o sueltas. De abajo arriba:
 | `input/` | Estado de teclado y mandos en pantalla que **no se contradicen** |
 | `ui/` | El armazón DOM: panel, tarjetas, sliders, lecturas, pantalla completa |
 | `audio/` | Sonido sintetizado, para que un build siga siendo un único archivo |
+| `assets/` | Declarar, cargar y leer imágenes, JSON, sonidos y fuentes |
+| `scenes/` | Menú, partida, final: cada pantalla se monta y se desmonta sola |
 | `app.js` | El shell que conecta todo lo anterior |
 
 Encima va un **kit de juego** —`controls/`, `weapons/`, `vehicles/`— del que
@@ -53,19 +55,19 @@ frente a 2709 del motor, que es la señal de que faltaba una capa. Ahora suman
 ## Instalar y construir
 
 ```bash
-npm run build     # framework (dist/) + las seis páginas autocontenidas
+npm run build     # framework (dist/) + las ocho páginas autocontenidas
 npm run check     # valida el grafo de módulos sin escribir nada
 npm test          # ejecuta las páginas en un navegador de verdad
 ```
 
 El build produce dos cosas:
 
-- **`dist/raptor.js`** — el framework como librería ESM, con los 69 nombres
+- **`dist/raptor.js`** — el framework como librería ESM, con los 77 nombres
   públicos; y **`dist/raptor.global.js`** para un `<script src>` de toda la vida,
   que deja `window.Raptor`.
 - **Las páginas** (`engine.html`, `editor.html`, `tanks.html`, `dyno.html`,
-  `drive.html`, `sprites.html`) — cada una autocontenida: gl-matrix y el
-  framework embebidos.
+  `drive.html`, `sprites.html`, `assets.html`, `bosque.html`) — cada una
+  autocontenida: gl-matrix y el framework embebidos.
 
 En una aplicación se importa desde la raíz, o desde una sola capa si solo quieres
 una:
@@ -90,12 +92,16 @@ tanks.html                 # GENERADO: demo cañón vs blindaje, doble clic
 dyno.html                  # GENERADO: banco de pruebas motor/caja, doble clic
 drive.html                 # GENERADO: batalla de tanques (IA + combate), doble clic
 sprites.html               # GENERADO: sprites, texturas y animación, doble clic
+assets.html                # GENERADO: carga de assets con manifiesto, doble clic
+bosque.html                # GENERADO: El Bosque, un juego completo, doble clic
 dev.html                   # Demo en desarrollo (módulos ES + gl-matrix por CDN)
 editor-dev.html            # Editor en desarrollo (módulos ES + gl-matrix por CDN)
 tanks-dev.html             # Demo de tanques en desarrollo (módulos ES + CDN)
 drive-dev.html             # Demo de conducción en desarrollo (módulos ES + CDN)
 dyno-dev.html              # Banco de pruebas en desarrollo (módulos ES + CDN)
 sprites-dev.html           # Demo de sprites en desarrollo (módulos ES + CDN)
+assets-dev.html            # Demo de assets en desarrollo (módulos ES + CDN)
+bosque-dev.html            # El Bosque en desarrollo (módulos ES + CDN)
 .github/workflows/
   deploy.yml               # Despliega el sitio en GitHub Pages en cada push a main
 vendor/
@@ -113,6 +119,15 @@ vehicles/
   dynoDemo.js              # Banco de pruebas: recta larga, motor y caja con telemetría
 sprites/
   spritesDemo.js           # Demo de sprites: hoja procedural, animación y capas
+assets/
+  assetsDemo.js            # Demo de carga: manifiesto, progreso, caché y fallos
+game/                      # El Bosque: un juego pequeño pero completo
+  main.js                  # Arranque: crea el SceneManager y va al menú
+  menuScene.js             # Menú principal, dificultad y mejor marca
+  forestScene.js           # La partida: mapa, movimiento, bellotas, reloj
+  endScene.js              # Resultado: victoria o derrota, y qué hacer ahora
+  forest.js                # Generación del mapa y colisión con deslizamiento
+  art.js                   # Hoja de sprites y sonidos, generados al arrancar
 components/
   index.js                 # Barrel de barrels: toda la superficie pública
   app.js                   # App: arranque, canvas, panel, entrada, ciclo de vida
@@ -122,11 +137,19 @@ components/
   ui/
     dom.js                 # el(), card(), kv(), slider(), select(), button(), hint()
     fullscreen.js          # Pantalla completa con los prefijos de Safari
+    loadingScreen.js       # Pantalla de carga: barra de progreso y errores
     index.js               # Re-exporta la interfaz
   input/
     keyboard.js            # Keyboard: teclas mantenidas, acciones y axis()
     touchpad.js            # TouchPad: pedales y taps sobre el canvas
     index.js               # Re-exporta la entrada
+  assets/
+    assets.js              # Assets: manifiesto, carga con progreso, caché y errores
+    index.js               # Re-exporta los assets
+  scenes/
+    scene.js               # Scene: se monta al entrar y se desmonta al salir
+    sceneManager.js        # SceneManager: transiciones y carga por escena
+    index.js               # Re-exporta las escenas
   render/
     texture.js             # Texture: imagen en la GPU (URL, canvas o píxeles)
     spriteSheet.js         # SpriteSheet, Animation y Animator
@@ -181,6 +204,8 @@ motor embebidos, funcionan incluso offline vía `file://`:
 - `dyno.html` — banco de pruebas de motor y caja de cambios (ver abajo).
 - `drive.html` — batalla de tanques: conduces y luchas contra IA (ver abajo).
 - `sprites.html` — sprites, texturas y animación (ver abajo).
+- `assets.html` — carga de assets: manifiesto, progreso y errores (ver abajo).
+- `bosque.html` — **El Bosque**: un juego completo con menú (ver abajo).
 
 **Online:** publicado con GitHub Pages en
 <https://jukoleda.github.io/raptor-project/>. El workflow
@@ -917,6 +942,193 @@ quads que comparten un borde caen sobre un límite de sub-píxel tras la divisi�
 en perspectiva, y el rasterizador no le da ese píxel a ninguno: aparece una
 **costura** oscura recorriendo todo el mapa. Solaparlos un poco es la solución
 habitual; la otra es rellenar el borde de cada celda en la hoja.
+
+## Cargar assets
+
+Un juego no puede dibujar una imagen que todavía no ha llegado. Sin un cargador,
+o alcanzas un asset que no está, o cada punto del código se llena de `await`. El
+patrón que funciona es viejo y aburrido: **declarar, cargar, y solo entonces
+empezar**.
+
+```js
+App.boot({
+    title: "Mi juego",
+    assets: (assets) => assets.add({
+        texture: { heroe: "heroe.png", tiles: "tiles.png" },
+        json:    { nivel: "nivel1.json" },
+        sound:   { salto: "salto.wav" },
+        font:    { titulo: "pixel.woff2" },
+    }),
+}, (app) => {
+    // Aquí ya está todo cargado: esto es una lectura síncrona, sin await.
+    const heroe = new Sprite(app.gl, { texture: app.assets.texture("heroe") }).init();
+    const nivel = app.assets.json("nivel");
+});
+```
+
+`App.boot` levanta la pantalla de carga, lo carga todo con su barra de progreso y
+solo después llama a tu `setup`. Si prefieres llevarlo a mano:
+
+```js
+const assets = new Assets({ gl });
+assets.texture("heroe", "heroe.png");
+await assets.load({ onProgress: (p) => barra(p.ratio) });
+```
+
+### El mismo nombre declara y lee
+
+Con URL encola; sin URL busca. Mantiene las dos mitades de la vida de un asset
+escritas igual:
+
+```js
+assets.texture("heroe", "heroe.png");   // declara
+assets.texture("heroe");                // lee, ya cargado
+```
+
+Tipos: `texture`, `image`, `json`, `text`, `sound` (decodificado a `AudioBuffer`)
+y `font` (registrada en `document.fonts`). `put(clave, valor)` mete algo que ya
+tienes en la mano —un canvas que dibujaste— para que lo generado y lo cargado se
+lean igual.
+
+### Lo que hace bien, que es donde duele
+
+- **Un asset que falla no cuelga el juego.** Cada tipo tiene su ruta de error y
+  su tiempo máximo, así que un nombre de archivo mal escrito es un mensaje, no un
+  spinner para siempre. Y `fetch` **no rechaza ante un 404** —llega como una
+  respuesta perfectamente correcta—, que es como un archivo que falta se
+  convierte tres frames más tarde en un `undefined is not an object`.
+- **La misma URL se carga una vez.** Dos claves pueden apuntar al mismo archivo y
+  se descarga, decodifica y sube a la GPU una sola vez.
+- **El progreso es honesto.** Ni un `<img>` ni `decodeAudioData` dan un tamaño
+  fiable, así que se cuenta en **assets**, no en bytes, y se dice. Fingir el byte
+  count es lo que produce barras que se atascan en el 73%.
+- **La concurrencia está limitada** (8 a la vez): lanzar cuatrocientas peticiones
+  de golpe es más lento, no más rápido.
+- **Leer mal se queja.** Leer antes de cargar, con el tipo equivocado, una clave
+  inexistente o una que falló, lanzan con un mensaje que dice qué pasó — en vez
+  de devolver `undefined` para que tropieces con él más adelante.
+
+### Cuando algo falla
+
+Por defecto `load()` rechaza nombrando lo que se rompió. Con `tolerant: true`
+sigue adelante y los deja en `assets.failed`, para lo que un juego puede
+perderse (un sonido decorativo). La pantalla de carga se pone en rojo y **dice
+cuál falló y por qué**: una barra parada en el 73% sin explicación es el peor
+resultado posible.
+
+### Sonido
+
+`sound()` deja un `AudioBuffer` listo. **Decodificar no necesita un gesto del
+usuario; reproducir sí**, así que el buffer ya está esperando cuando alguien pulsa
+por primera vez:
+
+```js
+const ctx = app.assets.audioContext;
+const source = ctx.createBufferSource();
+source.buffer = app.assets.sound("salto");
+source.connect(ctx.destination);
+source.start();
+```
+
+### La demo
+
+`assets.html` le da la vuelta al cargador: el manifiesto es una **tabla que ves
+llenarse**, con el estado, el tipo y lo que tardó cada asset, más una entrada
+apuntando a un archivo que no existe para que la ruta de fallo esté en pantalla
+en vez de descrita. Los assets se construyen al arrancar y se sirven como `data:`
+URIs —un PNG de verdad por un `<img>`, JSON de verdad por `fetch`, un WAV de
+verdad decodificado por Web Audio—, así que el camino asíncrono se ejercita
+entero y la página sigue siendo un único archivo. Apuntar el mismo manifiesto a
+archivos reales es cambiar las URLs y nada más.
+
+## Escenas
+
+Hasta aquí una página **era** un juego: una función de arranque, un mundo, y
+ninguna forma de ir de un menú a una partida y de ahí a un resultado. Una
+`Scene` es esa unidad que faltaba — se construye al entrar y se deshace al
+salir.
+
+```js
+class Menu extends Scene {
+    enter() {
+        this.overlay(el("h1", { textContent: "El Bosque" }));
+        this.onKey("Enter", () => this.go("juego"));
+    }
+}
+
+const escenas = new SceneManager(app);
+escenas.add("menu", new Menu()).add("juego", new Bosque());
+escenas.go("menu");
+```
+
+### Lo que importa es el deshacer
+
+Todo lo que una escena crea hay que quitarlo al salir —entidades, callbacks por
+frame, atajos de teclado, nodos del DOM— y olvidarse de uno solo es una fuga que
+notas tres cambios de escena más tarde, cuando la música del menú sigue sonando
+encima del jefe final y el bucle viejo sigue moviendo a un jugador que ya no
+existe.
+
+Por eso una `Scene` no te deja registrar esas cosas directamente:
+
+```js
+this.add(sprite)          // entidad, se quita al salir
+this.onUpdate(fn)         // callback por frame, se desengancha al salir
+this.onKey("p", pausa)    // atajo, se desata al salir
+this.overlay(nodo)        // DOM sobre el canvas, se elimina al salir
+this.panel(tarjeta)       // tarjeta del panel lateral, ídem
+```
+
+Cada uno apunta lo que hizo, y salir lo revierte. Si te saltas eso y llamas a
+`app.onUpdate` directamente, la limpieza es tuya — que es justo el trato que
+conviene hacer a propósito y no por descuido.
+
+### Lo que hace el `SceneManager`
+
+- **Carga al entrar.** Una escena declara sus assets en `preload()`, y la
+  primera vez que entras se cargan detrás de una pantalla de carga. Así el menú
+  aparece al instante y el arte del nivel llega mientras el jugador lo lee, en
+  vez de que todo espere a todo.
+- **Funde.** Un corte seco entre dos pantallas se lee como un fallo. El fundido
+  también tapa los frames en los que la escena vieja ya no está y la nueva
+  todavía no.
+- **No se pisa consigo mismo.** Dos `go()` a la vez —una tecla y un clic en el
+  mismo botón— harían dos desmontajes y dos montajes entrelazados. El segundo
+  espera.
+
+## El Bosque: un juego completo
+
+`bosque.html` es la prueba de que todo lo anterior sirve para algo. **Menú →
+partida → resultado**, con tres dificultades y mejor marca.
+
+Juntá todas las bellotas antes de que se acabe el tiempo. Los árboles no se
+cruzan. **WASD** o flechas, **P** pausa, **Esc** vuelve al menú — y en el móvil
+hay mandos en pantalla.
+
+Usa, sin excepción, todo lo que hay en el framework: el cargador declara la hoja
+y los sonidos en el `preload` de la partida, los sprites y las capas dibujan el
+bosque, el animador lleva el ciclo de andar, la cámara sigue al personaje con
+límites de mapa, y la entrada hace que un dedo y una tecla no puedan
+contradecirse.
+
+### Colisión que se desliza
+
+El mapa es una rejilla y algunas casillas son sólidas. Lo interesante es cómo se
+resuelve el choque: **un eje a la vez**.
+
+```js
+if (dx !== 0 && !blocked(x + dx, y)) x += dx;
+if (dy !== 0 && !blocked(x, y + dy)) y += dy;
+```
+
+Probar los dos a la vez y deshacer los dos es la versión que sale primero, y es
+la razón por la que un personaje **se clava** en una pared en vez de deslizarse
+a lo largo: empujar en diagonal contra un muro cancela también la componente que
+sí habría funcionado.
+
+El cuerpo del jugador es además más estrecho que su dibujo, a propósito: una caja
+de colisión que calca al personaje se siente injusta, porque los hombros se
+enganchan en huecos por los que claramente estabas apuntando.
 
 ## Formas disponibles
 

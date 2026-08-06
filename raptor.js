@@ -11,12 +11,15 @@
 // The layers, from the bottom up:
 //
 //   shapes    geometry that knows how to draw itself through a camera
+//   render    textures, sprite sheets, animation and the shader programs
 //   camera    the movable window onto the world (pan, zoom, follow, bounds)
 //   engine    canvas, GL context and the one render loop
 //   physics   bodies, convex collision (SAT) and a solver
 //   input     keyboard state and on-screen controls that agree with each other
 //   ui        the DOM chrome: panels, sliders, readouts, fullscreen
 //   audio     synthesised sound, so a build stays a single file
+//   assets    declare what a game needs, load it with progress, then start
+//   scenes    menu, match, result — each one mounts and unmounts itself
 //   app       the shell that wires all of the above together
 //
 // On top of those sits a gameplay kit — controls, weapons, vehicles — which is
@@ -29,4 +32,4 @@
 
 export * from "./components/index.js";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.4.0";

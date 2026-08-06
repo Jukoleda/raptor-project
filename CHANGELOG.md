@@ -4,6 +4,118 @@ Todos los cambios notables de este proyecto se documentan en este archivo.
 
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/).
 
+## [0.4.0] - 2026-08-06
+
+Paso 3 de los tres, y con él Raptor deja de ser un framework con demos: hay un
+juego completo hecho con él.
+
+### Añadido (Escenas)
+- **`components/scenes/scene.js`** — `Scene`: una pantalla que se construye al
+  entrar y se deshace al salir. Hasta ahora una página **era** un juego: una
+  función de arranque, un mundo, y ninguna forma de ir de un menú a una partida
+  y de ahí a un resultado.
+
+  Lo que de verdad hace falta es el **deshacer**. Todo lo que una escena crea hay
+  que quitarlo —entidades, callbacks por frame, atajos de teclado, nodos del
+  DOM— y olvidarse de uno solo es una fuga que se nota tres cambios de escena
+  más tarde, cuando el bucle viejo sigue moviendo a un jugador que ya no existe.
+  Por eso `this.add`, `this.onUpdate`, `this.onKey`, `this.overlay` y
+  `this.panel` **apuntan lo que hicieron** y salir lo revierte. Saltárselos y
+  usar `app.onUpdate` sigue estando permitido, pero entonces la limpieza es
+  tuya — que es el trato que conviene hacer a propósito y no por descuido.
+- **`components/scenes/sceneManager.js`** — `SceneManager`: guarda las escenas y
+  se mueve entre ellas. **Carga al entrar** (una escena declara sus assets en
+  `preload()` y se cargan la primera vez que se entra, así el menú aparece al
+  instante y el arte del nivel llega mientras el jugador lo lee), **funde**
+  (un corte seco se lee como un fallo, y el fundido tapa además los frames en que
+  la escena vieja ya no está y la nueva todavía no) y **no se pisa consigo
+  mismo** (dos `go()` a la vez harían dos desmontajes y dos montajes
+  entrelazados; el segundo espera).
+- **`App`** gana `app.scenes` —creado en el primer uso, así quien no use escenas
+  no paga nada— y las opciones de arranque `scenes` y `startScene`.
+- **`RaptorEngine.removeUpdater`**, sin el cual una escena no puede
+  desengancharse. El bucle itera ahora una copia de la lista, porque un updater
+  puede añadir o quitar updaters — que es exactamente lo que pasa cuando uno de
+  ellos cambia de escena.
+
+### Añadido (El Bosque, un juego completo)
+- **`bosque.html`** (fuente `game/`): **menú → partida → resultado**, con tres
+  dificultades y mejor marca. Junta las bellotas antes de que se acabe el
+  tiempo; los árboles no se cruzan. WASD o flechas, **P** pausa, **Esc** vuelve
+  al menú, y en el móvil hay mandos en pantalla.
+
+  Usa todo lo que hay en el framework: el cargador declara la hoja y los sonidos
+  en el `preload` de la partida, los sprites y las capas dibujan el bosque (se
+  camina *detrás* de las copas), el animador lleva el ciclo de andar, la cámara
+  sigue al personaje con límites de mapa, y la entrada hace que un dedo y una
+  tecla no puedan contradecirse. El arte y los sonidos se generan al arrancar y
+  se sirven como `data:` URIs, así que la página sigue siendo un único archivo.
+- **Colisión que se desliza** (`game/forest.js`): el choque se resuelve **un eje
+  a la vez**. Probar los dos a la vez y deshacer los dos es la versión que sale
+  primero, y es la razón por la que un personaje se *clava* en una pared en vez
+  de deslizarse: empujar en diagonal contra un muro cancela también la
+  componente que sí habría funcionado. El cuerpo del jugador es además más
+  estrecho que su dibujo, porque una caja que calca al personaje se siente
+  injusta — los hombros se enganchan en huecos por los que claramente apuntabas.
+
+## [0.3.0] - 2026-08-06
+
+Paso 2 de los tres: ya se puede declarar lo que un juego necesita, cargarlo con
+una barra de progreso y empezar cuando está todo.
+
+### Añadido (Carga de assets)
+- **`components/assets/assets.js`** — `Assets`: manifiesto, carga y lectura de
+  `texture`, `image`, `json`, `text`, `sound` (decodificado a `AudioBuffer`) y
+  `font` (registrada en `document.fonts`). **El mismo nombre declara y lee**: con
+  URL encola, sin URL busca, así las dos mitades de la vida de un asset se
+  escriben igual. `add({ texture: {...}, json: {...} })` declara un manifiesto
+  entero de golpe, y `put(clave, valor)` registra algo que ya tienes en la mano
+  —un canvas que dibujaste— para que lo generado y lo cargado se lean igual.
+
+  Lo que resuelve, que es donde un cargador duele de verdad:
+  - **Un asset que falla no cuelga el juego**: cada tipo tiene ruta de error y
+    tiempo máximo. Y `fetch` **no rechaza ante un 404** —llega como una respuesta
+    correcta—, que es como un archivo que falta se convierte tres frames después
+    en un `undefined is not an object`.
+  - **La misma URL se carga una vez**: dos claves pueden apuntar al mismo archivo
+    y se descarga, decodifica y sube a la GPU una sola vez.
+  - **El progreso es honesto**: ni un `<img>` ni `decodeAudioData` dan un tamaño
+    fiable, así que se cuenta en assets y no en bytes. Fingirlo es lo que produce
+    barras atascadas en el 73%.
+  - **La concurrencia está limitada** a 8: lanzar cuatrocientas peticiones de
+    golpe es más lento, no más rápido.
+  - **Leer mal se queja**: antes de cargar, con el tipo equivocado, con una clave
+    inexistente o con una que falló, todas lanzan diciendo qué pasó, en vez de
+    devolver `undefined` para que tropieces más adelante.
+  - `tolerant: true` sigue adelante y deja los fallos en `assets.failed`, para lo
+    que un juego puede perderse.
+- **`components/ui/loadingScreen.js`** — `LoadingScreen`: la pantalla que tapa el
+  canvas mientras llegan los assets. No usa ningún asset (una pantalla de carga
+  hecha con una imagen no puede aparecer hasta que algo haya cargado) y **un
+  fallo se ve**: se pone en rojo y dice cuál falló y por qué, porque una barra
+  parada en el 73% sin explicación es el peor resultado posible.
+- **`App.boot({ assets })`** — declara el manifiesto y `setup` no corre hasta que
+  está todo dentro, de modo que `app.assets.texture("heroe")` es una lectura
+  síncrona y no un `await` en cada punto del código. `app.assets` existe desde el
+  principio aunque no se cargue nada. Nuevos eventos `progress` y `assetserror`,
+  y opciones `assetPath`, `loadingTitle` y `tolerantAssets`.
+- **Demo `assets.html`** (fuente `assets/assetsDemo.js`): le da la vuelta al
+  cargador y pone el manifiesto en pantalla como una **tabla que se llena**, con
+  estado, tipo y tiempo de cada asset, más una entrada apuntando a un archivo que
+  no existe para que la ruta de fallo se vea en vez de contarse. Los assets se
+  construyen al arrancar y se sirven como `data:` URIs —un PNG de verdad por un
+  `<img>`, JSON de verdad por `fetch`, un WAV de verdad decodificado por Web
+  Audio—, así que el camino asíncrono se ejercita entero y la página sigue siendo
+  un único archivo. El mapa que se dibuja sale del JSON cargado, con la textura
+  del PNG y el sonido del WAV.
+
+### Corregido
+- **El resolutor de exports del build no entendía `export { A as B };` local**
+  (sin `from`). La cláusula se elimina del bundle, así que el nombre público
+  apuntaba a nada y el build fallaba con un mensaje que no ayudaba
+  (`ASSET_KIND → ASSET_KIND`). Ahora lo resuelve, y el nombre correcto llega a
+  `dist/`.
+
 ## [0.2.0] - 2026-08-06
 
 Con esto Raptor deja de poder dibujar solo colores planos. Un motor de juegos

@@ -6,7 +6,7 @@
     <title>Raptor — Sprites y animación</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/input/keyboard.js, components/input/touchpad.js, components/app.js, components/ui/index.js, components/render/shaders.js, components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/shapes/sprite.js, components/shapes/index.js, components/render/texture.js, components/render/spriteSheet.js, components/render/index.js, sprites/spritesDemo.js + vendor/gl-matrix-min.js
+        Source: components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/ui/loadingScreen.js, components/scenes/sceneManager.js, components/input/keyboard.js, components/input/touchpad.js, components/render/texture.js, components/assets/assets.js, components/app.js, components/ui/index.js, components/render/shaders.js, components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/shapes/sprite.js, components/shapes/index.js, components/render/spriteSheet.js, components/render/index.js, sprites/spritesDemo.js + vendor/gl-matrix-min.js
         Regenerate with: node tools/build.mjs
         This file is fully self-contained: open it directly in any browser.
     -->
@@ -207,6 +207,15 @@ function RaptorEngine() {
         return fn;
     };
 
+    // Scenes come and go, and an updater left behind keeps moving things that
+    // no longer exist. Removal iterates a copy in the loop below, so unhooking
+    // from inside an update is safe.
+    this.removeUpdater = (fn) => {
+        const index = this.updaters.indexOf(fn);
+        if (index !== -1) this.updaters.splice(index, 1);
+        return this;
+    };
+
     this._lastTime = undefined;
 
     // Whether the loop is scheduling frames. Read it; use start/stop to change.
@@ -243,7 +252,9 @@ function RaptorEngine() {
         this._lastTime = now;
         if (dt > 0.05) dt = 0.05;
 
-        for (const update of this.updaters) {
+        // A copy: an updater is allowed to add or remove updaters — which is
+        // exactly what happens when one of them switches scenes.
+        for (const update of this.updaters.slice()) {
             update(dt);
         }
 
@@ -444,6 +455,208 @@ const FULLSCREEN_STYLES = `
         #app:fullscreen #stage { flex: 0 0 auto; }
     }
 `;
+
+// ===== components/ui/loadingScreen.js =====
+// The screen that covers the canvas while the assets arrive.
+//
+// Two rules it follows, because both are easy to get wrong:
+//
+// 1. **It needs no assets of its own.** A loading screen built from an image is
+//    a loading screen that cannot appear until something has loaded.
+// 2. **A failure has to be visible.** The worst outcome is a bar that stops at
+//    73% and never says why, so a failed load turns the screen red and prints
+//    which asset broke and what the error was.
+//
+// It is a plain DOM overlay rather than something drawn in WebGL: it has to
+// work before the first frame is rendered.
+
+const LOADING_STYLES = `
+    .loading {
+        position: absolute; inset: 0; z-index: 5;
+        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+        background: #0a0d12; color: #e6e6e6; padding: 24px; text-align: center;
+        transition: opacity .25s ease;
+    }
+    .loading.done { opacity: 0; pointer-events: none; }
+    .loading .title { font-size: 15px; font-weight: 600; letter-spacing: .02em; }
+    .loading .bar {
+        width: min(320px, 70%); height: 8px; border-radius: 4px; overflow: hidden;
+        background: #1b1d21; border: 1px solid #3a3f45;
+    }
+    .loading .bar > i { display: block; height: 100%; width: 0; background: #6aa9e0; transition: width .18s ease; }
+    .loading .status { font-size: 12px; color: #9aa0a6; font-variant-numeric: tabular-nums; min-height: 1.2em; }
+    .loading.failed .bar > i { background: #d84a3a; }
+    .loading.failed .title { color: #f0a094; }
+    .loading .error {
+        font-size: 12px; color: #f0a094; text-align: left; max-width: min(460px, 90%);
+        white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+`;
+
+class LoadingScreen {
+    constructor(mount, { title = "Cargando…" } = {}) {
+        this.fill = el("i");
+        this.status = el("div", { className: "status", textContent: "preparando…" });
+        this.title = el("div", { className: "title", textContent: title });
+        this.node = el("div", { className: "loading" }, [
+            this.title,
+            el("div", { className: "bar" }, [this.fill]),
+            this.status,
+        ]);
+        mount.append(this.node);
+    }
+
+    // Takes the progress object Assets hands out.
+    update({ loaded, total, ratio, key }) {
+        this.fill.style.width = `${Math.round(ratio * 100)}%`;
+        // Counted in assets, not bytes: neither an <img> nor decodeAudioData
+        // reports progress, so pretending to know the byte count would be a lie
+        // that stalls at odd percentages.
+        this.status.textContent = `${loaded} de ${total} · ${key}`;
+        return this;
+    }
+
+    fail(error) {
+        this.node.classList.add("failed");
+        this.title.textContent = "No se pudo cargar";
+        this.status.textContent = "";
+        this.node.append(el("div", { className: "error", textContent: String(error.message || error) }));
+        return this;
+    }
+
+    // Fades out, then removes itself once the transition has actually run.
+    done() {
+        this.node.classList.add("done");
+        setTimeout(() => this.node.remove(), 300);
+        return this;
+    }
+
+    remove() {
+        this.node.remove();
+        return this;
+    }
+}
+
+// ===== components/scenes/sceneManager.js =====
+// Holds the scenes and moves between them.
+//
+//     const scenes = new SceneManager(app);
+//     scenes.add("menu", new Menu()).add("juego", new Bosque());
+//     await scenes.go("menu");
+//
+// Three things it does that a bare `currentScene = next` does not:
+//
+// 1. **It loads on the way in.** A scene declares its assets in `preload()`,
+//    and the first time you enter it, anything still pending is loaded behind a
+//    loading screen. So a menu appears instantly and the level's art arrives
+//    while the player is reading it, instead of everything waiting on everything.
+//
+// 2. **It fades.** A hard cut between two screens reads as a glitch. The fade is
+//    a DOM overlay rather than something drawn in WebGL, so it also covers the
+//    frames where the old scene is gone and the new one is not built yet.
+//
+// 3. **It cannot overlap with itself.** Two `go()` calls landing together — a
+//    key and a click on the same button — would otherwise run two teardowns and
+//    two builds interleaved. The second one waits.
+
+const SCENE_STYLES = `
+    .scene-fade {
+        position: absolute; inset: 0; z-index: 4; background: #0a0d12;
+        opacity: 0; pointer-events: none; transition: opacity var(--scene-fade, .22s) ease;
+    }
+    .scene-fade.on { opacity: 1; }
+`;
+
+class SceneManager {
+    constructor(app, { fadeMs = 220 } = {}) {
+        this.app = app;
+        this.scenes = new Map();
+        this.current = null;
+        this.fadeMs = fadeMs;
+        this._busy = null;
+        this._preloaded = new Set();
+
+        this.fade = document.createElement("div");
+        this.fade.className = "scene-fade";
+        this.fade.style.setProperty("--scene-fade", `${fadeMs}ms`);
+        app.stage.append(this.fade);
+    }
+
+    add(name, scene) {
+        scene.name = scene.name === "escena" ? name : scene.name;
+        this.scenes.set(name, scene);
+        return this;
+    }
+
+    get(name) {
+        return this.scenes.get(name) || null;
+    }
+
+    get name() {
+        return this.current ? [...this.scenes].find(([, s]) => s === this.current)?.[0] ?? null : null;
+    }
+
+    // Switches scenes. Returns a promise that resolves once the new one is
+    // built, so a test — or a cutscene — can wait for it.
+    go(name, data) {
+        // Serialised: a second call queues behind the first instead of
+        // interleaving a teardown with a build.
+        this._busy = (this._busy || Promise.resolve()).then(() => this._go(name, data));
+        return this._busy;
+    }
+
+    async _go(name, data) {
+        const next = this.scenes.get(name);
+        if (!next) throw new Error(`Raptor: no hay ninguna escena llamada "${name}"`);
+
+        if (this.current) await this._setFade(true);
+
+        if (this.current) {
+            this.current._exit();
+            this.current = null;
+        }
+
+        // First entry: give the scene a chance to declare what it needs, and
+        // load whatever is still pending.
+        if (!this._preloaded.has(name)) {
+            this._preloaded.add(name);
+            next.app = this.app;
+            next.manager = this;
+            next.preload(this.app.assets);
+            if (this.app.assets.pending > 0) {
+                const screen = new LoadingScreen(this.app.stage, { title: `Cargando ${name}…` });
+                try {
+                    await this.app.assets.load({ onProgress: (p) => screen.update(p) });
+                    screen.remove();
+                } catch (error) {
+                    screen.fail(error);
+                    throw error;
+                }
+            }
+        }
+
+        this.current = next;
+        next._enter(this.app, this, data);
+        this.app._emit("scene", { name, scene: next, data });
+
+        await this._setFade(false);
+        return next;
+    }
+
+    _setFade(on) {
+        this.fade.classList.toggle("on", on);
+        // Waiting out the transition is what keeps the swap hidden; without it
+        // the new scene pops in while the screen is still black.
+        return new Promise((resolve) => setTimeout(resolve, this.fadeMs));
+    }
+
+    destroy() {
+        if (this.current) this.current._exit();
+        this.current = null;
+        this.fade.remove();
+        return this;
+    }
+}
 
 // ===== components/input/keyboard.js =====
 // Keyboard input as state, not as a pile of event handlers.
@@ -696,6 +909,469 @@ class TouchPad {
     }
 }
 
+// ===== components/render/texture.js =====
+// An image on the GPU.
+//
+// Three things about WebGL 1 textures trip everyone up, so they are handled
+// here once instead of at every call site:
+//
+// 1. **Y is flipped.** An image's first row is its *top*; a GL texture's first
+//    row is its *bottom*. Without UNPACK_FLIP_Y_WEBGL every sprite is upside
+//    down, which people usually "fix" by flipping the UVs and then fight
+//    forever. Flipped on upload, once.
+//
+// 2. **Non-power-of-two.** A texture whose sides are not powers of two cannot
+//    have mipmaps and cannot REPEAT — it renders black if you ask for either.
+//    Since real sprite sheets are rarely 512×512, the size is checked and the
+//    parameters are chosen accordingly, rather than leaving a black rectangle
+//    and no explanation.
+//
+// 3. **Loading takes time.** A texture cannot be used the frame you ask for it.
+//    Every Texture is therefore usable *immediately*, backed by a 1×1 white
+//    pixel, and swaps itself for the real image when it arrives. Nothing has to
+//    wait, and nothing crashes in between.
+//
+// Sources: a URL, an <img>, a <canvas>, or raw pixels. The canvas one matters
+// more than it looks — it is how the demos build sprite sheets *procedurally*,
+// so the generated pages stay single files that open from file:// with no
+// assets next to them, exactly like the synthesised engine sound.
+
+function isPowerOfTwo(value) {
+    return (value & (value - 1)) === 0 && value > 0;
+}
+
+class Texture {
+    constructor(gl, { smooth = false, wrap = false, label = "" } = {}) {
+        this.gl = gl;
+        this.label = label;
+        this.smooth = smooth;   // linear filtering; off by default for pixel art
+        this.wrap = wrap;       // REPEAT; only possible on power-of-two sizes
+        this.width = 1;
+        this.height = 1;
+        this.ready = false;
+
+        this.handle = gl.createTexture();
+        // A single white pixel, so the texture is drawable before its image
+        // exists. White because sprites multiply by their tint: an unloaded
+        // sprite shows as its tint colour rather than as a black hole.
+        this._upload(new Uint8Array([255, 255, 255, 255]), 1, 1);
+    }
+
+    // --- Sources ---------------------------------------------------------
+
+    // Kicks off the load and returns the Texture *now*; `texture.loaded` is the
+    // promise for code that would rather wait.
+    static fromImage(gl, url, options = {}) {
+        const texture = new Texture(gl, { label: url, ...options });
+        texture.loaded = new Promise((resolve, reject) => {
+            const image = new Image();
+            // Only set for cross-origin URLs: setting it for a same-origin or
+            // data: URL makes some browsers refuse the load outright.
+            if (/^https?:/i.test(url) && !url.startsWith(location.origin)) {
+                image.crossOrigin = "anonymous";
+            }
+            image.onload = () => { texture.setSource(image); resolve(texture); };
+            image.onerror = () => reject(new Error(`Raptor: no se pudo cargar la textura "${url}"`));
+            image.src = url;
+        });
+        return texture;
+    }
+
+    static fromCanvas(gl, canvas, options = {}) {
+        const texture = new Texture(gl, { label: "canvas", ...options });
+        texture.setSource(canvas);
+        texture.loaded = Promise.resolve(texture);
+        return texture;
+    }
+
+    // Raw RGBA bytes, four per pixel, top row first.
+    static fromPixels(gl, pixels, width, height, options = {}) {
+        const texture = new Texture(gl, { label: "pixels", ...options });
+        texture._upload(pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels), width, height);
+        texture.ready = true;
+        texture.loaded = Promise.resolve(texture);
+        return texture;
+    }
+
+    // A flat colour, handy as a placeholder or for solid overlays.
+    static solid(gl, { red = 1, green = 1, blue = 1, alpha = 1 } = {}) {
+        const byte = (v) => Math.round(Math.max(0, Math.min(1, v)) * 255);
+        return Texture.fromPixels(gl, new Uint8Array([byte(red), byte(green), byte(blue), byte(alpha)]), 1, 1);
+    }
+
+    // --- Upload ----------------------------------------------------------
+
+    // Replaces the contents with an <img>, <canvas>, ImageBitmap or ImageData.
+    setSource(source) {
+        const gl = this.gl;
+        this.width = source.width;
+        this.height = source.height;
+
+        gl.bindTexture(gl.TEXTURE_2D, this.handle);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        this._applyParameters();
+
+        this.ready = true;
+        if (this.onLoad) this.onLoad(this);
+        return this;
+    }
+
+    _upload(pixels, width, height) {
+        const gl = this.gl;
+        this.width = width;
+        this.height = height;
+        gl.bindTexture(gl.TEXTURE_2D, this.handle);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        this._applyParameters();
+        return this;
+    }
+
+    _applyParameters() {
+        const gl = this.gl;
+        const potential = isPowerOfTwo(this.width) && isPowerOfTwo(this.height);
+
+        // Mipmaps and REPEAT need power-of-two sides. Asking for them anyway is
+        // the classic "why is my sprite black" — so they are simply not asked
+        // for unless the size allows it.
+        if (potential && this.smooth) {
+            gl.generateMipmap(gl.TEXTURE_2D);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        } else {
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, this.smooth ? gl.LINEAR : gl.NEAREST);
+        }
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, this.smooth ? gl.LINEAR : gl.NEAREST);
+
+        const mode = this.wrap && potential ? gl.REPEAT : gl.CLAMP_TO_EDGE;
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, mode);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, mode);
+    }
+
+    // NEAREST keeps pixel art crisp; LINEAR smooths photos and big scales.
+    setSmooth(smooth) {
+        this.smooth = smooth;
+        this.gl.bindTexture(this.gl.TEXTURE_2D, this.handle);
+        this._applyParameters();
+        return this;
+    }
+
+    bind(unit = 0) {
+        const gl = this.gl;
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        gl.bindTexture(gl.TEXTURE_2D, this.handle);
+        return unit;
+    }
+
+    dispose() {
+        if (this.handle) this.gl.deleteTexture(this.handle);
+        this.handle = null;
+        this.ready = false;
+    }
+}
+
+// ===== components/assets/assets.js =====
+// The asset loader: declare what a game needs, load it, then start.
+//
+// Without one, a game either reaches for an image that has not arrived yet, or
+// every call site grows its own `await`. The pattern that works is boring and
+// old: declare a manifest, load it with a progress bar, and only then run the
+// game — by which point `assets.get("heroe")` is a plain synchronous lookup.
+//
+//     assets.texture("heroe", "heroe.png");
+//     assets.json("nivel", "nivel1.json");
+//     assets.sound("salto", "salto.wav");
+//     await assets.load({ onProgress: (p) => barra(p.ratio) });
+//
+//     assets.texture("heroe");   // ya cargada, sin await
+//
+// The same method declares and reads: with a URL it enqueues, without one it
+// looks up. That is deliberate — it keeps the two halves of an asset's life
+// spelled the same way.
+//
+// What it gets right, because these are the ways a loader actually hurts:
+//
+// - **A failed asset does not hang the game.** Every kind has an error path and
+//   a timeout, so a typo'd filename is a message, not a spinner forever.
+// - **The same URL loads once.** Two names can point at one file and it is
+//   fetched, decoded and uploaded a single time.
+// - **Progress is honest.** For images and audio the browser gives no reliable
+//   byte count, so progress is counted in *assets*, not bytes, and says so.
+// - **Concurrency is capped.** Firing four hundred requests at once is slower
+//   than eight at a time, not faster.
+// - **Loading twice is safe.** `load()` resolves immediately if nothing is
+//   pending, so calling it after adding one more asset does the right thing.
+
+const ASSET_KIND = {
+    TEXTURE: "texture",
+    IMAGE: "image",
+    JSON: "json",
+    TEXT: "text",
+    SOUND: "sound",
+    FONT: "font",
+};
+
+const DEFAULT_TIMEOUT = 20000;
+
+// Rejects if the underlying load has not settled in time. Without this a
+// request that never answers leaves the loading screen up forever, which reads
+// to a player as "the game is broken" with nothing to go on.
+function withTimeout(promise, ms, what) {
+    if (!ms) return promise;
+    let timer;
+    return Promise.race([
+        promise.finally(() => clearTimeout(timer)),
+        new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`agotó el tiempo tras ${ms} ms`)), ms);
+        }),
+    ]).finally(() => clearTimeout(timer));
+}
+
+class Assets {
+    constructor({ gl = null, basePath = "", timeout = DEFAULT_TIMEOUT, concurrency = 8 } = {}) {
+        this.gl = gl;
+        this.basePath = basePath;
+        this.timeout = timeout;
+        this.concurrency = concurrency;
+
+        this.entries = new Map();  // key -> { key, kind, url, options, status, value, error, ms }
+        this._byUrl = new Map();   // url -> promise, so one file loads once
+        this._audioContext = null;
+    }
+
+    // The context sounds were decoded into. Playing needs a user gesture;
+    // decoding did not, which is why this exists before anyone has clicked.
+    get audioContext() {
+        return this._audioContext;
+    }
+
+    get pending() {
+        return [...this.entries.values()].filter((e) => e.status === "pending").length;
+    }
+
+    get failed() {
+        return [...this.entries.values()].filter((e) => e.status === "error");
+    }
+
+    // Everything declared so far, for a progress table or a debug panel.
+    get manifest() {
+        return [...this.entries.values()].map(({ key, kind, url, status, error, ms }) =>
+            ({ key, kind, url, status, error: error?.message ?? null, ms }));
+    }
+
+    // --- Declaring and reading -------------------------------------------
+
+    _declare(kind, key, url, options) {
+        if (this.entries.has(key)) {
+            const existing = this.entries.get(key);
+            // Re-declaring the same thing is a no-op; re-declaring a *different*
+            // URL under a live key is a mistake worth naming.
+            if (existing.url !== this._resolve(url)) {
+                throw new Error(`Raptor: el asset "${key}" ya está declarado como ${existing.url}`);
+            }
+            return existing;
+        }
+        const entry = {
+            key, kind, url: this._resolve(url), options: options || {},
+            status: "pending", value: null, error: null, ms: 0,
+        };
+        this.entries.set(key, entry);
+        return entry;
+    }
+
+    _resolve(url) {
+        // A data: URI is already absolute, and so is anything with a scheme.
+        if (!this.basePath || /^([a-z]+:|\/)/i.test(url)) return url;
+        return this.basePath.replace(/\/$/, "") + "/" + url.replace(/^\//, "");
+    }
+
+    _read(key, kind) {
+        const entry = this.entries.get(key);
+        if (!entry) throw new Error(`Raptor: no hay ningún asset llamado "${key}"`);
+        if (entry.status === "pending") {
+            throw new Error(`Raptor: el asset "${key}" todavía no se ha cargado — falta un await assets.load()`);
+        }
+        if (entry.status === "error") throw entry.error;
+        if (kind && entry.kind !== kind) {
+            throw new Error(`Raptor: "${key}" es ${entry.kind}, no ${kind}`);
+        }
+        return entry.value;
+    }
+
+    // With a URL these declare; without one they read. Same name, both halves.
+    texture(key, url = null, options) { return url === null ? this._read(key, ASSET_KIND.TEXTURE) : this._declare(ASSET_KIND.TEXTURE, key, url, options) && this; }
+    image(key, url = null, options) { return url === null ? this._read(key, ASSET_KIND.IMAGE) : this._declare(ASSET_KIND.IMAGE, key, url, options) && this; }
+    json(key, url = null, options) { return url === null ? this._read(key, ASSET_KIND.JSON) : this._declare(ASSET_KIND.JSON, key, url, options) && this; }
+    text(key, url = null, options) { return url === null ? this._read(key, ASSET_KIND.TEXT) : this._declare(ASSET_KIND.TEXT, key, url, options) && this; }
+    sound(key, url = null, options) { return url === null ? this._read(key, ASSET_KIND.SOUND) : this._declare(ASSET_KIND.SOUND, key, url, options) && this; }
+    font(key, url = null, options) { return url === null ? this._read(key, ASSET_KIND.FONT) : this._declare(ASSET_KIND.FONT, key, url, options) && this; }
+
+    // Untyped read, when the caller knows what it asked for.
+    get(key) { return this._read(key); }
+    has(key) { return this.entries.has(key) && this.entries.get(key).status === "ready"; }
+    status(key) { return this.entries.get(key)?.status ?? null; }
+
+    // Registers something already in hand — a canvas you drew, a texture you
+    // built — so generated and loaded assets are reached the same way. A
+    // registry is useful even for things that never travelled over a network.
+    put(key, value, kind = "custom") {
+        this.entries.set(key, { key, kind, url: null, options: {}, status: "ready", value, error: null, ms: 0 });
+        return this;
+    }
+
+    // Declares a whole manifest at once:
+    //   assets.manifest({ texture: { heroe: "heroe.png" }, json: { nivel: "n1.json" } })
+    add(manifest) {
+        for (const [kind, group] of Object.entries(manifest)) {
+            if (typeof this[kind] !== "function") throw new Error(`Raptor: tipo de asset desconocido "${kind}"`);
+            for (const [key, url] of Object.entries(group)) {
+                Array.isArray(url) ? this[kind](key, url[0], url[1]) : this[kind](key, url);
+            }
+        }
+        return this;
+    }
+
+    // --- Loading -----------------------------------------------------------
+
+    // `onProgress` receives { loaded, total, ratio, key, entry } after each one.
+    // `tolerant` keeps going and reports failures in `assets.failed` instead of
+    // rejecting — for assets a game can live without (a decorative sound).
+    async load({ onProgress = null, tolerant = false } = {}) {
+        const queue = [...this.entries.values()].filter((e) => e.status === "pending");
+        const total = queue.length;
+        if (total === 0) return this;
+
+        let loaded = 0;
+        const report = (entry) => {
+            loaded++;
+            if (onProgress) onProgress({ loaded, total, ratio: loaded / total, key: entry.key, entry });
+        };
+
+        // A fixed pool of workers pulling from one queue: simpler than batching,
+        // and it keeps exactly `concurrency` requests in flight the whole time
+        // instead of stalling at the end of each batch.
+        let next = 0;
+        const worker = async () => {
+            while (next < queue.length) {
+                const entry = queue[next++];
+                const started = (typeof performance !== "undefined" ? performance : Date).now();
+                try {
+                    entry.status = "loading";
+                    entry.value = await this._loadOne(entry);
+                    entry.status = "ready";
+                } catch (error) {
+                    entry.status = "error";
+                    entry.error = error instanceof Error ? error : new Error(String(error));
+                }
+                entry.ms = Math.round((typeof performance !== "undefined" ? performance : Date).now() - started);
+                report(entry);
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(this.concurrency, total) }, worker));
+
+        const failed = this.failed;
+        if (failed.length && !tolerant) {
+            throw new Error(
+                `Raptor: fallaron ${failed.length} de ${total} assets:\n  ` +
+                failed.map((e) => `${e.key} (${e.url}): ${e.error.message}`).join("\n  "),
+            );
+        }
+        return this;
+    }
+
+    _loadOne(entry) {
+        // One promise per URL: two keys pointing at the same file share the
+        // fetch, the decode and — for a texture — the GPU upload.
+        const cacheKey = `${entry.kind}:${entry.url}`;
+        if (!this._byUrl.has(cacheKey)) {
+            this._byUrl.set(cacheKey, withTimeout(this._fetchByKind(entry), entry.options.timeout ?? this.timeout, entry.url));
+        }
+        return this._byUrl.get(cacheKey);
+    }
+
+    _fetchByKind(entry) {
+        switch (entry.kind) {
+            case ASSET_KIND.TEXTURE: return this._loadTexture(entry);
+            case ASSET_KIND.IMAGE: return this._loadImage(entry.url);
+            case ASSET_KIND.JSON: return this._loadFetch(entry.url, "json");
+            case ASSET_KIND.TEXT: return this._loadFetch(entry.url, "text");
+            case ASSET_KIND.SOUND: return this._loadSound(entry);
+            case ASSET_KIND.FONT: return this._loadFont(entry);
+            default: throw new Error(`Raptor: tipo de asset desconocido "${entry.kind}"`);
+        }
+    }
+
+    async _loadTexture(entry) {
+        if (!this.gl) throw new Error("Raptor: para cargar texturas hace falta un contexto WebGL (new Assets({ gl }))");
+        const image = await this._loadImage(entry.url);
+        const texture = new Texture(this.gl, { label: entry.url, ...entry.options });
+        texture.setSource(image);
+        return texture;
+    }
+
+    _loadImage(url) {
+        return new Promise((resolve, reject) => {
+            const image = new Image();
+            if (/^https?:/i.test(url) && !url.startsWith(location.origin)) image.crossOrigin = "anonymous";
+            image.onload = () => resolve(image);
+            image.onerror = () => reject(new Error("no se pudo cargar la imagen"));
+            image.src = url;
+        });
+    }
+
+    async _loadFetch(url, as) {
+        // A network-level failure throws a bare "Failed to fetch" with no clue
+        // which URL it was, so it gets named here.
+        let response;
+        try {
+            response = await fetch(url);
+        } catch (cause) {
+            throw new Error(`no se pudo alcanzar el recurso (${cause.message})`);
+        }
+        // fetch only rejects on network failure: a 404 arrives as a perfectly
+        // successful response, which is how missing files quietly become
+        // "undefined is not an object" three frames later.
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return as === "json" ? response.json() : response.text();
+    }
+
+    // Decoded into an AudioBuffer, ready for a source node. Decoding is allowed
+    // before any user gesture — only *playing* needs one — so the context is
+    // created here and left suspended.
+    async _loadSound(entry) {
+        const AudioCtx = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
+        if (!AudioCtx) throw new Error("este navegador no trae Web Audio");
+        if (!this._audioContext) this._audioContext = entry.options.context || new AudioCtx();
+        const response = await fetch(entry.url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const bytes = await response.arrayBuffer();
+        // The callback form is the one old Safari understands; the promise form
+        // is not universal even now.
+        return new Promise((resolve, reject) => {
+            this._audioContext.decodeAudioData(bytes, resolve, () => reject(new Error("no se pudo decodificar el audio")));
+        });
+    }
+
+    async _loadFont(entry) {
+        if (typeof FontFace === "undefined") throw new Error("este navegador no trae FontFace");
+        const face = new FontFace(entry.options.family || entry.key, `url(${entry.url})`, entry.options.descriptors);
+        await face.load();
+        document.fonts.add(face);
+        return face;
+    }
+
+    // Frees the GPU side of every texture. The registry stays, so a scene can
+    // be torn down and rebuilt without leaking.
+    dispose() {
+        for (const entry of this.entries.values()) {
+            if (entry.kind === ASSET_KIND.TEXTURE && entry.value) entry.value.dispose();
+        }
+        this.entries.clear();
+        this._byUrl.clear();
+        return this;
+    }
+}
+
 // ===== components/app.js =====
 // The front door. `App` is what you reach for to build something with Raptor;
 // everything else is a part you can also use on its own.
@@ -723,6 +1399,9 @@ class TouchPad {
 
 
 
+
+
+
 class App {
     constructor({
         mount = null,          // where the page goes; defaults to <body>
@@ -734,9 +1413,10 @@ class App {
         keyboard = true,       // create and attach a Keyboard
         touch = true,          // create a TouchPad over the canvas
         autoResize = false,    // track the CSS box and resize the buffer to it
+        assetPath = "",        // prefix for every relative asset URL
     } = {}) {
         injectStyles(
-            (baseStyles ? BASE_STYLES + PAD_STYLES + FULLSCREEN_STYLES : "") + styles,
+            (baseStyles ? BASE_STYLES + PAD_STYLES + FULLSCREEN_STYLES + LOADING_STYLES + SCENE_STYLES : "") + styles,
             "raptor-styles",
         );
 
@@ -749,6 +1429,9 @@ class App {
         this.engine.createWindow(this.stage, { width, height });
         this.keyboard = keyboard ? new Keyboard().attach(window) : null;
         this.touch = touch ? new TouchPad(this.stage, { keyboard: this.keyboard }) : null;
+        // The registry exists from the start, so a scene can `put()` something
+        // it generated even if it never loads a file.
+        this.assets = new Assets({ gl: this.gl, basePath: assetPath });
         this.plugins = [];
 
         this._offFullscreen = onFullscreenChange((on) => this._emit("fullscreenchange", on));
@@ -762,21 +1445,70 @@ class App {
     //
     // The loop starts *after* setup returns, so a scene can add entities and
     // updaters without the first frame catching it half-built.
+    // Waits for the document, builds the app, loads whatever `assets` declares
+    // and then hands it all to `setup`. `setup` may return a cleanup function;
+    // it runs if the app is ever destroyed.
+    //
+    // The loop starts *after* setup returns, so a scene can add entities and
+    // updaters without the first frame catching it half-built — and after the
+    // assets are in, so `assets.texture("x")` is a plain synchronous lookup
+    // rather than something to await at every call site.
+    //
+    //     App.boot({
+    //         assets: (a) => a.texture("heroe", "heroe.png"),
+    //     }, (app) => {
+    //         new Sprite(app.gl, { texture: app.assets.texture("heroe") }).init();
+    //     });
     static boot(options, setup) {
         if (typeof options === "function") { setup = options; options = {}; }
-        const run = () => {
+
+        const run = async () => {
             const app = new App(options);
             if (options.title) app.title(options.title);
-            app._cleanup = setup(app) || null;
+
+            if (options.assets) {
+                // The screen goes up before anything is declared, so a slow
+                // manifest never shows a bare canvas first.
+                const screen = new LoadingScreen(app.stage, { title: options.loadingTitle || "Cargando…" });
+                try {
+                    await options.assets(app.assets, app);
+                    await app.assets.load({
+                        onProgress: (progress) => {
+                            screen.update(progress);
+                            app._emit("progress", progress);
+                        },
+                        tolerant: options.tolerantAssets === true,
+                    });
+                    screen.done();
+                } catch (error) {
+                    // Stop here and *say so*. Running the scene with half its
+                    // assets missing turns one clear message into a pile of
+                    // null-reference errors that hide the real cause.
+                    screen.fail(error);
+                    app._emit("assetserror", error);
+                    throw error;
+                }
+            }
+
+            app._cleanup = (setup ? setup(app) : null) || null;
+
+            // Declaring scenes in the boot options is the shortest path from
+            // "a page" to "a game with a menu".
+            if (options.scenes) {
+                for (const [name, scene] of Object.entries(options.scenes)) app.scenes.add(name, scene);
+            }
             app.start();
+            // After start(), so the first scene builds against a live loop.
+            if (options.startScene) await app.scenes.go(options.startScene);
             return app;
         };
+
         if (document.readyState === "loading") {
-            return new Promise((resolve) => {
-                document.addEventListener("DOMContentLoaded", () => resolve(run()));
+            return new Promise((resolve, reject) => {
+                document.addEventListener("DOMContentLoaded", () => run().then(resolve, reject));
             });
         }
-        return Promise.resolve(run());
+        return run();
     }
 
     // --- The bits scenes reach for most ---------------------------------
@@ -791,6 +1523,13 @@ class App {
     add(entity) { return this.engine.add(entity); }
     remove(entity) { this.engine.remove(entity); return this; }
     onUpdate(fn) { this.engine.addUpdater(fn); return fn; }
+    removeUpdate(fn) { this.engine.removeUpdater(fn); return this; }
+
+    // Created on first use, so pages that never use scenes pay nothing.
+    get scenes() {
+        if (!this._scenes) this._scenes = new SceneManager(this);
+        return this._scenes;
+    }
 
     start() { this.engine.start(); return this; }
     stop() { this.engine.stop(); return this; }
@@ -872,8 +1611,8 @@ class App {
     }
 
     // --- Events ----------------------------------------------------------
-    // "resize" and "fullscreenchange", so a scene can react without hunting
-    // down the prefixed DOM events itself.
+    // "resize", "fullscreenchange", "progress" and "assetserror", so a scene
+    // can react without hunting down the prefixed DOM events itself.
 
     on(event, handler) {
         const list = this._listeners.get(event) || [];
@@ -891,7 +1630,9 @@ class App {
     destroy() {
         this.stop();
         if (typeof this._cleanup === "function") this._cleanup();
+        this._scenes?.destroy();
         this.keyboard?.detach();
+        this.assets?.dispose();
         this._resizeObserver?.disconnect();
         this._offFullscreen?.();
         this.root.remove();
@@ -1608,167 +2349,6 @@ class Sprite extends Shape {
 
 // ===== components/shapes/index.js =====
 // Convenience barrel for every shape primitive the engine ships with.
-
-// ===== components/render/texture.js =====
-// An image on the GPU.
-//
-// Three things about WebGL 1 textures trip everyone up, so they are handled
-// here once instead of at every call site:
-//
-// 1. **Y is flipped.** An image's first row is its *top*; a GL texture's first
-//    row is its *bottom*. Without UNPACK_FLIP_Y_WEBGL every sprite is upside
-//    down, which people usually "fix" by flipping the UVs and then fight
-//    forever. Flipped on upload, once.
-//
-// 2. **Non-power-of-two.** A texture whose sides are not powers of two cannot
-//    have mipmaps and cannot REPEAT — it renders black if you ask for either.
-//    Since real sprite sheets are rarely 512×512, the size is checked and the
-//    parameters are chosen accordingly, rather than leaving a black rectangle
-//    and no explanation.
-//
-// 3. **Loading takes time.** A texture cannot be used the frame you ask for it.
-//    Every Texture is therefore usable *immediately*, backed by a 1×1 white
-//    pixel, and swaps itself for the real image when it arrives. Nothing has to
-//    wait, and nothing crashes in between.
-//
-// Sources: a URL, an <img>, a <canvas>, or raw pixels. The canvas one matters
-// more than it looks — it is how the demos build sprite sheets *procedurally*,
-// so the generated pages stay single files that open from file:// with no
-// assets next to them, exactly like the synthesised engine sound.
-
-function isPowerOfTwo(value) {
-    return (value & (value - 1)) === 0 && value > 0;
-}
-
-class Texture {
-    constructor(gl, { smooth = false, wrap = false, label = "" } = {}) {
-        this.gl = gl;
-        this.label = label;
-        this.smooth = smooth;   // linear filtering; off by default for pixel art
-        this.wrap = wrap;       // REPEAT; only possible on power-of-two sizes
-        this.width = 1;
-        this.height = 1;
-        this.ready = false;
-
-        this.handle = gl.createTexture();
-        // A single white pixel, so the texture is drawable before its image
-        // exists. White because sprites multiply by their tint: an unloaded
-        // sprite shows as its tint colour rather than as a black hole.
-        this._upload(new Uint8Array([255, 255, 255, 255]), 1, 1);
-    }
-
-    // --- Sources ---------------------------------------------------------
-
-    // Kicks off the load and returns the Texture *now*; `texture.loaded` is the
-    // promise for code that would rather wait.
-    static fromImage(gl, url, options = {}) {
-        const texture = new Texture(gl, { label: url, ...options });
-        texture.loaded = new Promise((resolve, reject) => {
-            const image = new Image();
-            // Only set for cross-origin URLs: setting it for a same-origin or
-            // data: URL makes some browsers refuse the load outright.
-            if (/^https?:/i.test(url) && !url.startsWith(location.origin)) {
-                image.crossOrigin = "anonymous";
-            }
-            image.onload = () => { texture.setSource(image); resolve(texture); };
-            image.onerror = () => reject(new Error(`Raptor: no se pudo cargar la textura "${url}"`));
-            image.src = url;
-        });
-        return texture;
-    }
-
-    static fromCanvas(gl, canvas, options = {}) {
-        const texture = new Texture(gl, { label: "canvas", ...options });
-        texture.setSource(canvas);
-        texture.loaded = Promise.resolve(texture);
-        return texture;
-    }
-
-    // Raw RGBA bytes, four per pixel, top row first.
-    static fromPixels(gl, pixels, width, height, options = {}) {
-        const texture = new Texture(gl, { label: "pixels", ...options });
-        texture._upload(pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels), width, height);
-        texture.ready = true;
-        texture.loaded = Promise.resolve(texture);
-        return texture;
-    }
-
-    // A flat colour, handy as a placeholder or for solid overlays.
-    static solid(gl, { red = 1, green = 1, blue = 1, alpha = 1 } = {}) {
-        const byte = (v) => Math.round(Math.max(0, Math.min(1, v)) * 255);
-        return Texture.fromPixels(gl, new Uint8Array([byte(red), byte(green), byte(blue), byte(alpha)]), 1, 1);
-    }
-
-    // --- Upload ----------------------------------------------------------
-
-    // Replaces the contents with an <img>, <canvas>, ImageBitmap or ImageData.
-    setSource(source) {
-        const gl = this.gl;
-        this.width = source.width;
-        this.height = source.height;
-
-        gl.bindTexture(gl.TEXTURE_2D, this.handle);
-        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
-        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-        this._applyParameters();
-
-        this.ready = true;
-        if (this.onLoad) this.onLoad(this);
-        return this;
-    }
-
-    _upload(pixels, width, height) {
-        const gl = this.gl;
-        this.width = width;
-        this.height = height;
-        gl.bindTexture(gl.TEXTURE_2D, this.handle);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
-        this._applyParameters();
-        return this;
-    }
-
-    _applyParameters() {
-        const gl = this.gl;
-        const potential = isPowerOfTwo(this.width) && isPowerOfTwo(this.height);
-
-        // Mipmaps and REPEAT need power-of-two sides. Asking for them anyway is
-        // the classic "why is my sprite black" — so they are simply not asked
-        // for unless the size allows it.
-        if (potential && this.smooth) {
-            gl.generateMipmap(gl.TEXTURE_2D);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
-        } else {
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, this.smooth ? gl.LINEAR : gl.NEAREST);
-        }
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, this.smooth ? gl.LINEAR : gl.NEAREST);
-
-        const mode = this.wrap && potential ? gl.REPEAT : gl.CLAMP_TO_EDGE;
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, mode);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, mode);
-    }
-
-    // NEAREST keeps pixel art crisp; LINEAR smooths photos and big scales.
-    setSmooth(smooth) {
-        this.smooth = smooth;
-        this.gl.bindTexture(this.gl.TEXTURE_2D, this.handle);
-        this._applyParameters();
-        return this;
-    }
-
-    bind(unit = 0) {
-        const gl = this.gl;
-        gl.activeTexture(gl.TEXTURE0 + unit);
-        gl.bindTexture(gl.TEXTURE_2D, this.handle);
-        return unit;
-    }
-
-    dispose() {
-        if (this.handle) this.gl.deleteTexture(this.handle);
-        this.handle = null;
-        this.ready = false;
-    }
-}
 
 // ===== components/render/spriteSheet.js =====
 // Slicing a texture into frames, and playing them back.

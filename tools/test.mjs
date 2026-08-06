@@ -64,16 +64,24 @@ const browser = await chromium.launch({
 });
 
 // Opens a generated page and collects anything the console complains about.
-async function open(file, contextOptions = null) {
+// `expect` is a regex for messages a demo provokes on purpose — the assets one
+// loads a missing file to show the failure path, and the browser logs that. It
+// is deliberately narrow: everything not matching still counts as a failure.
+async function open(file, contextOptions = null, { expect = null } = {}) {
     const context = contextOptions ? await browser.newContext(contextOptions) : null;
     const page = context ? await context.newPage() : await browser.newPage({ viewport: { width: 1280, height: 900 } });
     const errors = [];
-    page.on("pageerror", (e) => errors.push(String(e)));
-    page.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
+    const record = (text) => { if (!expect || !expect.test(text)) errors.push(text); };
+    page.on("pageerror", (e) => record(String(e)));
+    page.on("console", (m) => { if (m.type() === "error") record(m.text()); });
     await page.goto(`file://${join(root, file)}`);
     await page.waitForTimeout(900);
     return { page, context, errors };
 }
+
+// The assets demo points one entry at a file that does not exist, on purpose,
+// so its failure path is visible. The browser logs that as a console error.
+const EXPECTED_404 = /ERR_FILE_NOT_FOUND|no-existe\/retrato\.png/;
 
 const suites = [];
 const suite = (name, fn) => suites.push({ name, fn });
@@ -84,10 +92,11 @@ suite("pages", async () => {
     const pages = [
         ["engine.html", null], ["editor.html", "raptorEditor"], ["tanks.html", "raptorTanks"],
         ["dyno.html", "raptorDyno"], ["drive.html", "raptorDrive"],
-        ["sprites.html", "raptorSprites"],
+        ["sprites.html", "raptorSprites"], ["assets.html", "raptorAssets"],
+        ["bosque.html", "raptorBosque"],
     ];
     for (const [file, handle] of pages) {
-        const { page, errors } = await open(file);
+        const { page, errors } = await open(file, null, { expect: EXPECTED_404 });
         const shape = await page.evaluate(() => ({
             app: !!document.querySelector("#app"),
             stage: !!document.querySelector("#stage"),
@@ -99,7 +108,8 @@ suite("pages", async () => {
         ok(`${file} monta el shell de App`, shape.app && shape.stage && shape.canvas && shape.styles, JSON.stringify(shape));
         if (handle) {
             ok(`${file} expone window.${handle}`, await page.evaluate((h) => !!window[h], handle));
-            ok(`${file} construye el panel`, shape.cards > 0, `${shape.cards} tarjetas`);
+            // The game runs full-bleed with no side panel; everything else has one.
+            if (file !== "bosque.html") ok(`${file} construye el panel`, shape.cards > 0, `${shape.cards} tarjetas`);
         }
         await page.close();
     }
@@ -408,11 +418,286 @@ suite("sprites", async () => {
     await page.close();
 });
 
+
+// --- Assets: manifest, progress, cache and the failure path --------------
+
+suite("assets", async () => {
+    const { page, errors } = await open("assets.html", null, { expect: EXPECTED_404 });
+
+    const manifest = await page.evaluate(() => window.raptorAssets.manifest);
+    const byKey = Object.fromEntries(manifest.map((e) => [e.key, e]));
+    ok("se cargan las cuatro clases de asset",
+        ["hoja", "nivel", "moneda", "creditos"].every((k) => byKey[k].status === "ready"),
+        manifest.map((e) => `${e.key}:${e.status}`).join(" "));
+
+    // A missing file has to be reported with its reason, and must not stop the
+    // rest of the manifest — that is the whole difference between a loader and
+    // a pile of awaits.
+    ok("el asset roto queda en error, con motivo",
+        byKey.retrato.status === "error" && !!byKey.retrato.error, JSON.stringify(byKey.retrato));
+
+    const values = await page.evaluate(() => {
+        const a = window.raptorAssets;
+        return {
+            texW: a.texture.width, texH: a.texture.height,
+            level: a.level.nombre, rows: a.level.tiles.length, cols: a.level.tiles[0].length,
+            coins: a.coins.length, declared: a.level.monedas.length,
+            seconds: +a.app.assets.sound("moneda").duration.toFixed(3),
+            entities: a.app.entities.length,
+        };
+    });
+    ok("el PNG llega con su tamaño real", values.texW === 128 && values.texH === 32, JSON.stringify(values));
+    ok("el AudioBuffer tiene la duración del WAV", Math.abs(values.seconds - 0.28) < 0.01, `${values.seconds}s`);
+    ok("la escena se construye desde el JSON cargado",
+        values.level === "Patio" && values.coins === values.declared
+        && values.entities === values.rows * values.cols + values.coins + 1,
+        `${values.rows}×${values.cols} + ${values.coins} + héroe = ${values.entities}`);
+
+    ok("dos claves con la misma URL comparten una textura",
+        await page.evaluate(() => {
+            const a = window.raptorAssets.app.assets;
+            return a.texture("hoja") === a.texture("hoja_alias");
+        }));
+
+    // Reading has to fail loudly, not hand back undefined for someone to trip
+    // over three frames later.
+    const guards = await page.evaluate(() => {
+        const a = window.raptorAssets.app.assets;
+        const out = {};
+        const grab = (fn) => { try { fn(); return "no lanzó"; } catch (e) { return e.message; } };
+        out.failed = grab(() => a.texture("retrato"));
+        out.missing = grab(() => a.get("noexiste"));
+        out.wrongKind = grab(() => a.json("hoja"));
+        const fresh = new window.raptorAssets.Assets({ gl: window.raptorAssets.app.gl });
+        fresh.texture("x", "a.png");
+        out.pending = grab(() => fresh.texture("x"));
+        return out;
+    });
+    ok("leer uno fallido relanza su error", guards.failed.includes("cargar"), guards.failed);
+    ok("leer una clave inexistente avisa", guards.missing.includes("no hay ningún asset"), guards.missing);
+    ok("leer con el tipo equivocado avisa", guards.wrongKind.includes("es texture, no json"), guards.wrongKind);
+    ok("leer antes de load() señala el await que falta", guards.pending.includes("await"), guards.pending);
+
+    const progress = await page.evaluate(async () => {
+        const a = window.raptorAssets;
+        const fresh = new a.Assets({ gl: a.app.gl });
+        a.declare(fresh);
+        const seen = [];
+        await fresh.load({ tolerant: true, onProgress: (p) => seen.push({ ratio: +p.ratio.toFixed(3), loaded: p.loaded }) });
+        fresh.dispose();
+        return seen;
+    });
+    ok("onProgress avanza de uno en uno y acaba en 1",
+        progress.length === 6 && progress.every((p, i) => i === 0 || p.loaded === progress[i - 1].loaded + 1)
+        && progress.at(-1).ratio === 1,
+        JSON.stringify(progress.map((p) => p.ratio)));
+
+    const strict = await page.evaluate(async () => {
+        const a = window.raptorAssets;
+        const fresh = new a.Assets({ gl: a.app.gl });
+        a.declare(fresh);
+        try { await fresh.load(); return "no rechazó"; } catch (e) { return e.message; }
+    });
+    ok("sin tolerant, load() rechaza nombrando el asset",
+        strict.includes("retrato") && strict.includes("fallaron"), strict.split("\n")[0]);
+
+    ok("load() sin nada pendiente resuelve al instante",
+        await page.evaluate(async () => {
+            const fresh = new window.raptorAssets.Assets({});
+            const t = Date.now();
+            await fresh.load();
+            return Date.now() - t < 50;
+        }));
+
+    ok("put() registra algo generado y se lee igual",
+        await page.evaluate(() => {
+            const fresh = new window.raptorAssets.Assets({});
+            fresh.put("a-mano", { hola: 1 });
+            return fresh.has("a-mano") && fresh.get("a-mano").hola === 1;
+        }));
+
+    ok("la pantalla de carga se retira al terminar",
+        (await page.evaluate(() => document.querySelectorAll(".loading").length)) === 0);
+
+    await page.locator("#panel button", { hasText: "Recargar" }).click();
+    await page.waitForTimeout(900);
+    const reloaded = await page.evaluate(() => ({
+        rows: document.querySelectorAll(".arow").length,
+        ready: document.querySelectorAll(".arow.ready").length,
+        error: document.querySelectorAll(".arow.error").length,
+        width: document.querySelector(".prog > i").style.width,
+    }));
+    ok("recargar repinta la tabla y llega al 100%",
+        reloaded.rows === 6 && reloaded.ready === 5 && reloaded.error === 1 && reloaded.width === "100%",
+        JSON.stringify(reloaded));
+
+    // Decoding happened without a gesture; only playing needed one.
+    await page.locator("#panel button", { hasText: "Sonar" }).click();
+    ok("el sonido decodificado suena", await page.evaluate(() => window.raptorAssets.playCoin()));
+
+    ok("assets: sin errores inesperados", errors.length === 0, errors.join(" | "));
+    await page.close();
+});
+
+
+// --- Scenes, through the game that uses them -----------------------------
+
+suite("escenas", async () => {
+    const { page, errors } = await open("bosque.html");
+    await page.waitForFunction(() => window.raptorBosque && window.raptorBosque.scene === "menu", { timeout: 15000 });
+
+    // The menu has to appear *before* the game's assets exist — that is the
+    // whole reason a scene declares its own manifest instead of the page doing
+    // it all up front.
+    const menu = await page.evaluate(() => ({
+        scene: window.raptorBosque.scene,
+        title: document.querySelector(".menu h1")?.textContent,
+        entities: window.raptorBosque.app.entities.length,
+        assetsLoaded: window.raptorBosque.app.assets.has("bosque"),
+    }));
+    ok("arranca en el menú", menu.scene === "menu" && menu.title === "El Bosque", JSON.stringify(menu));
+    ok("el menú se dibuja sin esperar a ningún asset",
+        menu.entities > 10 && menu.assetsLoaded === false, JSON.stringify(menu));
+
+    await page.evaluate(() => window.raptorBosque.go("juego", { acorns: 6, seconds: 60 }));
+    await page.waitForFunction(() => window.raptorBosque.scene === "juego" && window.raptorBosque.state, { timeout: 15000 });
+
+    const game = await page.evaluate(() => ({
+        entities: window.raptorBosque.app.entities.length,
+        acorns: window.raptorBosque.game.acorns.length,
+        canopies: window.raptorBosque.game.canopies.length,
+        assets: window.raptorBosque.app.assets.has("bosque") && window.raptorBosque.app.assets.has("bellota"),
+        menuGone: !document.querySelector(".menu"),
+        hud: !!document.querySelector(".hud"),
+    }));
+    ok("entrar al juego carga sus assets", game.assets, JSON.stringify(game));
+    ok("el bosque se construye", game.entities > 800 && game.canopies > 20 && game.acorns === 6,
+        `${game.entities} entidades, ${game.canopies} copas, ${game.acorns} bellotas`);
+    ok("el menú se desmonta al salir", game.menuGone && game.hud);
+
+    // Movement, animation and the flip.
+    const start = await page.evaluate(() => ({ ...window.raptorBosque.state }));
+    await page.keyboard.down("d");
+    await page.waitForTimeout(500);
+    const moving = await page.evaluate(() => ({ ...window.raptorBosque.state }));
+    await page.keyboard.up("d");
+    ok("el personaje camina y anima",
+        moving.x > start.x + 0.4 && moving.animation === "andar",
+        `${start.x.toFixed(2)} → ${moving.x.toFixed(2)}`);
+    await page.waitForTimeout(300);
+    ok("parado vuelve a la animación de espera",
+        (await page.evaluate(() => window.raptorBosque.state.animation)) === "quieto");
+
+    // Collision: held against the map for hundreds of frames, it must stop
+    // inside, and pressing a second direction must still slide along the wall.
+    const walls = await page.evaluate(async () => {
+        const g = window.raptorBosque.game;
+        const kb = window.raptorBosque.app.keyboard;
+        g.position.x = 0; g.position.y = 0;
+        kb.press("w");
+        for (let i = 0; i < 300; i++) await new Promise((r) => requestAnimationFrame(r));
+        const stuck = { ...g.position };
+        kb.press("d");
+        for (let i = 0; i < 60; i++) await new Promise((r) => requestAnimationFrame(r));
+        kb.release("w"); kb.release("d");
+        return { stuck, slid: { ...g.position } };
+    });
+    ok("los árboles frenan al jugador dentro del mapa",
+        Math.abs(walls.stuck.x) < 17 && Math.abs(walls.stuck.y) < 13, JSON.stringify(walls.stuck));
+    ok("se desliza a lo largo del obstáculo en vez de clavarse",
+        walls.slid.x > walls.stuck.x + 0.2, JSON.stringify(walls));
+
+    const pick = await page.evaluate(async () => {
+        const g = window.raptorBosque.game;
+        const acorn = g.acorns.find((a) => !a.taken);
+        g.position.x = acorn.x; g.position.y = acorn.y;
+        const before = g.collected;
+        for (let i = 0; i < 5; i++) await new Promise((r) => requestAnimationFrame(r));
+        return { before, after: g.collected, hud: document.querySelector(".hud .chip span:last-child").textContent };
+    });
+    ok("recoger una bellota suma y se ve en el HUD",
+        pick.after === pick.before + 1 && pick.hud.startsWith("1"), JSON.stringify(pick));
+
+    await page.keyboard.press("p");
+    await page.waitForTimeout(120);
+    const paused = await page.evaluate(async () => {
+        const g = window.raptorBosque.game;
+        const t0 = g.timeLeft, x0 = g.position.x;
+        window.raptorBosque.app.keyboard.press("d");
+        for (let i = 0; i < 30; i++) await new Promise((r) => requestAnimationFrame(r));
+        window.raptorBosque.app.keyboard.release("d");
+        return { clock: Math.abs(g.timeLeft - t0) < 0.001, still: Math.abs(g.position.x - x0) < 0.001 };
+    });
+    ok("la pausa congela el reloj y el movimiento", paused.clock && paused.still, JSON.stringify(paused));
+    await page.keyboard.press("p");
+
+    // Winning goes to the end scene, and the forest tears itself down.
+    await page.evaluate(async () => {
+        const g = window.raptorBosque.game;
+        for (const acorn of g.acorns.filter((a) => !a.taken)) {
+            g.position.x = acorn.x; g.position.y = acorn.y;
+            await new Promise((r) => requestAnimationFrame(r));
+            await new Promise((r) => requestAnimationFrame(r));
+        }
+    });
+    await page.waitForFunction(() => window.raptorBosque.scene === "fin", { timeout: 6000 });
+    const end = await page.evaluate(() => ({
+        won: document.querySelector(".end .verdict")?.classList.contains("won"),
+        hudGone: !document.querySelector(".hud"),
+        entities: window.raptorBosque.app.entities.length,
+        record: window.raptorBosque.scenes.get("fin").result.record,
+    }));
+    ok("juntarlas todas lleva a la escena final", end.won === true);
+    ok("el bosque se desmonta al salir", end.hudGone && end.entities < 20, `${end.entities} entidades`);
+    ok("la primera victoria marca récord", end.record === true);
+
+    // Losing.
+    await page.evaluate(() => window.raptorBosque.go("juego", { acorns: 6, seconds: 60 }));
+    await page.waitForFunction(() => window.raptorBosque.scene === "juego" && window.raptorBosque.state);
+    await page.evaluate(() => { window.raptorBosque.game.timeLeft = 0.05; });
+    await page.waitForFunction(() => window.raptorBosque.scene === "fin", { timeout: 6000 });
+    ok("quedarse sin tiempo lleva a derrota",
+        await page.evaluate(() => document.querySelector(".end .verdict").classList.contains("lost")));
+
+    // The point of all the bookkeeping: leaving a scene has to undo everything
+    // it registered, or three round trips would triple the entity list.
+    const leaks = await page.evaluate(async () => {
+        const app = window.raptorBosque.app;
+        const counts = [];
+        for (let i = 0; i < 3; i++) {
+            await window.raptorBosque.go("menu");
+            await window.raptorBosque.go("juego", { acorns: 6, seconds: 60 });
+            counts.push([
+                app.entities.length,
+                app.engine.updaters.length,
+                document.querySelectorAll("#stage .pad").length,
+                document.querySelectorAll("#stage .hud, #stage .menu, #stage .end").length,
+            ].join("/"));
+        }
+        return counts;
+    });
+    // entidades/updaters/pads/overlays — si alguno crece, una escena no se
+    // está desmontando del todo.
+    ok("tres idas y vueltas no acumulan entidades, updaters ni nodos",
+        leaks.every((c) => c === leaks[0]), leaks.join("  "));
+
+    ok("bosque: sin errores", errors.length === 0, errors.join(" | "));
+    await page.close();
+});
+
 // --- Phone ---------------------------------------------------------------
 
 suite("mobile", async () => {
-    for (const file of ["dyno.html", "drive.html", "sprites.html"]) {
+    for (const file of ["dyno.html", "drive.html", "sprites.html", "bosque.html"]) {
         const { page, context, errors } = await open(file, devices["iPhone 12"]);
+        // The game opens on its menu, whose controls are ordinary DOM buttons.
+        // The on-screen pad belongs to the forest scene, so get into it first.
+        if (file === "bosque.html") {
+            await page.waitForFunction(() => window.raptorBosque?.scene === "menu", { timeout: 15000 });
+            await page.evaluate(() => window.raptorBosque.go("juego", { acorns: 6, seconds: 60 }));
+            await page.waitForFunction(() => window.raptorBosque.state, { timeout: 15000 });
+            await page.waitForTimeout(300);
+        }
         const fit = await page.evaluate(() => {
             const stage = document.querySelector("#stage").getBoundingClientRect();
             const pads = [...document.querySelectorAll(".pad")];
