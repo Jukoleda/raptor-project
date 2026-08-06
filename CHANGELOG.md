@@ -4,6 +4,57 @@ Todos los cambios notables de este proyecto se documentan en este archivo.
 
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/).
 
+## [0.6.0] - 2026-08-06
+
+Raptor pasa a tener también render 3D, y las ocho demos existen en las dos
+dimensionalidades.
+
+### Añadido (La capa 3D)
+- **`components/render3d/`** — `Mesh`, `Camera3D`, siete constructores de
+  geometría y tres programas de shader. `Mesh` tiene a propósito la misma forma
+  que `Shape` (`position`, `rotation`, `scale`, `setColor`, `draw(camera)`,
+  `cullRadius`), así que el motor dibuja cualquiera de los dos sin saber cuál
+  tiene y una escena puede mezclarlos.
+- **`app.use3D()`** enciende el búfer de profundidad, el descarte de caras
+  traseras y una cámara con posición y objetivo, y devuelve esa cámara.
+  `RaptorEngine` gana `depthTest`, `backfaceCulling` y `setClearColor`, los tres
+  apagados por defecto: en 2D el orden de dibujo *es* la profundidad y una forma
+  no tiene interior.
+- **Iluminación por fragmento**: una direccional, ambiente y un tinte de cielo
+  hemisférico para que la cara en sombra no quede negra. Por fragmento y no por
+  vértice porque en una esfera de pocos segmentos el sombreado por vértice
+  muestra los triángulos como bandas. La matriz normal es la inversa traspuesta
+  de la 3×3 superior: con una escala no uniforme, usar la modelo-vista tuerce las
+  normales y la luz se desliza sobre la superficie.
+- **Mallas de dos caras** (`setDoubleSided`): el descarte de caras traseras
+  asume un sólido cerrado, y un billboard o una hoja son láminas con dos
+  exteriores. El shader voltea la normal hacia quien mira, para que la cara de
+  atrás no salga negra.
+- **Texturas en 3D**: un tercer programa con UVs y `textureRepeat`, para vestir
+  un sólido o repetir un suelo sin estirar una copia sobre cien metros.
+- **`components/math/angles.js`** — `DEG_TO_RAD`, `wrapDegrees`, `clamp`. La
+  conversión estaba escrita a mano en trece sitios.
+
+### Añadido (Las ocho demos en 3D)
+`shapes3d`, `editor3d`, `tanks3d`, `dyno3d`, `sprites3d`, `assets3d`, `drive3d`
+y `bosque3d`. Lo interesante es lo que **no** hubo que reescribir:
+
+- `tanks3d` y `drive3d` llaman a `resolveShot` del paquete 2D sin tocarlo: la
+  balística es simulación, y a la simulación le da igual en cuántas dimensiones
+  se dibuje.
+- `dyno3d` usa el mismo `Engine` y el mismo `Gearbox` en modo mecánico.
+- `bosque3d` importa `generateForest` y `moveWithCollision` de `game/forest.js`
+  línea por línea — mismo mapa, misma colisión, mismas bellotas — y monta sus
+  tres escenas con el mismo `SceneManager`.
+
+### Corregido
+- **Las tapas de cilindros, conos y prismas tenían el bobinado invertido** y el
+  descarte de caras traseras se las comía: mirando un cilindro desde arriba se
+  veía a través de él, hasta su interior. Vistas desde arriba, las coordenadas
+  (x = cos θ, z = sen θ) recorren el círculo en **sentido horario**, así que la
+  tapa que hay que invertir es la de arriba — lo contrario de lo que parece
+  escrito. Se detectó mirando la pantalla, no razonándolo.
+
 ## [0.5.0] - 2026-08-06
 
 Relevamiento del proyecto contra SOLID y clean code, y las optimizaciones que

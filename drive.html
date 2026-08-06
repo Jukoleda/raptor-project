@@ -6,7 +6,7 @@
     <title>Raptor — Batalla de tanques</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/render/projection.js, components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/ui/loadingScreen.js, components/scenes/sceneManager.js, components/input/keyboard.js, components/input/touchpad.js, components/render/texture.js, components/assets/assets.js, components/app.js, components/ui/index.js, components/render/shaders.js, components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/shapes/sprite.js, components/shapes/index.js, components/controls/tankController.js, components/controls/tankAI.js, components/controls/gearbox.js, components/controls/autoAim.js, components/controls/index.js, components/weapons/armor.js, components/vehicles/tank.js, components/vehicles/engine.js, components/vehicles/index.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/index.js, components/physics/body.js, components/physics/collision.js, components/physics/world.js, components/physics/index.js, components/math/random.js, controls/driveDemo.js + vendor/gl-matrix-min.js
+        Source: components/render/projection.js, components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/ui/loadingScreen.js, components/scenes/sceneManager.js, components/input/keyboard.js, components/input/touchpad.js, components/render/texture.js, components/assets/assets.js, components/math/angles.js, components/render3d/camera3d.js, components/app.js, components/ui/index.js, components/render/shaders.js, components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/shapes/sprite.js, components/shapes/index.js, components/controls/tankController.js, components/controls/tankAI.js, components/controls/gearbox.js, components/controls/autoAim.js, components/controls/index.js, components/weapons/armor.js, components/vehicles/tank.js, components/vehicles/engine.js, components/vehicles/index.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/index.js, components/physics/body.js, components/physics/collision.js, components/physics/world.js, components/physics/index.js, components/math/random.js, controls/driveDemo.js + vendor/gl-matrix-min.js
         Regenerate with: node tools/build.mjs
         This file is fully self-contained: open it directly in any browser.
     -->
@@ -233,6 +233,14 @@ class RaptorEngine {
         this.culling = false;
         this.drawnLastFrame = 0;
 
+        // 3D needs two things a 2D scene must not have. Depth testing, so a
+        // near face hides a far one instead of whatever was drawn last winning;
+        // and backface culling, so the inside of a solid is never rasterised.
+        // Both off by default: in 2D, draw order *is* the depth, and a shape
+        // has no inside.
+        this.depthTest = false;
+        this.backfaceCulling = false;
+
         this.running = false;
         this._lastTime = undefined;
 
@@ -323,19 +331,45 @@ class RaptorEngine {
     // --- GL state ---------------------------------------------------------
 
     // One-time GL state configuration. Runs once, not per frame.
+    // The colour the frame is cleared to. In 3D it reads as the sky, so it is
+    // worth being able to set it.
+    setClearColor({ red = 0, green = 0, blue = 0, alpha = 1 } = {}) {
+        this.clearColor = { red, green, blue, alpha };
+        if (this.context) this.context.clearColor(red, green, blue, alpha);
+        return this;
+    }
+
+    // Runs on every start(), not only the first, so a scene that switched the
+    // engine into 3D and back gets the state it asked for.
     configure() {
         const gl = this.context;
-        gl.clearColor(0.0, 0.0, 0.0, 1.0);
-        // 2D engine: depth testing is not needed. Enable alpha blending so
-        // translucent objects composite correctly.
-        gl.disable(gl.DEPTH_TEST);
+        const { red = 0, green = 0, blue = 0, alpha = 1 } = this.clearColor || {};
+        gl.clearColor(red, green, blue, alpha);
+
+        if (this.depthTest) {
+            gl.enable(gl.DEPTH_TEST);
+            gl.depthFunc(gl.LEQUAL);
+        } else {
+            gl.disable(gl.DEPTH_TEST);
+        }
+
+        if (this.backfaceCulling) {
+            gl.enable(gl.CULL_FACE);
+            gl.cullFace(gl.BACK);
+        } else {
+            gl.disable(gl.CULL_FACE);
+        }
+
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         return this;
     }
 
     clearScreen() {
-        this.context.clear(this.context.COLOR_BUFFER_BIT);
+        const gl = this.context;
+        // Clearing colour but not depth leaves last frame's depth in place, and
+        // then nothing new ever passes the test — a black screen with no error.
+        gl.clear(gl.COLOR_BUFFER_BIT | (this.depthTest ? gl.DEPTH_BUFFER_BIT : 0));
         return this;
     }
 
@@ -363,7 +397,9 @@ class RaptorEngine {
     // The visible rectangle in world units, or null when culling is off. Worked
     // out once per frame rather than per shape.
     viewBounds() {
-        if (!this.culling || !this.canvas) return null;
+        // A 3D camera has no flat view rectangle, so the 2D cull does not apply
+        // to it. Meshes are skipped by their own camera's frustum, or not at all.
+        if (!this.culling || !this.canvas || typeof this.camera.viewExtents !== "function") return null;
         const { halfW, halfH } = this.camera.viewExtents(this.canvas);
         return {
             minX: this.camera.x - halfW, maxX: this.camera.x + halfW,
@@ -1533,6 +1569,165 @@ Assets.register(ASSET_KIND.TEXT, (entry, assets) => assets._loadFetch(entry.url,
 Assets.register(ASSET_KIND.SOUND, (entry, assets) => assets._loadSound(entry));
 Assets.register(ASSET_KIND.FONT, (entry, assets) => assets._loadFont(entry));
 
+// ===== components/math/angles.js =====
+// Degrees in, radians out.
+//
+// Every rotation in Raptor's public API is in **degrees**, because that is what
+// people type and read; every trigonometric function underneath wants radians.
+// That conversion was written inline in a dozen places as `(x * Math.PI) / 180`,
+// which is fine until one of them is `/ 180` on the wrong side of the multiply.
+
+const DEG_TO_RAD = Math.PI / 180;
+const RAD_TO_DEG = 180 / Math.PI;
+
+const toRadians = (degrees) => degrees * DEG_TO_RAD;
+const toDegrees = (radians) => radians * RAD_TO_DEG;
+
+// Wraps an angle to (−180, 180]. The difference between two headings is only
+// meaningful once it is wrapped: 350° and 10° are twenty degrees apart, not
+// three hundred and forty.
+function wrapDegrees(degrees) {
+    let wrapped = (degrees + 180) % 360;
+    if (wrapped < 0) wrapped += 360;
+    return wrapped - 180;
+}
+
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+// ===== components/render3d/camera3d.js =====
+// A camera that can be somewhere and look somewhere else.
+//
+// The 2D camera is a pan and a zoom: it has a centre and that is the whole
+// story. In 3D a camera has a *position*, a *target* and an *up*, and the
+// difference between those is the difference between moving the world and
+// moving yourself through it.
+//
+// Two ways to drive it, which cover almost everything:
+//
+//     camera.orbit({ yaw, pitch, distance })   // gira alrededor del objetivo
+//     camera.lookFrom(pos, target)             // colocada a mano
+//
+// Orbiting is what an editor or a model viewer wants; `follow` on top of it is
+// what a third-person game wants.
+
+
+class Camera3D {
+    constructor({
+        position = { x: 0, y: 4, z: 8 },
+        target = { x: 0, y: 0, z: 0 },
+        up = { x: 0, y: 1, z: 0 },
+        fov = 55,
+        near = 0.1,
+        far = 500,
+        smoothing = 8,
+    } = {}) {
+        this.position = { ...position };
+        this.target = { ...target };
+        this.up = { ...up };
+        this.fov = fov;
+        this.near = near;
+        this.far = far;
+        this.smoothing = smoothing;
+
+        // Spherical placement around the target, in degrees and world units.
+        this.yaw = 0;
+        this.pitch = 25;
+        this.distance = 8;
+
+        const { mat4 } = glMatrix;
+        this._view = mat4.create();
+        this._projection = mat4.create();
+        this._aspect = null;
+    }
+
+    // Places the camera on a sphere around its target. Pitch is clamped just
+    // short of straight up and straight down, because at exactly 90° the view
+    // direction becomes parallel to `up` and the matrix collapses — the classic
+    // gimbal flip where the world spins for one frame.
+    orbit({ yaw = this.yaw, pitch = this.pitch, distance = this.distance, target = null } = {}) {
+        if (target) this.target = { ...target };
+        this.yaw = yaw;
+        this.pitch = clamp(pitch, -89, 89);
+        this.distance = Math.max(0.2, distance);
+
+        const pitchRad = this.pitch * DEG_TO_RAD;
+        const yawRad = this.yaw * DEG_TO_RAD;
+        const horizontal = Math.cos(pitchRad) * this.distance;
+
+        this.position.x = this.target.x + Math.sin(yawRad) * horizontal;
+        this.position.y = this.target.y + Math.sin(pitchRad) * this.distance;
+        this.position.z = this.target.z + Math.cos(yawRad) * horizontal;
+        return this;
+    }
+
+    lookFrom(position, target = this.target) {
+        this.position = { ...position };
+        this.target = { ...target };
+        return this;
+    }
+
+    // Eases the *target* toward a point and re-derives the position from the
+    // current orbit. Following the target rather than the camera is what keeps
+    // a chase camera from swinging wide on every corner.
+    follow(point, dt) {
+        const t = 1 - Math.exp(-this.smoothing * dt);
+        this.target.x += (point.x - this.target.x) * t;
+        this.target.y += ((point.y ?? 0) - this.target.y) * t;
+        this.target.z += (point.z - this.target.z) * t;
+        return this.orbit({});
+    }
+
+    // Straight from where it is to where it looks, normalised.
+    get forward() {
+        const dx = this.target.x - this.position.x;
+        const dy = this.target.y - this.position.y;
+        const dz = this.target.z - this.position.z;
+        const length = Math.hypot(dx, dy, dz) || 1;
+        return { x: dx / length, y: dy / length, z: dz / length };
+    }
+
+    viewMatrix() {
+        const { mat4 } = glMatrix;
+        mat4.lookAt(
+            this._view,
+            [this.position.x, this.position.y, this.position.z],
+            [this.target.x, this.target.y, this.target.z],
+            [this.up.x, this.up.y, this.up.z],
+        );
+        return this._view;
+    }
+
+    // Rebuilt only when the aspect or the lens changes — it is the same matrix
+    // for every mesh in the frame.
+    projectionMatrix(canvas) {
+        const { mat4 } = glMatrix;
+        const aspect = aspectOf(canvas);
+        const key = `${aspect}|${this.fov}|${this.near}|${this.far}`;
+        if (this._aspect !== key) {
+            mat4.perspective(this._projection, this.fov * DEG_TO_RAD, aspect, this.near, this.far);
+            this._aspect = key;
+        }
+        return this._projection;
+    }
+
+    // Projects a world point to canvas pixels, or null if it is behind the
+    // camera. Used to hang a DOM label over a mesh.
+    project(point, canvas) {
+        const { mat4, vec4 } = glMatrix;
+        const clip = vec4.fromValues(point.x, point.y ?? 0, point.z, 1);
+        const viewProjection = mat4.multiply(mat4.create(), this.projectionMatrix(canvas), this.viewMatrix());
+        vec4.transformMat4(clip, clip, viewProjection);
+        if (clip[3] <= 0) return null;
+        const ndcX = clip[0] / clip[3];
+        const ndcY = clip[1] / clip[3];
+        return {
+            x: (ndcX * 0.5 + 0.5) * canvas.clientWidth,
+            y: (1 - (ndcY * 0.5 + 0.5)) * canvas.clientHeight,
+            depth: clip[3],
+        };
+    }
+}
+
 // ===== components/app.js =====
 // The front door. `App` is what you reach for to build something with Raptor;
 // everything else is a part you can also use on its own.
@@ -1555,6 +1750,7 @@ Assets.register(ASSET_KIND.FONT, (entry, assets) => assets._loadFont(entry));
 // does not own: your game. Everything is exposed (`app.engine`, `app.gl`,
 // `app.stage`) so you can drop to the layer below whenever the shell is in the
 // way.
+
 
 
 
@@ -1680,6 +1876,23 @@ class App {
     set camera(camera) { this.engine.camera = camera; }
     get entities() { return this.engine.entities; }
     get running() { return this.engine.running; }
+
+    // Switches the engine into three dimensions: a depth buffer so a near face
+    // hides a far one, backface culling so the inside of a solid is never
+    // drawn, a sky-coloured clear, and a camera that has a position and a
+    // target instead of a centre and a zoom.
+    //
+    // Returns the camera, because that is the thing a 3D scene talks to most.
+    use3D({ clearColor = { red: 0.09, green: 0.11, blue: 0.15 }, camera = {} } = {}) {
+        this.engine.depthTest = true;
+        this.engine.backfaceCulling = true;
+        this.engine.setClearColor(clearColor);
+        this.camera = new Camera3D(camera);
+        // configure() runs on start(), which App.boot calls after setup — but a
+        // scene may switch mid-flight, so apply it now if the loop is running.
+        if (this.engine.running) this.engine.configure();
+        return this.camera;
+    }
 
     // Skipping off-screen entities. Worth it as soon as the world is bigger
     // than the view; pointless when everything fits on screen anyway.

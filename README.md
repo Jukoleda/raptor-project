@@ -38,7 +38,8 @@ Raptor está hecho de piezas que se usan juntas o sueltas. De abajo arriba:
 | `audio/` | Sonido sintetizado, para que un build siga siendo un único archivo |
 | `assets/` | Declarar, cargar y leer imágenes, JSON, sonidos y fuentes |
 | `scenes/` | Menú, partida, final: cada pantalla se monta y se desmonta sola |
-| `math/` | Aleatoriedad con semilla, para que un nivel se pueda reproducir |
+| `math/` | Aleatoriedad con semilla y ángulos, para que un nivel se pueda reproducir |
+| `render3d/` | **3D**: mallas indexadas, geometría, iluminación y cámara con orientación |
 | `app.js` | El shell que conecta todo lo anterior |
 
 Encima va un **kit de juego** —`controls/`, `weapons/`, `vehicles/`— del que
@@ -56,14 +57,14 @@ frente a 2709 del motor, que es la señal de que faltaba una capa. Ahora suman
 ## Instalar y construir
 
 ```bash
-npm run build     # framework (dist/) + las ocho páginas autocontenidas
+npm run build     # framework (dist/) + las dieciséis páginas autocontenidas
 npm run check     # valida el grafo de módulos sin escribir nada
 npm test          # ejecuta las páginas en un navegador de verdad
 ```
 
 El build produce dos cosas:
 
-- **`dist/raptor.js`** — el framework como librería ESM, con los 87 nombres
+- **`dist/raptor.js`** — el framework como librería ESM, con los 107 nombres
   públicos; y **`dist/raptor.global.js`** para un `<script src>` de toda la vida,
   que deja `window.Raptor`.
 - **Las páginas** (`engine.html`, `editor.html`, `tanks.html`, `dyno.html`,
@@ -95,6 +96,14 @@ drive.html                 # GENERADO: batalla de tanques (IA + combate), doble 
 sprites.html               # GENERADO: sprites, texturas y animación, doble clic
 assets.html                # GENERADO: carga de assets con manifiesto, doble clic
 bosque.html                # GENERADO: El Bosque, un juego completo, doble clic
+shapes3d.html              # GENERADO: formas 3D con luz y cámara orbital
+editor3d.html              # GENERADO: editor 3D
+tanks3d.html               # GENERADO: cañón vs blindaje en 3D
+dyno3d.html                # GENERADO: banco de pruebas en 3D
+sprites3d.html             # GENERADO: texturas y billboards
+assets3d.html              # GENERADO: carga de assets en 3D
+drive3d.html               # GENERADO: batalla de tanques en 3D
+bosque3d.html              # GENERADO: El Bosque 3D, el juego completo
 dev.html                   # Demo en desarrollo (módulos ES + gl-matrix por CDN)
 editor-dev.html            # Editor en desarrollo (módulos ES + gl-matrix por CDN)
 tanks-dev.html             # Demo de tanques en desarrollo (módulos ES + CDN)
@@ -122,6 +131,15 @@ sprites/
   spritesDemo.js           # Demo de sprites: hoja procedural, animación y capas
 assets/
   assetsDemo.js            # Demo de carga: manifiesto, progreso, caché y fallos
+demos3d/                   # Las mismas ocho demos, en tres dimensiones
+  shapes3d.js              # Las seis primitivas, con luz y órbita
+  editor3d.js              # Editor 3D: añadir, seleccionar, editar, soltar
+  tanks3d.js               # Balística 3D (reusa components/weapons/)
+  dyno3d.js                # Banco de pruebas con cámara de persecución
+  sprites3d.js             # Texturas sobre sólidos y billboards
+  assets3d.js              # Carga de assets, y lo cargado en escena
+  drive3d.js               # Batalla: casco y torreta giran por separado
+  bosque3d.js              # El Bosque 3D (reusa game/forest.js)
 game/                      # El Bosque: un juego pequeño pero completo
   main.js                  # Arranque: crea el SceneManager y va al menú
   menuScene.js             # Menú principal, dificultad y mejor marca
@@ -154,6 +172,12 @@ components/
   math/
     random.js              # createRandom: LCG con semilla, reproducible
     index.js               # Re-exporta las matemáticas
+  render3d/
+    mesh.js                # Mesh: geometría indexada, transform, material
+    geometry.js            # Constructores: caja, esfera, cilindro, cono, plano, toro, prisma
+    camera3d.js            # Camera3D: órbita, lookAt, follow y project()
+    shaders3d.js           # Programas: iluminado, texturizado y plano
+    index.js               # Re-exporta el 3D
   render/
     projection.js          # FOV, profundidad y matrices compartidas
     texture.js             # Texture: imagen en la GPU (URL, canvas o píxeles)
@@ -1179,6 +1203,99 @@ descartado.
 Las llamadas a GL siguen siendo una por forma. Agruparlas en lotes por textura
 es la siguiente ganancia, y es un cambio grande; con el culling puesto, las 57
 formas que quedan no lo justifican todavía.
+
+## 3D
+
+Las mismas ocho demos existen también en tres dimensiones, en `demos3d/`. No es
+un motor aparte: es **una capa de render más** dentro del mismo framework, y la
+simulación se comparte tal cual.
+
+```js
+App.boot({ title: "Hola 3D" }, (app) => {
+    const camera = app.use3D();
+    camera.orbit({ yaw: 25, pitch: 20, distance: 10 });
+
+    app.add(new Mesh(app.gl, boxGeometry({ width: 2, height: 2, depth: 2 }))
+        .setColor({ red: 0.9, green: 0.4, blue: 0.2 })
+        .init());
+});
+```
+
+`app.use3D()` cambia tres cosas y devuelve la cámara: enciende el **búfer de
+profundidad** (para que una cara cercana tape una lejana en vez de ganar la que
+se dibujó última), enciende el **descarte de caras traseras** (para no
+rasterizar el interior de un sólido) y sustituye la cámara plana por una que
+tiene posición y objetivo en vez de centro y zoom.
+
+### Lo que hace que 3D parezca 3D
+
+**La luz.** Sin sombreado, una esfera es un círculo y un cubo un hexágono. Lo
+que da volumen es que cada cara recoja la luz de forma distinta, así que el
+programa iluminado es el que se usa por defecto. En `shapes3d.html` hay un botón
+para apagarla, y merece la pena verlo: la misma geometría, los mismos colores, y
+de golpe ningún volumen.
+
+El sombreado se calcula **por fragmento**, no por vértice: en un cubo da igual,
+pero en una esfera con pocos segmentos el sombreado por vértice muestra los
+triángulos como bandas.
+
+**Las normales.** No pueden viajar en la matriz modelo-vista: con una escala no
+uniforme salen torcidas y la iluminación se desliza sobre la superficie. De ahí
+la matriz normal, que es la inversa traspuesta de la 3×3 superior.
+
+Y de ahí también que **un cubo tenga 24 vértices y no 8**: cada esquina pertenece
+a tres caras que miran a tres sitios distintos, y un vértice lleva una sola
+normal. Comparte las esquinas y el cubo se sombrea como un globo mal inflado. Una
+esfera **sí** comparte vértices, porque su normal de verdad es continua: en una
+esfera unitaria la normal *es* la posición.
+
+### Mallas y geometría
+
+`Mesh` es a 3D lo que `Shape` a 2D, y a propósito tiene la misma forma —
+`position`, `rotation`, `scale`, `setColor`, `draw(camera)`, `cullRadius`— para
+que el motor dibuje cualquiera de los dos sin saber cuál tiene.
+
+Los constructores (`boxGeometry`, `sphereGeometry`, `cylinderGeometry`,
+`coneGeometry`, `planeGeometry`, `torusGeometry`, `prismGeometry`) devuelven
+siempre `{ positions, normals, uvs, indices }`, así que una malla hecha a mano
+es exactamente igual de válida que una caja.
+
+**Láminas de dos caras.** El descarte de caras traseras asume que una malla es un
+sólido cerrado con un interior que nadie ve. Un billboard, una hoja o una bandera
+son *láminas*: tienen dos exteriores, y el descarte las hace desaparecer desde
+uno de ellos. `mesh.setDoubleSided(true)` las dibuja por ambos lados, y el shader
+voltea la normal hacia quien mira para que la cara de atrás no salga negra.
+
+### La cámara
+
+```js
+camera.orbit({ yaw, pitch, distance });   // gira alrededor del objetivo
+camera.lookFrom(posicion, objetivo);      // colocada a mano
+camera.follow(punto, dt);                 // persecución
+camera.project(punto, canvas);            // mundo → píxeles, para colgar HUD
+```
+
+El cabeceo se recorta justo antes de la vertical: a exactamente 90° la dirección
+de vista queda paralela al vector «arriba», la matriz colapsa y el mundo gira un
+frame entero. Es el clásico salto de gimbal, y clamparlo es más barato que
+explicarlo.
+
+### Lo que **no** cambió
+
+La parte interesante del port es lo que se pudo dejar quieto:
+
+- **Balística** — `tanks3d` y `drive3d` llaman a `resolveShot` del paquete 2D sin
+  tocarlo. Penetración, rebote y la regla del ángulo son *simulación*, y a la
+  simulación le da igual en cuántas dimensiones la dibujes. En estas escenas la
+  geometría del impacto vive entera en el plano horizontal, así que las
+  componentes XZ entran como el par (x, y) que el modelo espera.
+- **Tren motriz** — `dyno3d` usa el mismo `Engine` y el mismo `Gearbox` en modo
+  mecánico. Una curva de par no cambia con un eje más.
+- **El mapa del bosque** — `bosque3d` importa `generateForest` y
+  `moveWithCollision` de `game/forest.js` línea por línea. Las mismas casillas,
+  la misma colisión que se desliza, las mismas bellotas. Solo cambia el dibujo.
+- **Escenas, assets, entrada e interfaz** — idénticos. `bosque3d` tiene sus tres
+  escenas con el mismo `SceneManager`.
 
 ## Formas disponibles
 
