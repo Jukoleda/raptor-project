@@ -23,8 +23,10 @@
 import RaptorEngine from "./raptorEngine.js";
 import { el, injectStyles, BASE_STYLES } from "./ui/dom.js";
 import { FULLSCREEN_STYLES, toggleFullscreen, isFullscreen, onFullscreenChange } from "./ui/fullscreen.js";
+import LoadingScreen, { LOADING_STYLES } from "./ui/loadingScreen.js";
 import Keyboard from "./input/keyboard.js";
 import TouchPad, { PAD_STYLES } from "./input/touchpad.js";
+import Assets from "./assets/assets.js";
 
 export default class App {
     constructor({
@@ -37,9 +39,10 @@ export default class App {
         keyboard = true,       // create and attach a Keyboard
         touch = true,          // create a TouchPad over the canvas
         autoResize = false,    // track the CSS box and resize the buffer to it
+        assetPath = "",        // prefix for every relative asset URL
     } = {}) {
         injectStyles(
-            (baseStyles ? BASE_STYLES + PAD_STYLES + FULLSCREEN_STYLES : "") + styles,
+            (baseStyles ? BASE_STYLES + PAD_STYLES + FULLSCREEN_STYLES + LOADING_STYLES : "") + styles,
             "raptor-styles",
         );
 
@@ -52,6 +55,9 @@ export default class App {
         this.engine.createWindow(this.stage, { width, height });
         this.keyboard = keyboard ? new Keyboard().attach(window) : null;
         this.touch = touch ? new TouchPad(this.stage, { keyboard: this.keyboard }) : null;
+        // The registry exists from the start, so a scene can `put()` something
+        // it generated even if it never loads a file.
+        this.assets = new Assets({ gl: this.gl, basePath: assetPath });
         this.plugins = [];
 
         this._offFullscreen = onFullscreenChange((on) => this._emit("fullscreenchange", on));
@@ -65,21 +71,62 @@ export default class App {
     //
     // The loop starts *after* setup returns, so a scene can add entities and
     // updaters without the first frame catching it half-built.
+    // Waits for the document, builds the app, loads whatever `assets` declares
+    // and then hands it all to `setup`. `setup` may return a cleanup function;
+    // it runs if the app is ever destroyed.
+    //
+    // The loop starts *after* setup returns, so a scene can add entities and
+    // updaters without the first frame catching it half-built — and after the
+    // assets are in, so `assets.texture("x")` is a plain synchronous lookup
+    // rather than something to await at every call site.
+    //
+    //     App.boot({
+    //         assets: (a) => a.texture("heroe", "heroe.png"),
+    //     }, (app) => {
+    //         new Sprite(app.gl, { texture: app.assets.texture("heroe") }).init();
+    //     });
     static boot(options, setup) {
         if (typeof options === "function") { setup = options; options = {}; }
-        const run = () => {
+
+        const run = async () => {
             const app = new App(options);
             if (options.title) app.title(options.title);
+
+            if (options.assets) {
+                // The screen goes up before anything is declared, so a slow
+                // manifest never shows a bare canvas first.
+                const screen = new LoadingScreen(app.stage, { title: options.loadingTitle || "Cargando…" });
+                try {
+                    await options.assets(app.assets, app);
+                    await app.assets.load({
+                        onProgress: (progress) => {
+                            screen.update(progress);
+                            app._emit("progress", progress);
+                        },
+                        tolerant: options.tolerantAssets === true,
+                    });
+                    screen.done();
+                } catch (error) {
+                    // Stop here and *say so*. Running the scene with half its
+                    // assets missing turns one clear message into a pile of
+                    // null-reference errors that hide the real cause.
+                    screen.fail(error);
+                    app._emit("assetserror", error);
+                    throw error;
+                }
+            }
+
             app._cleanup = setup(app) || null;
             app.start();
             return app;
         };
+
         if (document.readyState === "loading") {
-            return new Promise((resolve) => {
-                document.addEventListener("DOMContentLoaded", () => resolve(run()));
+            return new Promise((resolve, reject) => {
+                document.addEventListener("DOMContentLoaded", () => run().then(resolve, reject));
             });
         }
-        return Promise.resolve(run());
+        return run();
     }
 
     // --- The bits scenes reach for most ---------------------------------
@@ -175,8 +222,8 @@ export default class App {
     }
 
     // --- Events ----------------------------------------------------------
-    // "resize" and "fullscreenchange", so a scene can react without hunting
-    // down the prefixed DOM events itself.
+    // "resize", "fullscreenchange", "progress" and "assetserror", so a scene
+    // can react without hunting down the prefixed DOM events itself.
 
     on(event, handler) {
         const list = this._listeners.get(event) || [];
@@ -195,6 +242,7 @@ export default class App {
         this.stop();
         if (typeof this._cleanup === "function") this._cleanup();
         this.keyboard?.detach();
+        this.assets?.dispose();
         this._resizeObserver?.disconnect();
         this._offFullscreen?.();
         this.root.remove();

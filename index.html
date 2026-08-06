@@ -4,12 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Raptor — Framework 2D sobre WebGL</title>
-    <meta name="description" content="Framework 2D sobre WebGL: formas, sprites y animación, cámara, física de colisiones, entrada y audio sintetizado. Demos que se ejecutan en el navegador.">
+    <meta name="description" content="Framework 2D sobre WebGL: formas, sprites y animación, cámara, física de colisiones, entrada, carga de assets y audio sintetizado. Demos que se ejecutan en el navegador.">
     <!--
         Portada del proyecto (página de inicio de GitHub Pages). Es un archivo
         estático escrito a mano: NO lo genera tools/build.mjs. Enlaza las demos
-        autocontenidas (engine, editor, tanks, dyno, sprites, drive), que sí son
-        generadas. Edítalo directamente si cambian las demos.
+        autocontenidas (engine, editor, tanks, dyno, sprites, assets, drive), que sí
+        son generadas. Edítalo directamente si cambian las demos.
     -->
     <style>
         :root {
@@ -71,8 +71,9 @@
             <div class="logo"><span class="dot"></span> Raptor Project</div>
             <h1>Framework <span class="grad">2D sobre WebGL</span></h1>
             <p class="tagline">
-                Un framework 2D escrito a mano: formas, cámara, física de colisiones,
-                entrada, interfaz y audio sintetizado, con un shell que lo conecta todo.
+                Un framework 2D escrito a mano: formas y sprites, cámara, física de
+                colisiones, entrada, interfaz, carga de assets y audio sintetizado,
+                con un shell que lo conecta todo.
                 Las demos de abajo están construidas con él y se ejecutan en el
                 navegador, sin instalar nada.
             </p>
@@ -107,6 +108,12 @@
                 <span class="icon">🧩</span>
                 <h2>Sprites y animación</h2>
                 <p>Texturas, hojas de sprites, fotogramas, tinte y capas de dibujo: camina detrás de un árbol con un personaje animado.</p>
+                <span class="go">Abrir demo →</span>
+            </a>
+            <a class="card" href="assets.html">
+                <span class="icon">📦</span>
+                <h2>Carga de assets</h2>
+                <p>El manifiesto como tabla que se llena: PNG, JSON, WAV y texto con su progreso, su caché y un fallo a la vista.</p>
                 <span class="go">Abrir demo →</span>
             </a>
             <a class="card" href="drive.html">

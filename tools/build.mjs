@@ -41,6 +41,7 @@ const PAGES = [
     { out: "dyno.html", title: "Raptor — Banco de pruebas: motor y caja", entry: "vehicles/dynoDemo.js" },
     { out: "drive.html", title: "Raptor — Batalla de tanques", entry: "controls/driveDemo.js" },
     { out: "sprites.html", title: "Raptor — Sprites y animación", entry: "sprites/spritesDemo.js" },
+    { out: "assets.html", title: "Raptor — Carga de assets", entry: "assets/assetsDemo.js" },
 ];
 
 // The library build. Its entry is the framework's public surface.
@@ -158,6 +159,18 @@ async function publicExports(rel, cache, seen = new Set()) {
     // Names this module declares and exports itself.
     for (const m of code.matchAll(/^export\s+(?:const|let|var|class|function|async\s+function)\s+([A-Za-z_$][\w$]*)/gm)) {
         map.set(m[1], m[1]);
+    }
+
+    // A local `export { A as B };` — no `from`. The clause is stripped from the
+    // bundle, so without this the public name B would point at nothing and the
+    // check below would report it as missing with no hint as to why.
+    for (const m of code.matchAll(/^export\s*\{([^}]*)\}\s*;?\s*$/gm)) {
+        for (const part of m[1].split(",")) {
+            const piece = part.trim();
+            if (!piece) continue;
+            const [local, exported = local] = piece.split(/\s+as\s+/).map((t) => t.trim());
+            map.set(exported, local);
+        }
     }
 
     REEXPORT_RE.lastIndex = 0;

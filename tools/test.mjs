@@ -64,16 +64,24 @@ const browser = await chromium.launch({
 });
 
 // Opens a generated page and collects anything the console complains about.
-async function open(file, contextOptions = null) {
+// `expect` is a regex for messages a demo provokes on purpose — the assets one
+// loads a missing file to show the failure path, and the browser logs that. It
+// is deliberately narrow: everything not matching still counts as a failure.
+async function open(file, contextOptions = null, { expect = null } = {}) {
     const context = contextOptions ? await browser.newContext(contextOptions) : null;
     const page = context ? await context.newPage() : await browser.newPage({ viewport: { width: 1280, height: 900 } });
     const errors = [];
-    page.on("pageerror", (e) => errors.push(String(e)));
-    page.on("console", (m) => { if (m.type() === "error") errors.push(m.text()); });
+    const record = (text) => { if (!expect || !expect.test(text)) errors.push(text); };
+    page.on("pageerror", (e) => record(String(e)));
+    page.on("console", (m) => { if (m.type() === "error") record(m.text()); });
     await page.goto(`file://${join(root, file)}`);
     await page.waitForTimeout(900);
     return { page, context, errors };
 }
+
+// The assets demo points one entry at a file that does not exist, on purpose,
+// so its failure path is visible. The browser logs that as a console error.
+const EXPECTED_404 = /ERR_FILE_NOT_FOUND|no-existe\/retrato\.png/;
 
 const suites = [];
 const suite = (name, fn) => suites.push({ name, fn });
@@ -84,10 +92,10 @@ suite("pages", async () => {
     const pages = [
         ["engine.html", null], ["editor.html", "raptorEditor"], ["tanks.html", "raptorTanks"],
         ["dyno.html", "raptorDyno"], ["drive.html", "raptorDrive"],
-        ["sprites.html", "raptorSprites"],
+        ["sprites.html", "raptorSprites"], ["assets.html", "raptorAssets"],
     ];
     for (const [file, handle] of pages) {
-        const { page, errors } = await open(file);
+        const { page, errors } = await open(file, null, { expect: EXPECTED_404 });
         const shape = await page.evaluate(() => ({
             app: !!document.querySelector("#app"),
             stage: !!document.querySelector("#stage"),
@@ -405,6 +413,127 @@ suite("sprites", async () => {
         mixed.shadow === "color" && mixed.player === "texture" && mixed.glError === 0, JSON.stringify(mixed));
 
     ok("sprites: sin errores", errors.length === 0, errors.join(" | "));
+    await page.close();
+});
+
+
+// --- Assets: manifest, progress, cache and the failure path --------------
+
+suite("assets", async () => {
+    const { page, errors } = await open("assets.html", null, { expect: EXPECTED_404 });
+
+    const manifest = await page.evaluate(() => window.raptorAssets.manifest);
+    const byKey = Object.fromEntries(manifest.map((e) => [e.key, e]));
+    ok("se cargan las cuatro clases de asset",
+        ["hoja", "nivel", "moneda", "creditos"].every((k) => byKey[k].status === "ready"),
+        manifest.map((e) => `${e.key}:${e.status}`).join(" "));
+
+    // A missing file has to be reported with its reason, and must not stop the
+    // rest of the manifest — that is the whole difference between a loader and
+    // a pile of awaits.
+    ok("el asset roto queda en error, con motivo",
+        byKey.retrato.status === "error" && !!byKey.retrato.error, JSON.stringify(byKey.retrato));
+
+    const values = await page.evaluate(() => {
+        const a = window.raptorAssets;
+        return {
+            texW: a.texture.width, texH: a.texture.height,
+            level: a.level.nombre, rows: a.level.tiles.length, cols: a.level.tiles[0].length,
+            coins: a.coins.length, declared: a.level.monedas.length,
+            seconds: +a.app.assets.sound("moneda").duration.toFixed(3),
+            entities: a.app.entities.length,
+        };
+    });
+    ok("el PNG llega con su tamaño real", values.texW === 128 && values.texH === 32, JSON.stringify(values));
+    ok("el AudioBuffer tiene la duración del WAV", Math.abs(values.seconds - 0.28) < 0.01, `${values.seconds}s`);
+    ok("la escena se construye desde el JSON cargado",
+        values.level === "Patio" && values.coins === values.declared
+        && values.entities === values.rows * values.cols + values.coins + 1,
+        `${values.rows}×${values.cols} + ${values.coins} + héroe = ${values.entities}`);
+
+    ok("dos claves con la misma URL comparten una textura",
+        await page.evaluate(() => {
+            const a = window.raptorAssets.app.assets;
+            return a.texture("hoja") === a.texture("hoja_alias");
+        }));
+
+    // Reading has to fail loudly, not hand back undefined for someone to trip
+    // over three frames later.
+    const guards = await page.evaluate(() => {
+        const a = window.raptorAssets.app.assets;
+        const out = {};
+        const grab = (fn) => { try { fn(); return "no lanzó"; } catch (e) { return e.message; } };
+        out.failed = grab(() => a.texture("retrato"));
+        out.missing = grab(() => a.get("noexiste"));
+        out.wrongKind = grab(() => a.json("hoja"));
+        const fresh = new window.raptorAssets.Assets({ gl: window.raptorAssets.app.gl });
+        fresh.texture("x", "a.png");
+        out.pending = grab(() => fresh.texture("x"));
+        return out;
+    });
+    ok("leer uno fallido relanza su error", guards.failed.includes("cargar"), guards.failed);
+    ok("leer una clave inexistente avisa", guards.missing.includes("no hay ningún asset"), guards.missing);
+    ok("leer con el tipo equivocado avisa", guards.wrongKind.includes("es texture, no json"), guards.wrongKind);
+    ok("leer antes de load() señala el await que falta", guards.pending.includes("await"), guards.pending);
+
+    const progress = await page.evaluate(async () => {
+        const a = window.raptorAssets;
+        const fresh = new a.Assets({ gl: a.app.gl });
+        a.declare(fresh);
+        const seen = [];
+        await fresh.load({ tolerant: true, onProgress: (p) => seen.push({ ratio: +p.ratio.toFixed(3), loaded: p.loaded }) });
+        fresh.dispose();
+        return seen;
+    });
+    ok("onProgress avanza de uno en uno y acaba en 1",
+        progress.length === 6 && progress.every((p, i) => i === 0 || p.loaded === progress[i - 1].loaded + 1)
+        && progress.at(-1).ratio === 1,
+        JSON.stringify(progress.map((p) => p.ratio)));
+
+    const strict = await page.evaluate(async () => {
+        const a = window.raptorAssets;
+        const fresh = new a.Assets({ gl: a.app.gl });
+        a.declare(fresh);
+        try { await fresh.load(); return "no rechazó"; } catch (e) { return e.message; }
+    });
+    ok("sin tolerant, load() rechaza nombrando el asset",
+        strict.includes("retrato") && strict.includes("fallaron"), strict.split("\n")[0]);
+
+    ok("load() sin nada pendiente resuelve al instante",
+        await page.evaluate(async () => {
+            const fresh = new window.raptorAssets.Assets({});
+            const t = Date.now();
+            await fresh.load();
+            return Date.now() - t < 50;
+        }));
+
+    ok("put() registra algo generado y se lee igual",
+        await page.evaluate(() => {
+            const fresh = new window.raptorAssets.Assets({});
+            fresh.put("a-mano", { hola: 1 });
+            return fresh.has("a-mano") && fresh.get("a-mano").hola === 1;
+        }));
+
+    ok("la pantalla de carga se retira al terminar",
+        (await page.evaluate(() => document.querySelectorAll(".loading").length)) === 0);
+
+    await page.locator("#panel button", { hasText: "Recargar" }).click();
+    await page.waitForTimeout(900);
+    const reloaded = await page.evaluate(() => ({
+        rows: document.querySelectorAll(".arow").length,
+        ready: document.querySelectorAll(".arow.ready").length,
+        error: document.querySelectorAll(".arow.error").length,
+        width: document.querySelector(".prog > i").style.width,
+    }));
+    ok("recargar repinta la tabla y llega al 100%",
+        reloaded.rows === 6 && reloaded.ready === 5 && reloaded.error === 1 && reloaded.width === "100%",
+        JSON.stringify(reloaded));
+
+    // Decoding happened without a gesture; only playing needed one.
+    await page.locator("#panel button", { hasText: "Sonar" }).click();
+    ok("el sonido decodificado suena", await page.evaluate(() => window.raptorAssets.playCoin()));
+
+    ok("assets: sin errores inesperados", errors.length === 0, errors.join(" | "));
     await page.close();
 });
 
