@@ -53,6 +53,11 @@ const CONTROLS = [
     "components/controls/autoAim.js",
 ];
 
+// Synthesised audio (Web Audio; no files, so the pages stay self-contained).
+const AUDIO = [
+    "components/audio/engineSound.js",
+];
+
 // Vehicles assembled from shapes (must come after ENGINE, which defines them).
 const VEHICLES = [
     "components/vehicles/engine.js",
@@ -87,7 +92,7 @@ const PAGES = [
     {
         out: "dyno.html",
         title: "Raptor — Banco de pruebas: motor y caja",
-        modules: [...ENGINE, ...CONTROLS, ...VEHICLES, "vehicles/dynoDemo.js"],
+        modules: [...ENGINE, ...CONTROLS, ...VEHICLES, ...AUDIO, "vehicles/dynoDemo.js"],
         // The demo injects its own styles from JS; the body starts empty.
         headStyle: "",
     },

@@ -12,12 +12,14 @@
 // gearbox interesting: a short gear multiplies torque but runs out of revs, a
 // tall one barely pulls. Play with the sliders and watch the curve move.
 //
-// Controls: W/↑ throttle · S/↓ brake · G auto/manual · Z/X shift · R reset.
+// Controls: W/↑ throttle · S/↓ brake · G auto/manual · Z/X shift · R reset ·
+// M mute · F fullscreen.
 
 import RaptorEngine from "../components/raptorEngine.js";
 import { Rectangle } from "../components/shapes/index.js";
 import { Gearbox, GEARBOX_MODE } from "../components/controls/index.js";
 import { Engine } from "../components/vehicles/index.js";
+import { EngineSound } from "../components/audio/index.js";
 
 // The strip: 420 m long, 9 m wide. Roughly 47 times longer than it is wide.
 const TRACK = { length: 420, width: 9 };
@@ -99,6 +101,32 @@ const STYLES = `
     .tbtn.brake.on { background: rgba(185, 62, 50, .9); border-color: #f0a094; }
     .tbtn.on { background: rgba(74, 127, 181, .8); border-color: #7fb2e6; }
     .tbtn.off { opacity: .35; }
+    .pad.top { top: 12px; bottom: auto; right: 12px; }
+
+    /* Compact readout pinned to the canvas, so the essentials stay visible in
+       fullscreen even when the panel is off to one side. */
+    .hud {
+        position: absolute; top: 12px; left: 12px; display: flex; align-items: center; gap: 10px;
+        background: rgba(10, 13, 18, .55); border: 1px solid rgba(255,255,255,.14);
+        border-radius: 10px; padding: 8px 12px;
+        -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+    }
+    .hud .g { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 22px; text-align: center; }
+    .hud .v { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .hud .v small { font-size: 10px; color: #9aa0a6; margin-left: 3px; }
+    .hud .r { width: 78px; height: 7px; background: #1b1d21; border-radius: 4px; overflow: hidden; border: 1px solid #3a3f45; }
+    .hud .r > i { display: block; height: 100%; width: 0; background: #6aa9e0; }
+
+    /* Fullscreen: give the strip the whole height and keep the panel scrollable
+       beside it, instead of the page layout that assumes a document. */
+    #app:fullscreen { height: 100vh; padding: 10px; flex-wrap: nowrap; align-items: stretch; }
+    #app:fullscreen #stage { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; min-width: 0; }
+    #app:fullscreen #stage canvas { width: 100%; height: auto; max-height: 100%; max-width: 100%; }
+    #app:fullscreen #panel { overflow-y: auto; flex: none; }
+    @media (max-width: 720px) {
+        #app:fullscreen { flex-direction: column; }
+        #app:fullscreen #stage { flex: 0 0 auto; }
+    }
 
     .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
     .row label { width: 104px; font-size: 12px; color: #b9bfc6; }
@@ -200,6 +228,9 @@ function startDemo() {
         mode: GEARBOX_MODE.AUTO,
     });
 
+    // Four cylinders, four strokes: the note is rpm/30, fed from the gearbox.
+    const sound = new EngineSound({ cylinders: 4, strokes: 4, volume: 0.5 });
+
     let speed = 0;        // m/s
     let distance = 0;     // m from the start line
     let throttle = 0;     // 0..1
@@ -238,6 +269,8 @@ function startDemo() {
     const upBtn = el("button", { textContent: "Subir ▲ (X)", onclick: () => shift(1) });
     const downBtn = el("button", { textContent: "Bajar ▼ (Z)", onclick: () => shift(-1) });
     const resetBtn = el("button", { textContent: "Volver a la salida (R)", onclick: () => reset() });
+    const soundBtn = el("button", { onclick: () => toggleSound() });
+    const fsBtn = el("button", { onclick: () => toggleFullscreen() });
 
     const torqueCtl = slider("Par máximo", 180, 600, 10, engine.peakTorque,
         (v) => { engine.peakTorque = v; engine._peak = null; drawCurve(); }, (v) => `${v} Nm`);
@@ -280,11 +313,17 @@ function startDemo() {
             resetBtn,
         ]),
         el("div", { className: "card" }, [
-            el("div", { className: "hint", style: "margin:0", textContent: "W/↑ acelera · S/↓ frena · R vuelve a la salida · o usa los botones sobre la pista (también en móvil)" }),
+            el("h2", { textContent: "Pantalla y sonido" }),
+            el("div", { className: "grid2" }, [soundBtn, fsBtn]),
+            el("div", { className: "hint", textContent: "M silencia · F pantalla completa" }),
+        ]),
+        el("div", { className: "card" }, [
+            el("div", { className: "hint", style: "margin:0", textContent: "W/↑ acelera · S/↓ frena · R vuelve a la salida · M silencia · F pantalla completa · o usa los botones sobre la pista (también en móvil)" }),
         ]),
     ]);
 
-    document.body.append(el("div", { id: "app" }, [stage, panel]));
+    const app = el("div", { id: "app" }, [stage, panel]);
+    document.body.append(app);
 
     // --- On-screen controls, so the whole thing is drivable on a phone. -----
     // Pedals are *held*; gear and reset are taps. Keyboard and touch feed the
@@ -304,8 +343,21 @@ function startDemo() {
     const downTouch = tbtn("▼", "small");
     const modeTouch = tbtn("AUTO", "small");
     const resetTouch = tbtn("↺", "small");
+    const soundTouch = tbtn("🔊", "small");
+    const fsTouch = tbtn("⛶", "small");
+
+    // Compact readout on the canvas: in fullscreen the panel can be off to the
+    // side or scrolled away, and gear/speed/revs are the ones you actually watch.
+    const hudGear = el("div", { className: "g", textContent: "1" });
+    const hudSpeed = el("div", { className: "v" }, [
+        document.createTextNode("0"),
+        el("small", { textContent: "KM/H" }),
+    ]);
+    const hudTach = el("i");
 
     stage.append(
+        el("div", { className: "hud" }, [hudGear, hudSpeed, el("div", { className: "r" }, [hudTach])]),
+        el("div", { className: "pad top" }, [soundTouch, fsTouch]),
         el("div", { className: "pad left" }, [
             el("div", { className: "col" }, [modeTouch, resetTouch]),
             el("div", { className: "col" }, [upTouch, downTouch]),
@@ -336,15 +388,28 @@ function startDemo() {
     bindTap(downTouch, () => shift(-1));
     bindTap(modeTouch, () => toggleMode());
     bindTap(resetTouch, () => reset());
+    bindTap(soundTouch, () => toggleSound());
+    bindTap(fsTouch, () => toggleFullscreen());
+
+    // Browsers only let audio start from a gesture, so the first click, tap or
+    // key press anywhere wakes it up — after that the listeners are gone.
+    for (const ev of ["pointerdown", "keydown"]) {
+        window.addEventListener(ev, wakeAudio, { once: true, capture: true });
+    }
 
     window.raptorDyno = {
-        game, engine, gearbox, reset, toggleMode, shift,
+        game, engine, gearbox, sound, reset, toggleMode, shift, toggleSound, toggleFullscreen, wakeAudio,
         get state() { return { speed, distance, runTime, sprintTime, measureTime, trapSpeed, peakG, throttle, brake }; },
         set throttle(v) { throttle = v; },
         set brake(v) { brake = v; },
     };
 
     setMode(GEARBOX_MODE.AUTO);
+    renderSoundLabel();
+    renderFullscreenLabel();
+    for (const ev of ["fullscreenchange", "webkitfullscreenchange"]) {
+        document.addEventListener(ev, renderFullscreenLabel);
+    }
     drawCurve();
     reset();
     game.addUpdater(update);
@@ -358,6 +423,8 @@ function startDemo() {
         else if (k === "x") shift(1);
         else if (k === "z") shift(-1);
         else if (k === "r") reset();
+        else if (k === "m") toggleSound();
+        else if (k === "f") toggleFullscreen();
     });
     window.addEventListener("keyup", (e) => {
         held.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key);
@@ -392,6 +459,56 @@ function startDemo() {
     function shift(dir) {
         if (gearbox.mode !== GEARBOX_MODE.MANUAL) return;
         if (dir > 0) gearbox.shiftUp(); else gearbox.shiftDown();
+    }
+
+    // --- Sound -----------------------------------------------------------
+
+    function wakeAudio() {
+        if (!sound.muted) sound.start();
+        renderSoundLabel();
+    }
+
+    // Muting also covers "never started": the first unmute is itself a gesture,
+    // so it can open the context there and then.
+    function toggleSound() {
+        sound.toggleMuted();
+        if (!sound.muted) sound.start();
+        renderSoundLabel();
+    }
+
+    function renderSoundLabel() {
+        const on = !sound.muted;
+        soundBtn.textContent = on ? "🔊 Sonido (M)" : "🔇 Silencio (M)";
+        soundTouch.textContent = on ? "🔊" : "🔇";
+        soundTouch.classList.toggle("off", !on);
+    }
+
+    // --- Fullscreen ------------------------------------------------------
+    // Vendor prefixes are still what Safari answers to, so go through both.
+
+    function fullscreenElement() {
+        return document.fullscreenElement || document.webkitFullscreenElement || null;
+    }
+
+    function toggleFullscreen() {
+        if (fullscreenElement()) {
+            const exit = document.exitFullscreen || document.webkitExitFullscreen;
+            if (exit) Promise.resolve(exit.call(document)).catch(() => {});
+        } else {
+            const request = app.requestFullscreen || app.webkitRequestFullscreen;
+            if (request) Promise.resolve(request.call(app)).catch(() => {});
+        }
+        // Safari fires the change event late; the listener corrects the label.
+        renderFullscreenLabel();
+    }
+
+    function renderFullscreenLabel() {
+        const on = !!fullscreenElement();
+        fsBtn.textContent = on ? "⛶ Salir (F)" : "⛶ Pantalla completa (F)";
+        fsTouch.classList.toggle("on", on);
+        // The canvas is a fixed-size backing store; resizing the box around it
+        // changes the aspect the CSS shows, so re-fit the camera bounds.
+        if (game.canvas) game.canvas.style.maxHeight = on ? "100%" : "";
     }
 
     function reset() {
@@ -509,6 +626,15 @@ function startDemo() {
         camera.bounds = { minX: halfW, maxX: TRACK.length - halfW, minY: 0, maxY: 0 };
         camera.follow({ x: distance + halfW * 0.35, y: 0 }, dt);
 
+        // The note follows the crank, not the road: in neutral or mid-shift the
+        // gearbox reports its own free revs, which is exactly what you'd hear.
+        sound.update({
+            rpm: gearbox.engineRpm,
+            redlineRpm: engine.redlineRpm,
+            load: throttle,
+            cut: gearbox.shifting,
+        });
+
         drawHud(accel);
         drawCurve();
     }
@@ -528,6 +654,11 @@ function startDemo() {
         redlineMark.style.left = "92%";
         rpmNum.textContent = `${Math.round(rpm)} rpm`;
         redlineNum.textContent = `corte ${engine.redlineRpm}`;
+
+        hudGear.textContent = gearbox.label;
+        hudSpeed.firstChild.nodeValue = (speed * 3.6).toFixed(0);
+        hudTach.style.width = `${Math.min(1, frac) * 100}%`;
+        hudTach.style.background = tachFill.style.background;
 
         kTorque.v.textContent = `${torque.toFixed(0)} Nm @ ${Math.round(rpm)}`;
         kWheel.v.textContent = `${(gearbox.wheelForce * throttle / 1000).toFixed(1)} kN`;
