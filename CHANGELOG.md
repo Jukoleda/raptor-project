@@ -33,6 +33,21 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
   **AUTO/MAN** y **↺** de reinicio. Teclado y táctil alimentan el mismo estado,
   así que ninguno pisa al otro; los botones de marcha se atenúan en automática y
   el pad se compacta en pantallas estrechas para no tapar la pista.
+- **`components/audio/engineSound.js`**: `EngineSound` sintetiza la nota del
+  motor con Web Audio, sin ficheros, para que las páginas sigan abriéndose desde
+  `file://`. El tono es la **frecuencia de encendido** (`f = rpm/60 ·
+  cilindros/(tiempos/2)`, o sea `rpm/30` en un cuatro cilindros de cuatro
+  tiempos: 27 Hz al ralentí, 227 Hz en el corte). Sobre ella se apilan armónicos
+  en diente de sierra y ruido en banda para el soplido, y un **paso bajo que se
+  abre con la carga** da la sensación de esfuerzo. Un cambio de marcha **corta la
+  nota**, igual que corta la transmisión. El primer clic, toque o tecla arranca
+  el audio (los navegadores lo exigen) y **🔊 / M** silencia. Si no hay Web Audio
+  todo queda en no-op, así que quien llame no necesita comprobarlo.
+- **Pantalla completa** en el banco de pruebas (**⛶ / F**, con los prefijos de
+  Safari): la pista se lleva todo el alto y el panel queda al lado con scroll
+  —debajo en pantallas estrechas—. Como el panel puede quedar fuera de vista, un
+  **HUD compacto** sobre la pista mantiene a la vista marcha, velocidad y
+  cuentavueltas.
 - Portada (`index.html`) con la nueva tarjeta.
 
 ### Corregido

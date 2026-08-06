@@ -70,6 +70,9 @@ components/
     tankController.js      # TankController: movimiento estilo tanque + input de teclado
     tankAI.js              # TankAI: máquina de estados enemiga (patrulla/persigue/ataca/huye)
     index.js               # Re-exporta los controladores
+  audio/
+    engineSound.js         # EngineSound: nota del motor sintetizada con Web Audio
+    index.js               # Re-exporta el audio
   vehicles/
     engine.js              # Engine: curva de par y potencia derivada (P = T·ω)
     tank.js                # Tank: casco + torreta móvil; diseños (formas y stats)
@@ -472,6 +475,34 @@ estado, así que ninguno pisa al otro.
 
 Con la configuración de fábrica: **0-100 en 4,87 s** y **400 m en 13,35 s** a
 169 km/h de paso.
+
+### Sonido del motor
+
+Las páginas son autocontenidas y se abren desde `file://`, así que no hay
+ficheros de audio: la nota se **sintetiza** con Web Audio en
+`components/audio/EngineSound`. Lo que da el tono es la **frecuencia de
+encendido** —cada cuánto explota un cilindro—:
+
+```
+f = rpm / 60 · cilindros / (tiempos / 2)
+```
+
+Para un cuatro cilindros de cuatro tiempos eso es `rpm/30`: 27 Hz al ralentí y
+227 Hz en el corte. Solos son demasiado graves para el altavoz de un móvil, así
+que la nota se apila con varios **armónicos** en diente de sierra (×1, ×2, ×3 y
+un ×0,5 de fondo) más algo de **ruido filtrado** para el soplido de admisión. Un
+**paso bajo que se abre con la carga** es lo que separa un zumbido lejano de algo
+a fondo, y un **cambio de marcha corta la nota** igual que corta la transmisión.
+
+Los navegadores no dejan sonar nada sin un gesto del usuario, así que el primer
+clic, toque o tecla lo arranca. **🔊 / M** silencia.
+
+### Pantalla completa
+
+**⛶ / F** pone la demo a pantalla completa. En ese modo la pista se lleva todo el
+alto y el panel queda al lado con scroll (debajo, en pantallas estrechas). Como
+el panel puede quedar fuera de vista, hay un **HUD compacto** pegado a la pista
+con lo que de verdad se mira: marcha, velocidad y cuentavueltas.
 
 ## Caja de cambios
 
