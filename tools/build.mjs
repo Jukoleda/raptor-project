@@ -40,6 +40,7 @@ const PAGES = [
     { out: "tanks.html", title: "Raptor — Cañón vs Blindaje", entry: "weapons/tanksDemo.js" },
     { out: "dyno.html", title: "Raptor — Banco de pruebas: motor y caja", entry: "vehicles/dynoDemo.js" },
     { out: "drive.html", title: "Raptor — Batalla de tanques", entry: "controls/driveDemo.js" },
+    { out: "sprites.html", title: "Raptor — Sprites y animación", entry: "sprites/spritesDemo.js" },
 ];
 
 // The library build. Its entry is the framework's public surface.

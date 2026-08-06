@@ -35,9 +35,19 @@ function RaptorEngine() {
         this.context = context;
     };
 
+    // Entities are drawn in layer order, low to high, and in insertion order
+    // within a layer. The sort is lazy: it only happens when something is added
+    // or a layer changes, not every frame.
+    this._needsSort = false;
+
     // Registers a drawable entity. Returns it so calls can be chained.
     this.add = (entity) => {
         this.entities.push(entity);
+        if (entity.layer) this._needsSort = true;
+        // A shape can be re-layered long after it was added, and the engine has
+        // to hear about it — otherwise the change would only take effect the
+        // next time something else happened to trigger a sort.
+        entity._onLayerChange = () => { this._needsSort = true; };
         return entity;
     };
 
@@ -46,7 +56,16 @@ function RaptorEngine() {
         const index = this.entities.indexOf(entity);
         if (index !== -1) {
             this.entities.splice(index, 1);
+            entity._onLayerChange = null;
         }
+        return this;
+    };
+
+    // Stable sort by layer: Array.prototype.sort is required to be stable since
+    // ES2019, which is what keeps insertion order inside a layer.
+    this.sortEntities = () => {
+        this.entities.sort((a, b) => (a.layer || 0) - (b.layer || 0));
+        this._needsSort = false;
         return this;
     };
 
@@ -115,6 +134,8 @@ function RaptorEngine() {
         for (const update of this.updaters) {
             update(dt);
         }
+
+        if (this._needsSort) this.sortEntities();
 
         this.clearScreen();
 

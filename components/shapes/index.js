@@ -5,3 +5,4 @@ export { default as Square } from "./square.js";
 export { default as Triangle } from "./triangle.js";
 export { default as Circle } from "./circle.js";
 export { Polygon, RegularPolygon } from "./polygon.js";
+export { default as Sprite } from "./sprite.js";

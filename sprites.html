@@ -3,10 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Raptor — Cañón vs Blindaje</title>
+    <title>Raptor — Sprites y animación</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/input/keyboard.js, components/input/touchpad.js, components/app.js, components/ui/index.js, components/render/shaders.js, components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/shapes/sprite.js, components/shapes/index.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/armor.js, components/weapons/index.js, weapons/tanksDemo.js + vendor/gl-matrix-min.js
+        Source: components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/input/keyboard.js, components/input/touchpad.js, components/app.js, components/ui/index.js, components/render/shaders.js, components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/shapes/sprite.js, components/shapes/index.js, components/render/texture.js, components/render/spriteSheet.js, components/render/index.js, sprites/spritesDemo.js + vendor/gl-matrix-min.js
         Regenerate with: node tools/build.mjs
         This file is fully self-contained: open it directly in any browser.
     -->
@@ -1609,622 +1609,671 @@ class Sprite extends Shape {
 // ===== components/shapes/index.js =====
 // Convenience barrel for every shape primitive the engine ships with.
 
-// ===== components/weapons/ballistics.js =====
-// Ballistics: where bullets meet armor.
+// ===== components/render/texture.js =====
+// An image on the GPU.
 //
-// Bullets are treated as swept segments (raycast from their previous to their
-// current position), not as physics bodies. That avoids fast bullets tunnelling
-// through thin armor and gives us the exact hit point and, crucially, the
-// surface normal — which is what the angle-based penetration model needs.
+// Three things about WebGL 1 textures trip everyone up, so they are handled
+// here once instead of at every call site:
 //
-// Penetration model (arcade, à la World of Tanks):
-//   effectiveArmor = nominalArmor / cos(theta)
-//   theta = angle between the shell's path and the surface normal
-//   - ricochet if theta >= ricochetAngle (too steep, shell skips off)
-//   - penetration if shellPenetration >= effectiveArmor
-//   - block otherwise (shell stops, no damage)
+// 1. **Y is flipped.** An image's first row is its *top*; a GL texture's first
+//    row is its *bottom*. Without UNPACK_FLIP_Y_WEBGL every sprite is upside
+//    down, which people usually "fix" by flipping the UVs and then fight
+//    forever. Flipped on upload, once.
+//
+// 2. **Non-power-of-two.** A texture whose sides are not powers of two cannot
+//    have mipmaps and cannot REPEAT — it renders black if you ask for either.
+//    Since real sprite sheets are rarely 512×512, the size is checked and the
+//    parameters are chosen accordingly, rather than leaving a black rectangle
+//    and no explanation.
+//
+// 3. **Loading takes time.** A texture cannot be used the frame you ask for it.
+//    Every Texture is therefore usable *immediately*, backed by a 1×1 white
+//    pixel, and swaps itself for the real image when it arrives. Nothing has to
+//    wait, and nothing crashes in between.
+//
+// Sources: a URL, an <img>, a <canvas>, or raw pixels. The canvas one matters
+// more than it looks — it is how the demos build sprite sheets *procedurally*,
+// so the generated pages stay single files that open from file:// with no
+// assets next to them, exactly like the synthesised engine sound.
 
-// Transforms a shape's local collider outline into world space. Mirrors the
-// transform used by Shape.draw and the physics layer (rotation is CCW degrees).
-// Named apart from the physics layer's equivalent: both end up as globals in the
-// standalone build, and one silently overwriting the other is a trap.
-function hullOutline(shape) {
-    const angle = (shape.rotation * Math.PI) / 180;
-    const cos = Math.cos(angle);
-    const sin = Math.sin(angle);
-    return shape.getColliderVertices().map((p) => {
-        const x = p.x * shape.scale.x;
-        const y = p.y * shape.scale.y;
-        return {
-            x: shape.position.x + x * cos - y * sin,
-            y: shape.position.y + x * sin + y * cos,
-        };
-    });
+function isPowerOfTwo(value) {
+    return (value & (value - 1)) === 0 && value > 0;
 }
 
-// Intersection of segment A->B with segment P->Q. Returns { t, point } where t
-// is the position along A->B in [0, 1], or null when they do not cross.
-function segmentIntersect(a, b, p, q) {
-    const r = { x: b.x - a.x, y: b.y - a.y };
-    const s = { x: q.x - p.x, y: q.y - p.y };
-    const denom = r.x * s.y - r.y * s.x;
-    if (Math.abs(denom) < 1e-9) return null; // parallel
+class Texture {
+    constructor(gl, { smooth = false, wrap = false, label = "" } = {}) {
+        this.gl = gl;
+        this.label = label;
+        this.smooth = smooth;   // linear filtering; off by default for pixel art
+        this.wrap = wrap;       // REPEAT; only possible on power-of-two sizes
+        this.width = 1;
+        this.height = 1;
+        this.ready = false;
 
-    const t = ((p.x - a.x) * s.y - (p.y - a.y) * s.x) / denom;
-    const u = ((p.x - a.x) * r.y - (p.y - a.y) * r.x) / denom;
-    if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+        this.handle = gl.createTexture();
+        // A single white pixel, so the texture is drawable before its image
+        // exists. White because sprites multiply by their tint: an unloaded
+        // sprite shows as its tint colour rather than as a black hole.
+        this._upload(new Uint8Array([255, 255, 255, 255]), 1, 1);
+    }
 
-    return { t, point: { x: a.x + r.x * t, y: a.y + r.y * t } };
-}
+    // --- Sources ---------------------------------------------------------
 
-// Casts the segment a->b against a polygon shape. Returns the first face hit as
-// { point, normal, edgeIndex, t } (normal points outward), or null.
-function raycastShape(a, b, shape) {
-    const poly = hullOutline(shape);
-    let best = null;
+    // Kicks off the load and returns the Texture *now*; `texture.loaded` is the
+    // promise for code that would rather wait.
+    static fromImage(gl, url, options = {}) {
+        const texture = new Texture(gl, { label: url, ...options });
+        texture.loaded = new Promise((resolve, reject) => {
+            const image = new Image();
+            // Only set for cross-origin URLs: setting it for a same-origin or
+            // data: URL makes some browsers refuse the load outright.
+            if (/^https?:/i.test(url) && !url.startsWith(location.origin)) {
+                image.crossOrigin = "anonymous";
+            }
+            image.onload = () => { texture.setSource(image); resolve(texture); };
+            image.onerror = () => reject(new Error(`Raptor: no se pudo cargar la textura "${url}"`));
+            image.src = url;
+        });
+        return texture;
+    }
 
-    for (let i = 0; i < poly.length; i++) {
-        const p = poly[i];
-        const q = poly[(i + 1) % poly.length];
-        const hit = segmentIntersect(a, b, p, q);
-        if (hit && (!best || hit.t < best.t)) {
-            const dx = q.x - p.x;
-            const dy = q.y - p.y;
-            const len = Math.hypot(dx, dy) || 1;
-            // Outward normal for a counter-clockwise winding.
-            const normal = { x: dy / len, y: -dx / len };
-            best = { point: hit.point, normal, edgeIndex: i, t: hit.t };
+    static fromCanvas(gl, canvas, options = {}) {
+        const texture = new Texture(gl, { label: "canvas", ...options });
+        texture.setSource(canvas);
+        texture.loaded = Promise.resolve(texture);
+        return texture;
+    }
+
+    // Raw RGBA bytes, four per pixel, top row first.
+    static fromPixels(gl, pixels, width, height, options = {}) {
+        const texture = new Texture(gl, { label: "pixels", ...options });
+        texture._upload(pixels instanceof Uint8Array ? pixels : new Uint8Array(pixels), width, height);
+        texture.ready = true;
+        texture.loaded = Promise.resolve(texture);
+        return texture;
+    }
+
+    // A flat colour, handy as a placeholder or for solid overlays.
+    static solid(gl, { red = 1, green = 1, blue = 1, alpha = 1 } = {}) {
+        const byte = (v) => Math.round(Math.max(0, Math.min(1, v)) * 255);
+        return Texture.fromPixels(gl, new Uint8Array([byte(red), byte(green), byte(blue), byte(alpha)]), 1, 1);
+    }
+
+    // --- Upload ----------------------------------------------------------
+
+    // Replaces the contents with an <img>, <canvas>, ImageBitmap or ImageData.
+    setSource(source) {
+        const gl = this.gl;
+        this.width = source.width;
+        this.height = source.height;
+
+        gl.bindTexture(gl.TEXTURE_2D, this.handle);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        this._applyParameters();
+
+        this.ready = true;
+        if (this.onLoad) this.onLoad(this);
+        return this;
+    }
+
+    _upload(pixels, width, height) {
+        const gl = this.gl;
+        this.width = width;
+        this.height = height;
+        gl.bindTexture(gl.TEXTURE_2D, this.handle);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        this._applyParameters();
+        return this;
+    }
+
+    _applyParameters() {
+        const gl = this.gl;
+        const potential = isPowerOfTwo(this.width) && isPowerOfTwo(this.height);
+
+        // Mipmaps and REPEAT need power-of-two sides. Asking for them anyway is
+        // the classic "why is my sprite black" — so they are simply not asked
+        // for unless the size allows it.
+        if (potential && this.smooth) {
+            gl.generateMipmap(gl.TEXTURE_2D);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        } else {
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, this.smooth ? gl.LINEAR : gl.NEAREST);
         }
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, this.smooth ? gl.LINEAR : gl.NEAREST);
+
+        const mode = this.wrap && potential ? gl.REPEAT : gl.CLAMP_TO_EDGE;
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, mode);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, mode);
     }
-    return best;
+
+    // NEAREST keeps pixel art crisp; LINEAR smooths photos and big scales.
+    setSmooth(smooth) {
+        this.smooth = smooth;
+        this.gl.bindTexture(this.gl.TEXTURE_2D, this.handle);
+        this._applyParameters();
+        return this;
+    }
+
+    bind(unit = 0) {
+        const gl = this.gl;
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        gl.bindTexture(gl.TEXTURE_2D, this.handle);
+        return unit;
+    }
+
+    dispose() {
+        if (this.handle) this.gl.deleteTexture(this.handle);
+        this.handle = null;
+        this.ready = false;
+    }
 }
 
-// Decides what happens when a shell of `penetration` mm hits `armor` mm of plate
-// whose outward `normal` is hit head-on by a shell travelling along `direction`.
-// `normalizes` controls the slope model: true (solid shot) makes sloped armor
-// count more (effective = nominal / cosθ); false (shaped charge / HE) defeats the
-// nominal thickness regardless of slope.
-// Returns { result: "penetration" | "ricochet" | "block", angle, effectiveArmor }.
-function evaluateImpact({ direction, normal, penetration, armor, ricochetAngle = 70, normalizes = true }) {
-    // cos of the impact angle measured from the surface normal.
-    const cos = -(direction.x * normal.x + direction.y * normal.y);
-    const angle = (Math.acos(Math.max(-1, Math.min(1, cos))) * 180) / Math.PI;
-
-    if (cos <= 1e-4) {
-        // Grazing or hitting the inside of a face — treat as a ricochet.
-        return { result: "ricochet", angle, effectiveArmor: Infinity };
-    }
-
-    const effectiveArmor = normalizes ? armor / cos : armor;
-    if (angle >= ricochetAngle) {
-        return { result: "ricochet", angle, effectiveArmor };
-    }
-    if (penetration >= effectiveArmor) {
-        return { result: "penetration", angle, effectiveArmor };
-    }
-    return { result: "block", angle, effectiveArmor };
-}
-
-// Reflects a velocity vector off a surface with the given unit normal.
-function reflect(velocity, normal) {
-    const dot = velocity.x * normal.x + velocity.y * normal.y;
-    return { x: velocity.x - 2 * dot * normal.x, y: velocity.y - 2 * dot * normal.y };
-}
-
-// ===== components/weapons/projectiles.js =====
-// Basic projectile (shell) types and the damage scheme that turns a ballistics
-// result into hit points.
+// ===== components/render/spriteSheet.js =====
+// Slicing a texture into frames, and playing them back.
 //
-// Every type bends the shared penetration model (see ballistics.js) and decides
-// how a hit becomes damage. The fields:
+// A sheet is a grid: every frame the same size, optionally with a margin around
+// the edge and spacing between cells (exporters add those to stop neighbouring
+// frames bleeding into each other when filtering is on).
 //
-//   id / name         identifier and readable Spanish label
-//   penMultiplier     scales the gun's nominal penetration (mm)
-//   damageMultiplier  scales the gun's nominal damage on a clean penetration
-//   ricochetAngle     impact angle from the surface normal beyond which the
-//                     shell skips off (90 = never ricochets)
-//   normalizes        true  -> sloped armor counts more (effective = nominal/cosθ)
-//                     false -> the shell defeats the nominal thickness regardless
-//                              of slope (shaped charge / surface burst)
-//   splash            fraction of damage that still leaks through on a non-pen,
-//                     i.e. fragments spraying past un-breached plate (HE)
+//     const sheet = new SpriteSheet(texture, { frameWidth: 16, frameHeight: 16 });
+//     sheet.frame(0)            // by index, left to right then down
+//     sheet.frame(2, 1)         // by column and row
+//     sheet.range(0, 3)         // [0,1,2,3] as frame rectangles
 //
-// The four staples of arcade tank games:
-//   AP    Perforante     — the all-rounder: solid shot, slope matters, skips off
-//                          steep plates.
-//   APCR  Subcalibre     — more penetration, less damage, ricochets sooner.
-//   HEAT  Carga hueca    — shaped charge: ignores slope, never ricochets, steady
-//                          damage; the answer to angled armor.
-//   HE    Alto explosivo — little penetration but a big punch, and even a non-pen
-//                          chips the target with fragments.
+// An Animation is a list of those rectangles plus a frame rate. It holds *time*,
+// not a frame counter, so playback speed does not depend on the refresh rate:
+// at 8 fps a walk cycle takes the same wall-clock time at 30 Hz and at 144 Hz.
 
-const PROJECTILES = {
-    AP:   { id: "AP",   name: "Perforante",     penMultiplier: 1.0,  damageMultiplier: 1.0, ricochetAngle: 70, normalizes: true,  splash: 0 },
-    APCR: { id: "APCR", name: "Subcalibre",     penMultiplier: 1.4,  damageMultiplier: 0.7, ricochetAngle: 68, normalizes: true,  splash: 0 },
-    HEAT: { id: "HEAT", name: "Carga hueca",    penMultiplier: 1.2,  damageMultiplier: 1.1, ricochetAngle: 90, normalizes: false, splash: 0 },
-    HE:   { id: "HE",   name: "Alto explosivo", penMultiplier: 0.35, damageMultiplier: 1.8, ricochetAngle: 90, normalizes: false, splash: 0.25 },
-};
-
-// Default type when a weapon / bullet does not name one.
-const DEFAULT_PROJECTILE = PROJECTILES.AP;
-
-// Resolves a shot end to end: runs the penetration model tuned for the shell
-// `type`, then applies its damage scheme. Returns the ballistics result extended
-// with `damage` (hit points actually dealt to the plate):
-//   penetration -> full damage
-//   block       -> splash * damage (HE fragments; 0 for solid shot)
-//   ricochet    -> no damage
-function resolveShot({ type = DEFAULT_PROJECTILE, penetration, damage, direction, normal, armor }) {
-    const impact = evaluateImpact({
-        direction,
-        normal,
-        penetration,
-        armor,
-        ricochetAngle: type.ricochetAngle,
-        normalizes: type.normalizes,
-    });
-
-    let dealt = 0;
-    if (impact.result === "penetration") {
-        dealt = damage;
-    } else if (impact.result === "block") {
-        dealt = Math.round(damage * type.splash);
+class SpriteSheet {
+    constructor(texture, { frameWidth, frameHeight, margin = 0, spacing = 0 } = {}) {
+        this.texture = texture;
+        this.frameWidth = frameWidth;
+        this.frameHeight = frameHeight;
+        this.margin = margin;
+        this.spacing = spacing;
     }
 
-    return { ...impact, type, damage: dealt };
+    get columns() {
+        const usable = (this.texture.width - this.margin * 2) + this.spacing;
+        return Math.max(1, Math.floor(usable / (this.frameWidth + this.spacing)));
+    }
+
+    get rows() {
+        const usable = (this.texture.height - this.margin * 2) + this.spacing;
+        return Math.max(1, Math.floor(usable / (this.frameHeight + this.spacing)));
+    }
+
+    get count() {
+        return this.columns * this.rows;
+    }
+
+    // `frame(i)` walks the grid in reading order; `frame(col, row)` is explicit.
+    frame(a, b = null) {
+        const [col, row] = b === null ? [a % this.columns, Math.floor(a / this.columns)] : [a, b];
+        return {
+            x: this.margin + col * (this.frameWidth + this.spacing),
+            y: this.margin + row * (this.frameHeight + this.spacing),
+            width: this.frameWidth,
+            height: this.frameHeight,
+        };
+    }
+
+    // Inclusive range of indices, as frame rectangles — the usual way to say
+    // "frames 4 through 7 are the walk cycle".
+    range(from, to) {
+        const frames = [];
+        for (let i = from; i <= to; i++) frames.push(this.frame(i));
+        return frames;
+    }
+
+    // Convenience: build an Animation straight from indices.
+    animation(from, to, options = {}) {
+        return new Animation(this.range(from, to), options);
+    }
 }
 
-// ===== components/weapons/bullet.js =====
-// A shell in flight. It stores its previous position so the ballistics layer can
-// raycast the segment travelled during the last frame (continuous collision).
-
-class Bullet {
-    constructor({ x, y, vx, vy, penetration, damage = 100, owner = null, life = 3, type = DEFAULT_PROJECTILE }) {
-        this.position = { x, y };
-        this.prev = { x, y };
-        this.velocity = { x: vx, y: vy };
-        this.penetration = penetration;
-        this.damage = damage;
-        this.type = type; // projectile type (AP / APCR / HEAT / HE), drives the damage scheme
-        this.owner = owner;
-        this.alive = true;
-        this.life = life; // seconds before it despawns
+class Animation {
+    constructor(frames, { fps = 8, loop = true, onEnd = null } = {}) {
+        this.frames = frames;
+        this.fps = fps;
+        this.loop = loop;
+        this.onEnd = onEnd;
+        this.time = 0;
+        this.index = 0;
+        this.finished = false;
     }
 
-    // Unit vector of travel.
-    get direction() {
-        const speed = Math.hypot(this.velocity.x, this.velocity.y) || 1;
-        return { x: this.velocity.x / speed, y: this.velocity.y / speed };
+    get frame() {
+        return this.frames[this.index];
     }
 
-    get speed() {
-        return Math.hypot(this.velocity.x, this.velocity.y);
+    reset() {
+        this.time = 0;
+        this.index = 0;
+        this.finished = false;
+        return this;
+    }
+
+    // Advances by dt seconds and returns true if the frame changed, so callers
+    // only touch the GPU when there is something new to show.
+    update(dt) {
+        if (this.finished || this.frames.length < 2) return false;
+        const previous = this.index;
+        this.time += dt;
+
+        const step = 1 / this.fps;
+        while (this.time >= step) {
+            this.time -= step;
+            if (this.index + 1 < this.frames.length) {
+                this.index++;
+            } else if (this.loop) {
+                this.index = 0;
+            } else {
+                this.finished = true;
+                if (this.onEnd) this.onEnd(this);
+                break;
+            }
+        }
+        return this.index !== previous;
+    }
+}
+
+// Drives a Sprite from named animations, which is the shape gameplay code
+// actually wants: `animator.play("walk")`, not a frame index.
+class Animator {
+    constructor(sprite, animations = {}, { initial = null } = {}) {
+        this.sprite = sprite;
+        this.animations = animations;
+        this.current = null;
+        this.name = null;
+        const first = initial || Object.keys(animations)[0];
+        if (first) this.play(first);
+    }
+
+    // Replaying the animation that is already running is a no-op, so calling
+    // `play("walk")` every frame while a key is held does not reset it to frame
+    // zero forever — the mistake that makes a character look frozen mid-stride.
+    play(name, { restart = false } = {}) {
+        if (this.name === name && !restart) return this;
+        const animation = this.animations[name];
+        if (!animation) return this;
+        this.name = name;
+        this.current = animation.reset();
+        this.sprite.setFrame(animation.frame);
+        return this;
     }
 
     update(dt) {
-        this.prev.x = this.position.x;
-        this.prev.y = this.position.y;
-        this.position.x += this.velocity.x * dt;
-        this.position.y += this.velocity.y * dt;
-        this.life -= dt;
-        if (this.life <= 0) this.alive = false;
+        if (this.current && this.current.update(dt)) {
+            this.sprite.setFrame(this.current.frame);
+        }
+        return this;
     }
 }
 
-// ===== components/weapons/weapon.js =====
-// A gun that fires shells. Tracks its own reload cooldown; call update(dt) each
-// frame and fire(...) to shoot when ready. `penetration` and `damage` are the
-// gun's nominal values; each projectile type scales them by its own multipliers.
+// ===== components/render/index.js =====
+// Barrel for the render layer.
 
-class Weapon {
-    constructor({ penetration = 100, muzzleSpeed = 12, reload = 1.0, damage = 34, type = DEFAULT_PROJECTILE } = {}) {
-        this.penetration = penetration; // mm the shell can defeat head-on
-        this.muzzleSpeed = muzzleSpeed; // world units / second
-        this.reload = reload;           // seconds between shots
-        this.damage = damage;           // hit points on penetration
-        this.type = type;               // loaded projectile type (AP / APCR / HEAT / HE)
-        this.cooldown = 0;
-    }
-
-    update(dt) {
-        if (this.cooldown > 0) this.cooldown -= dt;
-    }
-
-    get ready() {
-        return this.cooldown <= 0;
-    }
-
-    // Progress of the current reload in [0, 1] (1 = ready).
-    get reloadProgress() {
-        return this.reload <= 0 ? 1 : Math.min(1, 1 - this.cooldown / this.reload);
-    }
-
-    // Fires a shell from (x, y) toward (dirX, dirY) using projectile `type`
-    // (defaults to the loaded one). The type's multipliers scale the gun's
-    // nominal penetration and damage. Returns a Bullet, or null if reloading.
-    fire(x, y, dirX, dirY, owner = null, type = this.type) {
-        if (!this.ready) return null;
-        this.cooldown = this.reload;
-        const len = Math.hypot(dirX, dirY) || 1;
-        return new Bullet({
-            x,
-            y,
-            vx: (dirX / len) * this.muzzleSpeed,
-            vy: (dirY / len) * this.muzzleSpeed,
-            penetration: this.penetration * type.penMultiplier,
-            damage: this.damage * type.damageMultiplier,
-            type,
-            owner,
-        });
-    }
-}
-
-// ===== components/weapons/armor.js =====
-// Per-face armor for a target shape. Each collider edge (in getColliderVertices
-// order) has a nominal armor thickness in mm and a readable face name. The armor
-// travels with the shape's rotation, so angling the hull changes which value a
-// shell meets — exactly what drives the penetration model.
-
-class Armor {
-    // faces: array aligned to the shape's collider edges, each { armor, name }.
-    constructor(shape, faces, { hp = 100 } = {}) {
-        this.shape = shape;
-        this.faces = faces;
-        this.maxHp = hp;
-        this.hp = hp;
-        this.alive = true;
-    }
-
-    faceForEdge(index) {
-        return this.faces[index];
-    }
-
-    takeDamage(amount) {
-        this.hp = Math.max(0, this.hp - amount);
-        if (this.hp === 0) this.alive = false;
-        return this.hp;
-    }
-
-    // Builds per-face armor for any convex hull by looking at where each face
-    // actually points in the shape's local space: faces within `frontArc` of
-    // local +Y (forward) are frontal, those as far from it are the rear, and the
-    // rest are sides. Works for a rectangle, a wedge, a hexagon — anything with
-    // a counter-clockwise collider outline, which is what the raycast assumes.
-    static forHull(shape, { front, side, rear, hp = 100, frontArc = 75 } = {}) {
-        const points = shape.getColliderVertices();
-        const faces = points.map((p, i) => {
-            const q = points[(i + 1) % points.length];
-            const dx = q.x - p.x;
-            const dy = q.y - p.y;
-            const len = Math.hypot(dx, dy) || 1;
-            // Outward normal of a CCW edge is (dy, -dx); we only need its Y to
-            // know how far the face is turned away from "forward".
-            const ny = -dx / len;
-            const angle = (Math.acos(Math.max(-1, Math.min(1, ny))) * 180) / Math.PI;
-            if (angle <= frontArc) return { armor: front, name: "Frontal" };
-            if (angle >= 180 - frontArc) return { armor: rear, name: "Trasera" };
-            return { armor: side, name: "Lateral" };
-        });
-        return new Armor(shape, faces, { hp });
-    }
-
-    // Convenience for a rectangular hull. `frontEdge` is the collider edge that
-    // faces the enemy; its opposite becomes the rear, the other two the sides.
-    static rectangle(shape, { front, side, rear, frontEdge = 3, hp = 100 } = {}) {
-        const faces = [];
-        for (let i = 0; i < 4; i++) faces.push({ armor: side, name: "Lateral" });
-        faces[frontEdge % 4] = { armor: front, name: "Frontal" };
-        faces[(frontEdge + 2) % 4] = { armor: rear, name: "Trasera" };
-        return new Armor(shape, faces, { hp });
-    }
-}
-
-// ===== components/weapons/index.js =====
-// Barrel for the weapons / ballistics layer.
-
-// ===== weapons/tanksDemo.js =====
-// Arcade tanks demo: a cannon on the left fires shells at a target hull on the
-// right. Rotate the hull to angle its armor and watch the shell PENETRATE,
-// RICOCHET or fail to penetrate — driven by the ballistics penetration model
-// (effective armor = nominal / cos(angle)).
+// ===== sprites/spritesDemo.js =====
+// Sprites: textures, atlas frames, animation, tint and draw order.
+//
+// The page is a single self-contained file, so there are no .png files next to
+// it to load. The sheet is therefore **drawn at runtime** with a 2D canvas and
+// uploaded as a texture — the same trick as the synthesised engine sound, and a
+// fair demonstration in its own right: `Texture.fromCanvas` is how you'd feed
+// Raptor anything you generate rather than author.
+//
+// Swapping it for real art is one line:
+//
+//     const texture = Texture.fromImage(gl, "hoja.png");
+//
+// Everything below it stays exactly the same, because a Texture is a Texture.
+//
+// Controls: WASD/flechas mueven · 1-4 tiñen · L filtrado · C capa superior.
 
 
 
 
-const MUZZLE = { x: -2.25, y: 0 };
-const CULL = { x: 4.2, y: 3.0 };
-const HULL_TURN = 90; // degrees per second while an arrow is held
+const CELL = 32;              // pixels per sheet cell
+const PPU = 32;               // pixels per world unit → one tile is one unit
+const MAP = { width: 17, height: 13 };
+const SPEED = 3.4;            // world units per second
 
-const RESULT_INFO = {
-    penetration: { label: "PENETRA", color: [0.2, 0.9, 0.35] },
-    ricochet: { label: "REBOTE", color: [0.95, 0.85, 0.2] },
-    block: { label: "NO PENETRA", color: [0.9, 0.25, 0.2] },
-    splash: { label: "ESQUIRLAS", color: [0.95, 0.55, 0.2] },
+// Tiles are drawn a hair larger than the grid they sit on. Two quads that share
+// an edge land on a sub-pixel boundary after the perspective divide, and the
+// rasteriser gives that pixel to neither — which shows up as a thin dark seam
+// running through the whole map. Overlapping them slightly is the standard fix;
+// the alternative is padding every cell in the sheet.
+const TILE_BLEED = 1.04;
+
+// Draw order. Named, because "layer 3" tells you nothing six months later.
+const LAYER = { GROUND: -20, DECAL: -10, PROP: 0, ACTOR: 10, CANOPY: 20 };
+
+const TINTS = {
+    Normal: { red: 1, green: 1, blue: 1 },
+    Herido: { red: 1, green: 0.35, blue: 0.3 },
+    Veneno: { red: 0.55, green: 1, blue: 0.5 },
+    Fantasma: { red: 0.7, green: 0.85, blue: 1, alpha: 0.45 },
 };
 
-// Selectable ammo, in the order shown in the panel.
-const AMMO = [PROJECTILES.AP, PROJECTILES.APCR, PROJECTILES.HEAT, PROJECTILES.HE];
-
-// Only this page's own chrome: the panel, rows, buttons and readouts come from
-// the framework (components/ui/).
 const STYLES = `
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    button.fire { border-color: #7a2f2f; background: #5a2626; font-weight: 600; }
-    button.fire:hover:not(:disabled) { background: #6d2e2e; }
-    .ammo { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    button.shell { text-align: left; line-height: 1.3; }
-    button.shell.active { border-color: #4a7fb5; background: #2b3a4a; box-shadow: inset 0 0 0 1px #4a7fb5; }
-    button.shell b { display: block; font-size: 13px; }
-    button.shell small { color: #9aa0a6; font-size: 11px; }
-    .row .bar { flex: 1; min-width: 0; }
-    .bar { height: 12px; background: #1b1d21; border-radius: 6px; overflow: hidden; border: 1px solid #3a3f45; }
-    .bar > i { display: block; height: 100%; background: #43c06a; transition: width .12s, background .12s; }
-    #result { font-size: 20px; font-weight: 700; letter-spacing: .04em; }
-    .armorline { font-size: 12px; color: #9aa0a6; margin-top: 8px; }
+    .swatches { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .swatches button.active { border-color: #4a7fb5; background: #2b3a4a; box-shadow: inset 0 0 0 1px #4a7fb5; }
+    .sheet { display: block; width: 100%; height: auto; image-rendering: pixelated;
+             border-radius: 6px; border: 1px solid #3a3f45; background: #14171b; }
+    .frames { display: flex; gap: 4px; margin-top: 8px; }
+    .frames > i { flex: 1; height: 6px; border-radius: 3px; background: #2f343a; }
+    .frames > i.on { background: #6aa9e0; }
 `;
 
-App.boot({ title: "Cañón vs Blindaje", styles: STYLES, touch: false }, (app) => {
-    const { gl, stage, keyboard } = app;
-    const game = app;
+// --- The sheet, drawn rather than loaded --------------------------------
+// Six columns by three rows of 32×32 cells: a walk cycle, ground tiles and
+// props. Deliberately blocky — it is drawn with rectangles so the code stays
+// short enough to read, and NEAREST filtering keeps the edges crisp.
 
-    // --- Scene ---
-    const cannon = new Rectangle(gl, { width: 0.7, height: 0.28 })
-        .setColor({ red: 0.5, green: 0.5, blue: 0.56 }).setPosition({ x: -2.6, y: 0 }).init();
-    game.add(cannon);
+function drawSheet() {
+    const canvas = document.createElement("canvas");
+    canvas.width = CELL * 6;
+    canvas.height = CELL * 3;
+    const ctx = canvas.getContext("2d");
+    const px = (x, y, w, h, color) => { ctx.fillStyle = color; ctx.fillRect(x, y, w, h); };
 
-    const tankColor = { red: 0.27, green: 0.55, blue: 0.35 };
-    const tank = new Rectangle(gl, { width: 0.5, height: 2.1 })
-        .setColor(tankColor).setPosition({ x: 1.6, y: 0 }).init();
-    game.add(tank);
+    // Row 0 — the walker: 4 frames of walk, then 2 of idle. Only the legs and a
+    // one-pixel bob change between frames, which is enough to read as walking.
+    const walker = (col, legOffset, bob) => {
+        const x = col * CELL;
+        const y = bob;
+        px(x + 10, y + 8, 12, 12, "#e0533d");            // body
+        px(x + 12, y + 4, 8, 6, "#f2a58c");              // head
+        px(x + 13, y + 6, 2, 2, "#1b1d21");              // eyes
+        px(x + 17, y + 6, 2, 2, "#1b1d21");
+        px(x + 9, y + 11, 3, 7, "#c4402c");              // arms
+        px(x + 20, y + 11, 3, 7, "#c4402c");
+        px(x + 11 + legOffset, y + 20, 4, 8, "#35507f"); // legs
+        px(x + 17 - legOffset, y + 20, 4, 8, "#35507f");
+        px(x + 10 + legOffset, y + 27, 5, 3, "#26292e"); // feet
+        px(x + 17 - legOffset, y + 27, 5, 3, "#26292e");
+    };
+    walker(0, 0, 0); walker(1, 3, 1); walker(2, 0, 0); walker(3, -3, 1);
+    walker(4, 0, 0); walker(5, 0, 1);
 
-    // Front armor is the hull's left face (edge 3), the one facing the cannon.
-    const armor = Armor.rectangle(tank, { front: 120, side: 50, rear: 30, frontEdge: 3, hp: 100 });
+    // Row 1 — ground tiles. A little deterministic speckle stops a field of
+    // them from looking like flat wallpaper.
+    const speckle = (col, base, fleck, seed) => {
+        const x = col * CELL;
+        px(x, CELL, CELL, CELL, base);
+        let s = seed;
+        for (let i = 0; i < 26; i++) {
+            s = (s * 1664525 + 1013904223) >>> 0;
+            const dx = s % CELL;
+            const dy = (s >>> 8) % CELL;
+            px(x + dx, CELL + dy, 2, 2, fleck);
+        }
+    };
+    speckle(0, "#2f6b3a", "#387d45", 7);      // grass
+    speckle(1, "#6b5a3a", "#7d6a45", 13);     // dirt
+    speckle(2, "#4a4f57", "#585e68", 29);     // stone
+    speckle(3, "#1f4f6b", "#2a627f", 41);     // water
+    // Grass with a path crossing it, and a flowered variant.
+    speckle(4, "#2f6b3a", "#387d45", 53);
+    px(CELL * 4, CELL + 11, CELL, 10, "#6b5a3a");
+    speckle(5, "#2f6b3a", "#387d45", 67);
+    for (const [fx, fy] of [[6, 8], [20, 14], [12, 22]]) px(CELL * 5 + fx, CELL + fy, 3, 3, "#f2c518");
 
-    const weapon = new Weapon({ penetration: 150, muzzleSpeed: 10, reload: 0.6, damage: 25 });
+    // Row 2 — props, drawn on transparent cells so they layer over the ground.
+    const y2 = CELL * 2;
+    // Tree trunk (cell 0) and canopy (cell 1) are separate frames on purpose:
+    // the trunk sits behind the player and the canopy in front, which is the
+    // whole point of having layers. The trunk fills its cell top to bottom and
+    // the canopy sits low in its own, so stacking them exactly one cell apart
+    // makes them meet — no hand-tuned offset to drift out of alignment.
+    px(CELL * 0 + 13, y2 + 2, 6, 30, "#5a3f28");
+    px(CELL * 0 + 13, y2 + 2, 2, 30, "#6d4e33");
+    ctx.fillStyle = "#1f5c31";
+    ctx.beginPath(); ctx.arc(CELL * 1 + 16, y2 + 20, 14, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#2a7a41";
+    ctx.beginPath(); ctx.arc(CELL * 1 + 11, y2 + 16, 8, 0, Math.PI * 2); ctx.fill();
+    // Rock, bush, and two frames of a spinning coin.
+    px(CELL * 2 + 8, y2 + 16, 16, 11, "#6e747d");
+    px(CELL * 2 + 11, y2 + 12, 10, 6, "#878e98");
+    ctx.fillStyle = "#2a7a41";
+    ctx.beginPath(); ctx.arc(CELL * 3 + 16, y2 + 20, 9, 0, Math.PI * 2); ctx.fill();
+    px(CELL * 4 + 11, y2 + 8, 10, 16, "#f2c518");
+    px(CELL * 4 + 14, y2 + 11, 4, 10, "#c9a10f");
+    px(CELL * 5 + 14, y2 + 8, 4, 16, "#f2c518");
 
-    const bullets = [];
-    const markers = [];
-    let flash = 0;
-    let angle = 0;
-    let ammo = PROJECTILES.AP; // currently loaded projectile type
+    return canvas;
+}
 
-    // --- Panel ---
-    const fireBtn = button("Disparar", fire, { className: "fire" });
-    const resetBtn = button("Reiniciar", reset);
+App.boot({ title: "Sprites · texturas y animación", styles: STYLES }, (app) => {
+    const { gl, keyboard, touch } = app;
 
-    const penCtl = slider("Penetración base", { min: 40, max: 260, step: 5, value: weapon.penetration,
-        apply: (v) => { weapon.penetration = v; refreshAmmo(); } });
+    // --- The texture ------------------------------------------------------
+    const sheetCanvas = drawSheet();
+    const texture = Texture.fromCanvas(gl, sheetCanvas, { smooth: false });
+    const sheet = new SpriteSheet(texture, { frameWidth: CELL, frameHeight: CELL });
 
-    // One button per projectile type; clicking loads it and highlights it.
-    const ammoBtns = AMMO.map((type) =>
-        el("button", {
-            className: "shell",
-            onclick: () => setAmmo(type),
-        }, [
-            el("b", { textContent: type.name }),
-            el("small", { textContent: ammoStats(type) }),
-        ]),
-    );
-    const ammoBox = el("div", { className: "ammo" }, ammoBtns);
-    const angleCtl = slider("Ángulo hull", { min: -80, max: 80, value: 0, apply: (v) => setAngle(v) });
-    const frontCtl = slider("Blindaje frontal", { min: 20, max: 220, step: 5, value: armor.faces[3].armor,
-        apply: (v) => { armor.faces[3].armor = v; refreshArmorLine(); } });
+    const TILE = { grass: 6, dirt: 7, stone: 8, water: 9, path: 10, flowers: 11 };
+    const PROP = { trunk: 12, canopy: 13, rock: 14, bush: 15, coinA: 16, coinB: 17 };
 
-    const armorLine = el("div", { className: "armorline" });
-    const hpFill = el("i");
-    hpFill.style.width = "100%";
-    const hpBar = el("div", { className: "bar" }, [hpFill]);
+    // --- The map ----------------------------------------------------------
+    // Deterministic, so the layout is the same every time (and the tests can
+    // rely on it).
+    let seed = 20260806;
+    const random = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
 
-    const result = el("div", { id: "result", textContent: "—" });
-    const kFace = kv("Cara"), kAngle = kv("Ángulo impacto"), kEff = kv("Blindaje efectivo"), kPen = kv("Penetración"), kDmg = kv("Daño");
+    const tileAt = (x, y) => {
+        if (y === Math.floor(MAP.height / 2)) return TILE.path;
+        if (x === 3 && y > 7) return TILE.water;
+        const roll = random();
+        if (roll < 0.06) return TILE.flowers;
+        if (roll < 0.12) return TILE.dirt;
+        if (roll < 0.16) return TILE.stone;
+        return TILE.grass;
+    };
+
+    const tile = (index, x, y, layer, size = null) =>
+        app.add(new Sprite(gl, {
+            texture, frame: sheet.frame(index), pixelsPerUnit: PPU,
+            width: size, height: size,
+        }).setPosition({ x, y }).setLayer(layer).init());
+
+    const half = { x: MAP.width / 2 - 0.5, y: MAP.height / 2 - 0.5 };
+    for (let ty = 0; ty < MAP.height; ty++) {
+        for (let tx = 0; tx < MAP.width; tx++) {
+            tile(tileAt(tx, ty), tx - half.x, half.y - ty, LAYER.GROUND, TILE_BLEED);
+        }
+    }
+
+    // Props. Trunks go below the player, canopies above — added in the "wrong"
+    // order on purpose, to show that the layer decides, not the insertion.
+    const canopies = [];
+    const trees = [[-6, 3], [4, 4], [-3, -4], [6, -2], [1, 5]];
+    for (const [x, y] of trees) {
+        // One cell apart, which is exactly how the two halves were drawn.
+        canopies.push(tile(PROP.canopy, x, y + 1, LAYER.CANOPY));
+        tile(PROP.trunk, x, y, LAYER.PROP);
+    }
+    for (const [x, y] of [[-5, -1], [3, 1], [-1, -5], [7, 3]]) tile(PROP.rock, x, y, LAYER.PROP);
+    for (const [x, y] of [[-7, 0], [5, -4], [0, 2]]) tile(PROP.bush, x, y, LAYER.PROP);
+
+    // A spinning coin, to show a second animation running independently.
+    const coin = app.add(new Sprite(gl, { texture, frame: sheet.frame(PROP.coinA), pixelsPerUnit: PPU })
+        .setPosition({ x: 2, y: -2 }).setLayer(LAYER.PROP).init());
+    const coinAnim = new Animator(coin, {
+        girar: sheet.animation(PROP.coinA, PROP.coinB, { fps: 6 }),
+    });
+
+    // --- The player -------------------------------------------------------
+    // A plain coloured shape under a textured one, in the same scene: the two
+    // use different shader programs and the engine switches between them per
+    // draw. Sprites do not replace the shapes — they join them.
+    const shadow = app.add(new Circle(gl, { radius: 0.3, segments: 20 })
+        .setColor({ red: 0, green: 0, blue: 0, alpha: 0.28 })
+        .setScale({ x: 1, y: 0.45 }).setLayer(LAYER.DECAL).init());
+
+    const player = app.add(new Sprite(gl, { texture, frame: sheet.frame(0), pixelsPerUnit: PPU })
+        .setPosition({ x: 0, y: 0 }).setLayer(LAYER.ACTOR).init());
+
+    // Named animations beat frame indices everywhere except right here.
+    const animator = new Animator(player, {
+        quieto: sheet.animation(4, 5, { fps: 2 }),
+        andar: sheet.animation(0, 3, { fps: 10 }),
+    }, { initial: "quieto" });
+
+    app.camera.smoothing = 7;
+    app.camera.centerOn(0, 0);
+    // Keep the view inside the map: `viewExtents` reports the visible half-size
+    // in world units, so the centre can travel exactly up to half a screen from
+    // each edge and no further. Without this you drive off into the void.
+    const view = app.camera.viewExtents(app.canvas);
+    app.camera.bounds = {
+        minX: -half.x - 0.5 + view.halfW, maxX: half.x + 0.5 - view.halfW,
+        minY: -half.y - 0.5 + view.halfH, maxY: half.y + 0.5 - view.halfH,
+    };
+
+    // --- Panel ------------------------------------------------------------
+    const sheetView = el("canvas", { className: "sheet", width: sheetCanvas.width, height: sheetCanvas.height });
+    sheetView.getContext("2d").drawImage(sheetCanvas, 0, 0);
+
+    const frameDots = [0, 1, 2, 3].map(() => el("i"));
+    const kAnim = kv("Animación"), kFrame = kv("Fotograma"), kUv = kv("UV del fotograma"),
+          kSprites = kv("Sprites en escena"), kTex = kv("Textura");
+
+    const fpsCtl = slider("Velocidad", {
+        min: 1, max: 24, value: 10,
+        apply: (v) => { animator.animations.andar.fps = v; },
+        format: (v) => `${v} fps`,
+    });
+
+    let tintName = "Normal";
+    const tintBtns = Object.entries(TINTS).map(([name, color]) =>
+        button(name, () => setTint(name)));
+    const smoothBtn = button("", () => setSmooth(!texture.smooth));
+    const canopyBtn = button("", () => setCanopy(!canopyVisible));
+    let canopyVisible = true;
 
     app.addPanel(
-        card("Disparo", [
-            el("div", { className: "grid" }, [fireBtn, resetBtn]),
-            hint("Espacio dispara · ←/→ giran el hull · 1-4 cambian munición"),
+        card("La hoja de sprites", [
+            sheetView,
+            hint("Dibujada al vuelo con un canvas 2D y subida con Texture.fromCanvas: por eso la página sigue siendo un único archivo."),
         ]),
-        card("Munición", [ammoBox, penCtl.row]),
-        card("Blanco", [
-            angleCtl.row, frontCtl.row, armorLine,
-            el("div", { className: "row" }, [el("label", { textContent: "Integridad" }), hpBar]),
+        card("Personaje", [
+            kAnim.row, kFrame.row, kUv.row,
+            el("div", { className: "frames" }, frameDots),
+            fpsCtl.row,
+            hint("WASD o flechas para moverte · el sprite se voltea con setFlip, no girando"),
         ]),
-        card("Último impacto", [result, kFace.row, kAngle.row, kEff.row, kPen.row, kDmg.row]),
+        card("Tinte", [
+            el("div", { className: "swatches" }, tintBtns),
+            hint("El shader multiplica el téxel por el color: blanco no toca nada, y el alfa lo desvanece. Teclas 1-4."),
+        ]),
+        card("Textura y capas", [
+            smoothBtn,
+            el("div", { style: "margin-top:8px" }, [canopyBtn]),
+            kTex.row, kSprites.row,
+            hint("Las copas de los árboles están en una capa por encima del jugador, y los troncos por debajo — aunque se añadieron al revés. La sombra es una forma de color normal: sprites y formas conviven en la misma escena."),
+        ]),
     );
-    refreshArmorLine();
-    refreshAmmo();
-    updateHp();
 
-    // Debug handle for the console / automated tests.
-    const api = { game, weapon, armor, bullets, fire, setAngle, setAmmo, PROJECTILES, get ammo() { return ammo; }, last: null };
-    window.raptorTanks = api;
+    // --- On-screen controls ----------------------------------------------
+    for (const [name, label, key] of [["up", "▲", "w"], ["down", "▼", "s"], ["left", "◀", "a"], ["right", "▶", "d"]]) {
+        touch.pedal(touch.button(name, label, "round"), key);
+    }
+    touch.pad("left", [touch.get("left"), touch.get("right")]);
+    touch.pad("right", [[touch.get("up"), touch.get("down")]]);
+
+    keyboard
+        .on("l", () => setSmooth(!texture.smooth))
+        .on("c", () => setCanopy(!canopyVisible));
+    Object.keys(TINTS).forEach((name, i) => keyboard.on(String(i + 1), () => setTint(name)));
+
+    setTint("Normal");
+    setSmooth(false);
+    setCanopy(true);
+
+    window.raptorSprites = {
+        app, texture, sheet, player, shadow, animator, coin, coinAnim, canopies,
+        LAYER, TILE, PROP,
+        get tint() { return tintName; },
+        get smooth() { return texture.smooth; },
+        get canopyVisible() { return canopyVisible; },
+        setTint, setSmooth, setCanopy,
+        get state() {
+            return {
+                x: player.position.x, y: player.position.y,
+                animation: animator.name, frame: animator.current.index,
+                flipX: player.flipX, layer: player.layer,
+            };
+        },
+    };
 
     app.onUpdate(update);
 
-    // --- Input ---
-    // Firing and loading are one-shot; the arrows are *held*, so they are read
-    // per frame in update() instead — that keeps the hull turning at the same
-    // rate whatever the key-repeat setting is.
-    keyboard.on([" ", "Space"], () => fire());
-    for (let i = 0; i < AMMO.length; i++) keyboard.on(String(i + 1), () => setAmmo(AMMO[i]));
-    stage.addEventListener("click", fire);
+    // --- Behaviour --------------------------------------------------------
 
-    // --- Behaviour ---
-
-    function refreshArmorLine() {
-        // Faces: [0]=side, [1]=rear, [2]=side, [3]=front (frontEdge = 3).
-        armorLine.textContent = `Frontal ${armor.faces[3].armor} · Lateral ${armor.faces[0].armor} · Trasera ${armor.faces[1].armor} mm`;
+    function setTint(name) {
+        tintName = name;
+        player.setTint(TINTS[name]);
+        tintBtns.forEach((b, i) => b.classList.toggle("active", Object.keys(TINTS)[i] === name));
     }
 
-    function setAngle(v) {
-        angle = Math.max(-80, Math.min(80, v));
-        tank.setRotation(angle);
-        angleCtl.set(angle);
+    // NEAREST keeps the blocks crisp; LINEAR blurs them. On a sheet this size
+    // the difference is obvious, which is the point of putting it on a button.
+    function setSmooth(smooth) {
+        texture.setSmooth(smooth);
+        smoothBtn.textContent = smooth ? "Filtrado: suave (L)" : "Filtrado: nítido (L)";
     }
 
-    // Short one-line summary of what a shell does, for its button label.
-    function ammoStats(type) {
-        const pen = Math.round(weapon.penetration * type.penMultiplier);
-        const dmg = Math.round(weapon.damage * type.damageMultiplier);
-        return `${pen} mm · ${dmg} daño`;
-    }
-
-    function setAmmo(type) {
-        ammo = type;
-        weapon.type = type;
-        refreshAmmo();
-    }
-
-    // Reflect the loaded type in the selector (highlight + fresh stats).
-    function refreshAmmo() {
-        AMMO.forEach((type, i) => {
-            ammoBtns[i].classList.toggle("active", type === ammo);
-            ammoBtns[i].querySelector("small").textContent = ammoStats(type);
-        });
-    }
-
-    function fire() {
-        const bullet = weapon.fire(MUZZLE.x, MUZZLE.y, 1, 0, null, ammo);
-        if (!bullet) return;
-        bullet._entity = new Circle(gl, { radius: 0.05 })
-            .setColor({ red: 1, green: 0.8, blue: 0.2 }).setPosition({ x: MUZZLE.x, y: MUZZLE.y }).init();
-        game.add(bullet._entity);
-        bullets.push(bullet);
-    }
-
-    function spawnMarker(point, resultKey) {
-        const [r, g, b] = RESULT_INFO[resultKey].color;
-        const marker = new Circle(gl, { radius: 0.09 })
-            .setColor({ red: r, green: g, blue: b }).setPosition(point).init();
-        game.add(marker);
-        markers.push({ shape: marker, life: 0.5 });
-    }
-
-    function showImpact(shot, face, penetration) {
-        // A blocked hit that still chips the target (HE fragments) reads as
-        // "ESQUIRLAS" rather than a flat "NO PENETRA".
-        const key = shot.result === "block" && shot.damage > 0 ? "splash" : shot.result;
-        const info = RESULT_INFO[key];
-        api.last = { type: shot.type.id, result: shot.result, dealt: shot.damage, face: face.name, armor: face.armor, angle: shot.angle, effectiveArmor: shot.effectiveArmor, penetration };
-        result.textContent = `${info.label} · ${shot.type.name}`;
-        result.style.color = `rgb(${info.color.map((c) => Math.round(c * 255)).join(",")})`;
-        kFace.v.textContent = `${face.name} (${face.armor} mm)`;
-        kAngle.v.textContent = `${shot.angle.toFixed(0)}°`;
-        kEff.v.textContent = Number.isFinite(shot.effectiveArmor) ? `${shot.effectiveArmor.toFixed(0)} mm` : "∞";
-        kPen.v.textContent = `${Math.round(penetration)} mm`;
-        kDmg.v.textContent = shot.damage > 0 ? `${Math.round(shot.damage)} HP` : "—";
-    }
-
-    function killBullet(bullet, at) {
-        bullet.alive = false;
-        if (at) bullet._entity.setPosition(at);
-    }
-
-    function destroyTank() {
-        tank.setColor({ red: 0.25, green: 0.25, blue: 0.28 });
-    }
-
-    function reset() {
-        for (const b of bullets) game.remove(b._entity);
-        bullets.length = 0;
-        for (const m of markers) game.remove(m.shape);
-        markers.length = 0;
-        armor.hp = armor.maxHp;
-        armor.alive = true;
-        tank.setColor(tankColor);
-        setAngle(0);
-        result.textContent = "—";
-        result.style.color = "";
-        kFace.v.textContent = kAngle.v.textContent = kEff.v.textContent = kPen.v.textContent = kDmg.v.textContent = "—";
-        updateHp();
-    }
-
-    function updateHp() {
-        const pct = (armor.hp / armor.maxHp) * 100;
-        hpFill.style.width = `${pct}%`;
-        hpFill.style.background = pct > 50 ? "#43c06a" : pct > 20 ? "#d8b13a" : "#d84a3a";
+    function setCanopy(visible) {
+        canopyVisible = visible;
+        // Hiding by tint alpha rather than by removing it from the scene, so the
+        // draw order is untouched and the shapes come back exactly where they were.
+        for (const canopy of canopies) canopy.setTint({ red: 1, green: 1, blue: 1, alpha: visible ? 1 : 0.15 });
+        canopyBtn.textContent = visible ? "Copas: delante (C)" : "Copas: transparentes (C)";
     }
 
     function update(dt) {
-        const spin = keyboard.axis("ArrowLeft", "ArrowRight");
-        if (spin) setAngle(angle + spin * HULL_TURN * dt);
+        const dx = keyboard.axis(["a", "ArrowLeft"], ["d", "ArrowRight"]);
+        const dy = keyboard.axis(["s", "ArrowDown"], ["w", "ArrowUp"]);
 
-        weapon.update(dt);
-        fireBtn.disabled = !weapon.ready;
-        fireBtn.textContent = weapon.ready ? "Disparar" : "Recargando…";
-
-        for (const bullet of bullets.slice()) {
-            bullet.update(dt);
-
-            if (armor.alive) {
-                const hit = raycastShape(bullet.prev, bullet.position, tank);
-                if (hit) {
-                    const face = armor.faceForEdge(hit.edgeIndex);
-                    const shot = resolveShot({
-                        type: bullet.type,
-                        penetration: bullet.penetration,
-                        damage: bullet.damage,
-                        direction: bullet.direction,
-                        normal: hit.normal,
-                        armor: face.armor,
-                    });
-                    const markerKey = shot.result === "block" && shot.damage > 0 ? "splash" : shot.result;
-                    spawnMarker(hit.point, markerKey);
-                    showImpact(shot, face, bullet.penetration);
-
-                    if (shot.result === "ricochet") {
-                        bullet.velocity = reflect(bullet.velocity, hit.normal);
-                        bullet.velocity.x *= 0.7;
-                        bullet.velocity.y *= 0.7;
-                        bullet.penetration *= 0.8;
-                        bullet.position = { x: hit.point.x + hit.normal.x * 0.04, y: hit.point.y + hit.normal.y * 0.04 };
-                        bullet.prev = { x: bullet.position.x, y: bullet.position.y };
-                    } else {
-                        // Penetration deals full damage; a blocked HE shell still
-                        // sprays fragments (shot.damage > 0). Either way the shell stops.
-                        if (shot.damage > 0) {
-                            armor.takeDamage(shot.damage);
-                            updateHp();
-                            flash = 0.12;
-                            if (!armor.alive) destroyTank();
-                        }
-                        killBullet(bullet, hit.point);
-                    }
-                }
-            }
-
-            if (Math.abs(bullet.position.x) > CULL.x || Math.abs(bullet.position.y) > CULL.y) {
-                bullet.alive = false;
-            }
-
-            if (!bullet.alive) {
-                game.remove(bullet._entity);
-                bullets.splice(bullets.indexOf(bullet), 1);
-            } else {
-                bullet._entity.setPosition(bullet.position);
-            }
+        if (dx || dy) {
+            // Normalise, or walking diagonally would be 41% faster.
+            const length = Math.hypot(dx, dy) || 1;
+            player.setPosition({
+                x: Math.max(-half.x, Math.min(half.x, player.position.x + (dx / length) * SPEED * dt)),
+                y: Math.max(-half.y, Math.min(half.y, player.position.y + (dy / length) * SPEED * dt)),
+            });
+            animator.play("andar");
+            // Only flip on an actual left/right input: walking straight up
+            // should not snap the character back to facing right.
+            if (dx) player.setFlip({ x: dx < 0 });
+        } else {
+            animator.play("quieto");
         }
 
-        // Fade the tank flash back to its base color.
-        if (flash > 0) {
-            flash -= dt;
-            const t = Math.max(0, flash / 0.12);
-            if (armor.alive) {
-                tank.setColor({
-                    red: tankColor.red + (1 - tankColor.red) * t,
-                    green: tankColor.green + (1 - tankColor.green) * t,
-                    blue: tankColor.blue + (1 - tankColor.blue) * t,
-                });
-            }
-        }
+        // The shadow tracks the feet, a little below the sprite's centre.
+        shadow.setPosition({ x: player.position.x, y: player.position.y - 0.42 });
 
-        // Expire impact markers.
-        for (const marker of markers.slice()) {
-            marker.life -= dt;
-            if (marker.life <= 0) {
-                game.remove(marker.shape);
-                markers.splice(markers.indexOf(marker), 1);
-            }
-        }
+        animator.update(dt);
+        coinAnim.update(dt);
+        app.camera.follow(player.position, dt);
+
+        drawReadout();
+    }
+
+    function drawReadout() {
+        const frame = player.frame;
+        kAnim.set(animator.name);
+        kFrame.set(`${animator.current.index + 1} de ${animator.current.frames.length}`);
+        kUv.set(`${frame.x},${frame.y} · ${frame.width}×${frame.height} px`);
+        kTex.set(`${texture.width}×${texture.height} · ${texture.smooth ? "LINEAR" : "NEAREST"}`);
+        kSprites.set(String(app.entities.length));
+        frameDots.forEach((dot, i) => {
+            dot.classList.toggle("on", animator.name === "andar" && i === animator.current.index);
+        });
     }
 });
     </script>
