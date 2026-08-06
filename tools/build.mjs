@@ -42,6 +42,7 @@ const PAGES = [
     { out: "drive.html", title: "Raptor — Batalla de tanques", entry: "controls/driveDemo.js" },
     { out: "sprites.html", title: "Raptor — Sprites y animación", entry: "sprites/spritesDemo.js" },
     { out: "assets.html", title: "Raptor — Carga de assets", entry: "assets/assetsDemo.js" },
+    { out: "bosque.html", title: "El Bosque — juego hecho con Raptor", entry: "game/main.js" },
 ];
 
 // The library build. Its entry is the framework's public surface.

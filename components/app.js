@@ -24,6 +24,7 @@ import RaptorEngine from "./raptorEngine.js";
 import { el, injectStyles, BASE_STYLES } from "./ui/dom.js";
 import { FULLSCREEN_STYLES, toggleFullscreen, isFullscreen, onFullscreenChange } from "./ui/fullscreen.js";
 import LoadingScreen, { LOADING_STYLES } from "./ui/loadingScreen.js";
+import SceneManager, { SCENE_STYLES } from "./scenes/sceneManager.js";
 import Keyboard from "./input/keyboard.js";
 import TouchPad, { PAD_STYLES } from "./input/touchpad.js";
 import Assets from "./assets/assets.js";
@@ -42,7 +43,7 @@ export default class App {
         assetPath = "",        // prefix for every relative asset URL
     } = {}) {
         injectStyles(
-            (baseStyles ? BASE_STYLES + PAD_STYLES + FULLSCREEN_STYLES + LOADING_STYLES : "") + styles,
+            (baseStyles ? BASE_STYLES + PAD_STYLES + FULLSCREEN_STYLES + LOADING_STYLES + SCENE_STYLES : "") + styles,
             "raptor-styles",
         );
 
@@ -116,8 +117,16 @@ export default class App {
                 }
             }
 
-            app._cleanup = setup(app) || null;
+            app._cleanup = (setup ? setup(app) : null) || null;
+
+            // Declaring scenes in the boot options is the shortest path from
+            // "a page" to "a game with a menu".
+            if (options.scenes) {
+                for (const [name, scene] of Object.entries(options.scenes)) app.scenes.add(name, scene);
+            }
             app.start();
+            // After start(), so the first scene builds against a live loop.
+            if (options.startScene) await app.scenes.go(options.startScene);
             return app;
         };
 
@@ -141,6 +150,13 @@ export default class App {
     add(entity) { return this.engine.add(entity); }
     remove(entity) { this.engine.remove(entity); return this; }
     onUpdate(fn) { this.engine.addUpdater(fn); return fn; }
+    removeUpdate(fn) { this.engine.removeUpdater(fn); return this; }
+
+    // Created on first use, so pages that never use scenes pay nothing.
+    get scenes() {
+        if (!this._scenes) this._scenes = new SceneManager(this);
+        return this._scenes;
+    }
 
     start() { this.engine.start(); return this; }
     stop() { this.engine.stop(); return this; }
@@ -241,6 +257,7 @@ export default class App {
     destroy() {
         this.stop();
         if (typeof this._cleanup === "function") this._cleanup();
+        this._scenes?.destroy();
         this.keyboard?.detach();
         this.assets?.dispose();
         this._resizeObserver?.disconnect();

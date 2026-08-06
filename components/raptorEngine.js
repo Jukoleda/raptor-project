@@ -95,6 +95,15 @@ function RaptorEngine() {
         return fn;
     };
 
+    // Scenes come and go, and an updater left behind keeps moving things that
+    // no longer exist. Removal iterates a copy in the loop below, so unhooking
+    // from inside an update is safe.
+    this.removeUpdater = (fn) => {
+        const index = this.updaters.indexOf(fn);
+        if (index !== -1) this.updaters.splice(index, 1);
+        return this;
+    };
+
     this._lastTime = undefined;
 
     // Whether the loop is scheduling frames. Read it; use start/stop to change.
@@ -131,7 +140,9 @@ function RaptorEngine() {
         this._lastTime = now;
         if (dt > 0.05) dt = 0.05;
 
-        for (const update of this.updaters) {
+        // A copy: an updater is allowed to add or remove updaters — which is
+        // exactly what happens when one of them switches scenes.
+        for (const update of this.updaters.slice()) {
             update(dt);
         }
 

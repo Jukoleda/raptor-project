@@ -1,5 +1,5 @@
-// Raptor 0.3.0 — GENERADO por tools/build.mjs, no editar a mano.
-// Fuente: raptor.js y sus dependencias (46 módulos).
+// Raptor 0.4.0 — GENERADO por tools/build.mjs, no editar a mano.
+// Fuente: raptor.js y sus dependencias (49 módulos).
 
 // ===== components/camera.js =====
 // A 2D camera: a movable window onto the world.
@@ -166,6 +166,15 @@ function RaptorEngine() {
         return fn;
     };
 
+    // Scenes come and go, and an updater left behind keeps moving things that
+    // no longer exist. Removal iterates a copy in the loop below, so unhooking
+    // from inside an update is safe.
+    this.removeUpdater = (fn) => {
+        const index = this.updaters.indexOf(fn);
+        if (index !== -1) this.updaters.splice(index, 1);
+        return this;
+    };
+
     this._lastTime = undefined;
 
     // Whether the loop is scheduling frames. Read it; use start/stop to change.
@@ -202,7 +211,9 @@ function RaptorEngine() {
         this._lastTime = now;
         if (dt > 0.05) dt = 0.05;
 
-        for (const update of this.updaters) {
+        // A copy: an updater is allowed to add or remove updaters — which is
+        // exactly what happens when one of them switches scenes.
+        for (const update of this.updaters.slice()) {
             update(dt);
         }
 
@@ -481,6 +492,127 @@ class LoadingScreen {
 
     remove() {
         this.node.remove();
+        return this;
+    }
+}
+
+// ===== components/scenes/sceneManager.js =====
+// Holds the scenes and moves between them.
+//
+//     const scenes = new SceneManager(app);
+//     scenes.add("menu", new Menu()).add("juego", new Bosque());
+//     await scenes.go("menu");
+//
+// Three things it does that a bare `currentScene = next` does not:
+//
+// 1. **It loads on the way in.** A scene declares its assets in `preload()`,
+//    and the first time you enter it, anything still pending is loaded behind a
+//    loading screen. So a menu appears instantly and the level's art arrives
+//    while the player is reading it, instead of everything waiting on everything.
+//
+// 2. **It fades.** A hard cut between two screens reads as a glitch. The fade is
+//    a DOM overlay rather than something drawn in WebGL, so it also covers the
+//    frames where the old scene is gone and the new one is not built yet.
+//
+// 3. **It cannot overlap with itself.** Two `go()` calls landing together — a
+//    key and a click on the same button — would otherwise run two teardowns and
+//    two builds interleaved. The second one waits.
+
+const SCENE_STYLES = `
+    .scene-fade {
+        position: absolute; inset: 0; z-index: 4; background: #0a0d12;
+        opacity: 0; pointer-events: none; transition: opacity var(--scene-fade, .22s) ease;
+    }
+    .scene-fade.on { opacity: 1; }
+`;
+
+class SceneManager {
+    constructor(app, { fadeMs = 220 } = {}) {
+        this.app = app;
+        this.scenes = new Map();
+        this.current = null;
+        this.fadeMs = fadeMs;
+        this._busy = null;
+        this._preloaded = new Set();
+
+        this.fade = document.createElement("div");
+        this.fade.className = "scene-fade";
+        this.fade.style.setProperty("--scene-fade", `${fadeMs}ms`);
+        app.stage.append(this.fade);
+    }
+
+    add(name, scene) {
+        scene.name = scene.name === "escena" ? name : scene.name;
+        this.scenes.set(name, scene);
+        return this;
+    }
+
+    get(name) {
+        return this.scenes.get(name) || null;
+    }
+
+    get name() {
+        return this.current ? [...this.scenes].find(([, s]) => s === this.current)?.[0] ?? null : null;
+    }
+
+    // Switches scenes. Returns a promise that resolves once the new one is
+    // built, so a test — or a cutscene — can wait for it.
+    go(name, data) {
+        // Serialised: a second call queues behind the first instead of
+        // interleaving a teardown with a build.
+        this._busy = (this._busy || Promise.resolve()).then(() => this._go(name, data));
+        return this._busy;
+    }
+
+    async _go(name, data) {
+        const next = this.scenes.get(name);
+        if (!next) throw new Error(`Raptor: no hay ninguna escena llamada "${name}"`);
+
+        if (this.current) await this._setFade(true);
+
+        if (this.current) {
+            this.current._exit();
+            this.current = null;
+        }
+
+        // First entry: give the scene a chance to declare what it needs, and
+        // load whatever is still pending.
+        if (!this._preloaded.has(name)) {
+            this._preloaded.add(name);
+            next.app = this.app;
+            next.manager = this;
+            next.preload(this.app.assets);
+            if (this.app.assets.pending > 0) {
+                const screen = new LoadingScreen(this.app.stage, { title: `Cargando ${name}…` });
+                try {
+                    await this.app.assets.load({ onProgress: (p) => screen.update(p) });
+                    screen.remove();
+                } catch (error) {
+                    screen.fail(error);
+                    throw error;
+                }
+            }
+        }
+
+        this.current = next;
+        next._enter(this.app, this, data);
+        this.app._emit("scene", { name, scene: next, data });
+
+        await this._setFade(false);
+        return next;
+    }
+
+    _setFade(on) {
+        this.fade.classList.toggle("on", on);
+        // Waiting out the transition is what keeps the swap hidden; without it
+        // the new scene pops in while the screen is still black.
+        return new Promise((resolve) => setTimeout(resolve, this.fadeMs));
+    }
+
+    destroy() {
+        if (this.current) this.current._exit();
+        this.current = null;
+        this.fade.remove();
         return this;
     }
 }
@@ -1228,6 +1360,7 @@ class Assets {
 
 
 
+
 class App {
     constructor({
         mount = null,          // where the page goes; defaults to <body>
@@ -1242,7 +1375,7 @@ class App {
         assetPath = "",        // prefix for every relative asset URL
     } = {}) {
         injectStyles(
-            (baseStyles ? BASE_STYLES + PAD_STYLES + FULLSCREEN_STYLES + LOADING_STYLES : "") + styles,
+            (baseStyles ? BASE_STYLES + PAD_STYLES + FULLSCREEN_STYLES + LOADING_STYLES + SCENE_STYLES : "") + styles,
             "raptor-styles",
         );
 
@@ -1316,8 +1449,16 @@ class App {
                 }
             }
 
-            app._cleanup = setup(app) || null;
+            app._cleanup = (setup ? setup(app) : null) || null;
+
+            // Declaring scenes in the boot options is the shortest path from
+            // "a page" to "a game with a menu".
+            if (options.scenes) {
+                for (const [name, scene] of Object.entries(options.scenes)) app.scenes.add(name, scene);
+            }
             app.start();
+            // After start(), so the first scene builds against a live loop.
+            if (options.startScene) await app.scenes.go(options.startScene);
             return app;
         };
 
@@ -1341,6 +1482,13 @@ class App {
     add(entity) { return this.engine.add(entity); }
     remove(entity) { this.engine.remove(entity); return this; }
     onUpdate(fn) { this.engine.addUpdater(fn); return fn; }
+    removeUpdate(fn) { this.engine.removeUpdater(fn); return this; }
+
+    // Created on first use, so pages that never use scenes pay nothing.
+    get scenes() {
+        if (!this._scenes) this._scenes = new SceneManager(this);
+        return this._scenes;
+    }
 
     start() { this.engine.start(); return this; }
     stop() { this.engine.stop(); return this; }
@@ -1441,6 +1589,7 @@ class App {
     destroy() {
         this.stop();
         if (typeof this._cleanup === "function") this._cleanup();
+        this._scenes?.destroy();
         this.keyboard?.detach();
         this.assets?.dispose();
         this._resizeObserver?.disconnect();
@@ -2861,6 +3010,153 @@ class EngineSound {
 
 // ===== components/assets/index.js =====
 // Barrel for the assets layer.
+
+// ===== components/scenes/scene.js =====
+// A scene: one self-contained screen of a game.
+//
+// Until now a Raptor page *was* a game — one setup function, one world, and no
+// way to get from a menu to a match to a game-over. A Scene is that missing
+// unit: it builds itself when entered and takes itself apart when left.
+//
+//     class Menu extends Scene {
+//         enter() {
+//             this.add(new Sprite(this.gl, { texture: this.assets.texture("logo") }).init());
+//             this.onKey("Enter", () => this.go("juego"));
+//         }
+//     }
+//
+// The part that matters is the taking apart. Everything a scene creates has to
+// be undone on the way out — entities, per-frame callbacks, key bindings, DOM
+// overlays — and forgetting any one of them is a leak you notice three scene
+// changes later, when the menu music is still playing over the boss fight and
+// the old update loop is still moving a player who no longer exists.
+//
+// So a Scene does not let you register those things directly. `this.add`,
+// `this.onUpdate`, `this.onKey` and `this.overlay` each record what they did,
+// and leaving undoes all of it. If you reach past them to `app.onUpdate`, you
+// own the cleanup — which is exactly the trade you should have to make on
+// purpose rather than by accident.
+
+class Scene {
+    constructor(name = "escena") {
+        this.name = name;
+        this.app = null;        // set by the SceneManager on the way in
+        this.manager = null;
+        this.active = false;
+
+        this._entities = [];
+        this._updaters = [];
+        this._keys = [];
+        this._overlays = [];
+        this._panels = [];
+    }
+
+    // --- Hooks a subclass overrides ---------------------------------------
+
+    // Declare assets this scene needs. Called once, before the first enter, so
+    // a menu can start instantly while the level's art loads on the way in.
+    preload() {}
+
+    // Build the scene. `data` is whatever the previous scene passed to `go()`.
+    enter() {}
+
+    // Per frame, in seconds. Registered and unregistered for you.
+    update() {}
+
+    // Extra teardown, for anything the recording helpers do not cover — a timer
+    // you started, a sound you are playing.
+    exit() {}
+
+    // --- What a scene reaches for ------------------------------------------
+
+    get gl() { return this.app.gl; }
+    get assets() { return this.app.assets; }
+    get camera() { return this.app.camera; }
+    get keyboard() { return this.app.keyboard; }
+    get touch() { return this.app.touch; }
+    get stage() { return this.app.stage; }
+
+    // Adds a drawable, and remembers to remove it.
+    add(entity) {
+        this._entities.push(entity);
+        return this.app.add(entity);
+    }
+
+    remove(entity) {
+        const index = this._entities.indexOf(entity);
+        if (index !== -1) this._entities.splice(index, 1);
+        this.app.remove(entity);
+        return this;
+    }
+
+    // An extra per-frame callback, on top of `update()`.
+    onUpdate(fn) {
+        this._updaters.push(fn);
+        this.app.onUpdate(fn);
+        return fn;
+    }
+
+    // A one-shot key action, unbound when the scene leaves.
+    onKey(keys, handler) {
+        for (const key of [].concat(keys)) {
+            this.keyboard.on(key, handler);
+            this._keys.push([key, handler]);
+        }
+        return this;
+    }
+
+    // A DOM node over the canvas: a title screen, a HUD, a banner.
+    overlay(node) {
+        this._overlays.push(node);
+        this.app.addOverlay(node);
+        return node;
+    }
+
+    // A card in the side panel, if the page has one.
+    panel(node) {
+        this._panels.push(node);
+        this.app.addPanel(node);
+        return node;
+    }
+
+    // Leaves for another scene. `data` is handed to its `enter()`.
+    go(name, data) {
+        return this.manager.go(name, data);
+    }
+
+    // --- Lifecycle, driven by the manager ---------------------------------
+
+    _enter(app, manager, data) {
+        this.app = app;
+        this.manager = manager;
+        this.active = true;
+        this._boundUpdate = (dt) => { if (this.active) this.update(dt); };
+        this.app.onUpdate(this._boundUpdate);
+        this._updaters.push(this._boundUpdate);
+        this.enter(data);
+        return this;
+    }
+
+    _exit() {
+        this.active = false;
+        // The subclass gets to run first, while its things still exist.
+        this.exit();
+        for (const entity of this._entities) this.app.remove(entity);
+        for (const fn of this._updaters) this.app.removeUpdate(fn);
+        for (const [key, handler] of this._keys) this.keyboard.off(key, handler);
+        for (const node of this._overlays) node.remove();
+        for (const node of this._panels) node.remove();
+        this._entities = [];
+        this._updaters = [];
+        this._keys = [];
+        this._overlays = [];
+        this._panels = [];
+        return this;
+    }
+}
+
+// ===== components/scenes/index.js =====
+// Barrel for the scenes layer.
 
 // ===== components/controls/tankController.js =====
 // Tank-style movement for any shape.
@@ -4426,6 +4722,8 @@ class Engine {
 
 // --- Assets -------------------------------------------------------------
 
+// --- Scenes -------------------------------------------------------------
+
 // --- Gameplay kit -------------------------------------------------------
 // Not part of the engine proper: batteries that happen to ship in the box,
 // built on the layers above. Ignore them and nothing below changes.
@@ -4452,6 +4750,7 @@ class Engine {
 //   ui        the DOM chrome: panels, sliders, readouts, fullscreen
 //   audio     synthesised sound, so a build stays a single file
 //   assets    declare what a game needs, load it with progress, then start
+//   scenes    menu, match, result — each one mounts and unmounts itself
 //   app       the shell that wires all of the above together
 //
 // On top of those sits a gameplay kit — controls, weapons, vehicles — which is
@@ -4462,7 +4761,7 @@ class Engine {
 // generated single-file pages (engine.html, dyno.html, …) come from
 // `node tools/build.mjs`, which also emits dist/raptor.js for consumers.
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 
 export {
     AI_STATE,
@@ -4520,6 +4819,9 @@ export {
     RegularPolygon,
     requestFullscreen,
     resolveShot,
+    Scene,
+    SCENE_STYLES,
+    SceneManager,
     select,
     Shape,
     slider,

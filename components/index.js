@@ -29,6 +29,9 @@ export * from "./audio/index.js";
 // --- Assets -------------------------------------------------------------
 export * from "./assets/index.js";
 
+// --- Scenes -------------------------------------------------------------
+export * from "./scenes/index.js";
+
 // --- Gameplay kit -------------------------------------------------------
 // Not part of the engine proper: batteries that happen to ship in the box,
 // built on the layers above. Ignore them and nothing below changes.
