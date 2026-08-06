@@ -14,8 +14,13 @@
 //   MANUAL  you pick the gear: R · N · 1 · 2 · … Leave it in too high a gear and
 //           it bogs; hold it too long and you bounce off the limiter.
 //
-// It knows nothing about the engine or input — a TankController feeds it the
-// current speed and throttle, and reads back `torque` and `speedLimit`.
+// It knows nothing about input — a TankController feeds it the current speed and
+// throttle, and reads back `torque` and `speedLimit`.
+//
+// Given real gear ratios and an Engine it switches to a *mechanical* mode: revs
+// come from road speed through the drivetrain (`engineRpm`), and `wheelTorque` /
+// `wheelForce` say what actually reaches the ground, so a caller can integrate
+// real vehicle physics. Without them it keeps the light normalised model above.
 
 export const GEARBOX_MODE = { AUTO: "auto", MANUAL: "manual" };
 
@@ -24,6 +29,9 @@ const TORQUE_PEAK = 0.65;   // revs where the engine pulls hardest
 const TORQUE_SPREAD = 1.7;  // how quickly torque falls away from the peak
 const TORQUE_FLOOR = 0.45;  // never less than this fraction of the gear's pull
 const STOPPED = 0.15;       // speed under which the vehicle counts as stopped
+// Inverse of the engine module's rad/s conversion, named apart from it: both
+// become globals in the standalone build and a clash there is fatal.
+const RPM_PER_RAD = 60 / (2 * Math.PI);
 
 export default class Gearbox {
     constructor({
@@ -34,10 +42,25 @@ export default class Gearbox {
         upshiftAt = 0.88,      // revs that trigger an automatic upshift
         downshiftAt = 0.35,    // revs that trigger an automatic downshift
         mode = GEARBOX_MODE.AUTO,
+
+        // --- Mechanical mode (optional) -------------------------------------
+        // Give it real gear ratios and an Engine and it stops guessing: revs
+        // come from road speed through the drivetrain, and `wheelTorque` is what
+        // actually reaches the ground. `ratios` above is then unused.
+        engine = null,
+        gearRatios = null,     // e.g. [3.6, 2.1, 1.4, 1.0, 0.8]
+        reverseGearRatio = 3.2,
+        finalDrive = 3.9,
+        wheelRadius = 0.34,    // metres
     } = {}) {
         this.ratios = ratios;
         this.reverseRatio = reverseRatio;
         this.maxSpeed = maxSpeed;
+        this.engine = engine;
+        this.gearRatios = gearRatios;
+        this.reverseGearRatio = reverseGearRatio;
+        this.finalDrive = finalDrive;
+        this.wheelRadius = wheelRadius;
         this.shiftTime = shiftTime;
         this.upshiftAt = upshiftAt;
         this.downshiftAt = downshiftAt;
@@ -49,13 +72,62 @@ export default class Gearbox {
         this.shifts = 0;    // how many changes so far (handy for HUDs/tests)
     }
 
+    // True when it is driven by a real engine and real ratios.
+    get mechanical() {
+        return !!(this.engine && this.gearRatios);
+    }
+
     // Selectable gears in order, so manual shifting can walk the list.
     get sequence() {
-        return [-1, 0, ...this.ratios.map((_, i) => i + 1)];
+        return [-1, 0, ...Array.from({ length: this.topGear }, (_, i) => i + 1)];
     }
 
     get topGear() {
-        return this.ratios.length;
+        return (this.mechanical ? this.gearRatios : this.ratios).length;
+    }
+
+    // Gear ratio actually turning the driveshaft (mechanical mode only).
+    get gearRatio() {
+        if (!this.mechanical || this.gear === 0) return 0;
+        return this.gear === -1 ? this.reverseGearRatio : this.gearRatios[this.gear - 1];
+    }
+
+    // Total reduction from crank to wheel.
+    get driveRatio() {
+        return this.gearRatio * this.finalDrive;
+    }
+
+    // Engine revs for the current road speed and gear. Idles when the clutch is
+    // out (neutral or mid-shift) or when the wheels are barely turning.
+    get engineRpm() {
+        if (!this.mechanical) return 0;
+        const { idleRpm, redlineRpm } = this.engine;
+        if (this.gear === 0) return idleRpm;
+        const wheelRadPerSec = Math.abs(this.speed) / this.wheelRadius;
+        const rpm = wheelRadPerSec * Math.abs(this.driveRatio) * RPM_PER_RAD;
+        return Math.max(idleRpm, Math.min(redlineRpm, rpm));
+    }
+
+    // Torque reaching the wheels, in N·m. Zero with the drive cut.
+    get wheelTorque() {
+        if (!this.mechanical || this.shifting || this.gear === 0) return 0;
+        return this.engine.torqueAt(this.engineRpm) * Math.abs(this.driveRatio);
+    }
+
+    // Tractive force at the contact patch, in newtons.
+    get wheelForce() {
+        return this.wheelTorque / this.wheelRadius;
+    }
+
+    // What the engine is making right now, for a readout.
+    get power() {
+        return this.mechanical ? this.engine.powerAt(this.engineRpm) : 0;
+    }
+
+    // Road speed the current gear tops out at (redline in that gear).
+    get gearTopSpeed() {
+        if (!this.mechanical || this.gear === 0) return Infinity;
+        return (this.engine.redlineRpm / RPM_PER_RAD) * this.wheelRadius / Math.abs(this.driveRatio);
     }
 
     get inReverse() {
@@ -81,11 +153,14 @@ export default class Gearbox {
     // Fastest the vehicle can go in this gear. Neutral does not drive, but it
     // must not brake either — coasting keeps whatever speed it had.
     get speedLimit() {
+        if (this.mechanical) return this.gear === 0 ? Infinity : this.gearTopSpeed;
         return this.gear === 0 ? this.maxSpeed : this.maxSpeed * this.ratio;
     }
 
-    // Engine revs, 0..1 across the current gear's speed band.
+    // Revs as a 0..1 fraction of the redline — what the shift logic and the
+    // tachometer both read, in either mode.
     get rpm() {
+        if (this.mechanical) return this.engineRpm / this.engine.redlineRpm;
         const limit = this.maxSpeed * this.ratio;
         if (limit <= 0) return 0;
         return Math.min(1, Math.abs(this.speed) / limit);

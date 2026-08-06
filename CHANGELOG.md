@@ -6,6 +6,38 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 
 ## [Sin publicar] - 2026-07-22
 
+### Añadido (Banco de pruebas: motor y caja)
+- **`components/vehicles/engine.js`**: `Engine` modela una **curva de par**
+  (sube desde el ralentí, pico a media vuelta, caída hacia el corte) con una
+  parábola por tramo que pasa exactamente por los valores de ralentí y corte que
+  se le den. La **potencia se deriva**, no se configura: `P = T · ω`, y por eso
+  su pico cae a más vueltas que el de par (por defecto 340 Nm @ 3400 rpm y
+  247 CV @ 6280 rpm). `peakPower` lo encuentra muestreando la curva.
+- **Modo mecánico en `Gearbox`**: con relaciones reales y un `Engine`, las
+  revoluciones **vuelven** desde la velocidad a través de la transmisión
+  (`engineRpm`) y expone `wheelTorque`, `wheelForce`, `gearTopSpeed` y `power`,
+  para que quien llame integre física de verdad. Sin esos parámetros conserva el
+  modelo normalizado que usa la batalla, así que allí nada cambia.
+- **Demo `dyno.html`** (fuente `vehicles/dynoDemo.js`): recta de **420 × 9 m**
+  (unas 47 veces más larga que ancha) con integración longitudinal real
+  (tracción con tope de agarre, resistencia aerodinámica ∝ v², rodadura, frenos).
+  Panel con marcha, velocidad, **cuentavueltas**, par, fuerza a la rueda,
+  potencia y aceleración en g; **curva de par y potencia en vivo** con marcas en
+  los picos y la posición actual del motor; **sliders** de par máximo, régimen de
+  par máximo, corte y grupo final; **cronómetro** de 0-100 km/h, 400 m con
+  velocidad de paso, distancia y G máxima. Caja automática o manual. La cámara se
+  aleja con la velocidad. Entrada de desarrollo `dyno-dev.html`.
+- Portada (`index.html`) con la nueva tarjeta.
+
+### Corregido
+- **`RPM_TO_RAD` duplicada** como `const` en `engine.js` y `gearbox.js`: en el
+  build autocontenido ambas caen en el mismo ámbito y eso es un `SyntaxError`
+  que dejaba la página en blanco. La de la caja pasa a ser `RPM_PER_RAD` (la
+  inversa, con nombre y semántica distintos).
+- **`toggleMode` como `const` flecha** en el banco de pruebas: el handle de
+  depuración la referenciaba antes de su declaración y las flechas no se izan.
+  Pasa a ser una declaración de función.
+
 ### Cambiado (Colisiones por la forma del vehículo)
 - **Los cuerpos dejan de chocar como círculos**: el casco colisiona por su
   **contorno real** reutilizando `collide()` (SAT) y `boundingRadius()` de

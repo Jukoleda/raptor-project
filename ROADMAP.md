@@ -145,6 +145,19 @@ sobre un mapa mayor que la pantalla. Mejoras posibles:
 - [ ] **Deadzone / adelanto** (mirar hacia donde se avanza).
 - [ ] **Sacudida de cámara** (screen shake) para impactos.
 
+## Banco de pruebas (motor y transmisión)
+
+**Completado:** `components/vehicles/Engine` (curva de par y potencia derivada) y
+modo **mecánico** en `Gearbox` (relaciones reales, `engineRpm`, `wheelTorque`,
+`wheelForce`). Demo `dyno.html` con recta larga, curva en vivo, sliders de motor
+y cronómetro. Mejoras posibles:
+
+- [ ] **Embrague y ralentí real** (hoy el motor se pega al ralentí con el coche
+      parado en marcha; falta patinado de embrague al arrancar).
+- [ ] **Pérdidas de transmisión** y inercia del volante motor.
+- [ ] **Tracción por rueda** (hoy el agarre es un tope global de fuerza).
+- [ ] **Comparar dos configuraciones** superponiendo curvas y tiempos.
+
 ## Ideas futuras
 
 - Picking en el editor teniendo en cuenta la cámara (el helper
