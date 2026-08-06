@@ -16,6 +16,7 @@ import { TankController, TankAI, AI_STATE_LABEL, Gearbox, GEARBOX_MODE, AutoAim,
 import { Tank, TANK_DESIGNS } from "../components/vehicles/index.js";
 import { Weapon, PROJECTILES, raycastShape, resolveShot, reflect } from "../components/weapons/index.js";
 import { collide, boundingRadius } from "../components/physics/index.js";
+import { createRandom } from "../components/math/random.js";
 
 // The map is much larger than the view, so the camera has to follow the tank.
 // Visible half-extents come from the engine's projection (perspective FOV 45°
@@ -34,11 +35,6 @@ const ENEMY_COUNT = 12; // a bigger map needs more to find
 
 // Deterministic scatter: the same map every time you open the page, which keeps
 // the layout learnable (and the tests reproducible).
-function makeRng(seed) {
-    let s = seed >>> 0;
-    return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
-}
-
 // The hulls now collide with the walls by their real outline, so these bounds
 // are only a last-resort net against escaping the map — keeping them tight would
 // stop every tank at the same distance and hide the shape differences.
@@ -283,7 +279,7 @@ App.boot({ title: "Batalla de tanques", styles: STYLES }, (app) => {
 
     // --- Obstacles: cover to fight around (drawn + collidable). Scattered from
     // a fixed seed, kept apart from each other and clear of the player's start.
-    const rng = makeRng(20260805);
+    const rng = createRandom(20260805);
     const palette = [
         { red: 0.30, green: 0.33, blue: 0.40 }, { red: 0.33, green: 0.30, blue: 0.38 },
         { red: 0.30, green: 0.36, blue: 0.40 }, { red: 0.34, green: 0.32, blue: 0.30 },

@@ -9,6 +9,8 @@
 // `follow()` eases the center toward a target (the player) instead of snapping,
 // and optional `bounds` keep the center from revealing past the edges of a map.
 
+import { viewHalfExtents, aspectOf, DEFAULT_DEPTH } from "./render/projection.js";
+
 export default class Camera {
     constructor({ x = 0, y = 0, zoom = 1, smoothing = 8, bounds = null } = {}) {
         this.x = x;
@@ -36,13 +38,12 @@ export default class Camera {
         return this;
     }
 
-    // Half-extents of the visible world, in world units. Mirrors the projection
-    // Shape.draw uses (perspective `fov` at `depth`) and the canvas aspect, so
-    // it stays in sync with what is actually on screen.
-    viewExtents(canvas, { depth = 6, fov = 45 } = {}) {
-        const halfH = (depth * Math.tan((fov * Math.PI) / 180 / 2)) / this.zoom;
-        const aspect = canvas.clientWidth / canvas.clientHeight;
-        return { halfW: halfH * aspect, halfH };
+    // Half-extents of the visible world, in world units. The field of view and
+    // the depth come from components/render/projection.js — the same values
+    // Shape.draw projects with, so this cannot drift out of sync with what is
+    // actually on screen.
+    viewExtents(canvas, { depth = DEFAULT_DEPTH } = {}) {
+        return viewHalfExtents(aspectOf(canvas), { depth, zoom: this.zoom });
     }
 
     // Converts a pointer position (clientX/clientY, as given by mouse/touch

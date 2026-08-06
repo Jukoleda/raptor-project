@@ -38,6 +38,7 @@ Raptor está hecho de piezas que se usan juntas o sueltas. De abajo arriba:
 | `audio/` | Sonido sintetizado, para que un build siga siendo un único archivo |
 | `assets/` | Declarar, cargar y leer imágenes, JSON, sonidos y fuentes |
 | `scenes/` | Menú, partida, final: cada pantalla se monta y se desmonta sola |
+| `math/` | Aleatoriedad con semilla, para que un nivel se pueda reproducir |
 | `app.js` | El shell que conecta todo lo anterior |
 
 Encima va un **kit de juego** —`controls/`, `weapons/`, `vehicles/`— del que
@@ -62,7 +63,7 @@ npm test          # ejecuta las páginas en un navegador de verdad
 
 El build produce dos cosas:
 
-- **`dist/raptor.js`** — el framework como librería ESM, con los 77 nombres
+- **`dist/raptor.js`** — el framework como librería ESM, con los 87 nombres
   públicos; y **`dist/raptor.global.js`** para un `<script src>` de toda la vida,
   que deja `window.Raptor`.
 - **Las páginas** (`engine.html`, `editor.html`, `tanks.html`, `dyno.html`,
@@ -150,7 +151,11 @@ components/
     scene.js               # Scene: se monta al entrar y se desmonta al salir
     sceneManager.js        # SceneManager: transiciones y carga por escena
     index.js               # Re-exporta las escenas
+  math/
+    random.js              # createRandom: LCG con semilla, reproducible
+    index.js               # Re-exporta las matemáticas
   render/
+    projection.js          # FOV, profundidad y matrices compartidas
     texture.js             # Texture: imagen en la GPU (URL, canvas o píxeles)
     spriteSheet.js         # SpriteSheet, Animation y Animator
     shaders.js             # Programas de shader, cacheados por contexto
@@ -1129,6 +1134,51 @@ sí habría funcionado.
 El cuerpo del jugador es además más estrecho que su dibujo, a propósito: una caja
 de colisión que calca al personaje se siente injusta, porque los hombros se
 enganchan en huecos por los que claramente estabas apuntando.
+
+## Rendimiento
+
+Tres cosas, medidas sobre El Bosque (1397 sprites, Chromium con rasterizado por
+software):
+
+### La proyección se calcula una vez, no mil cuatrocientas
+
+`Shape.draw` construía una matriz de proyección **por forma y por frame** —
+trabajo idéntico repetido — más una matriz modelo-vista y tres arrays sueltos
+para los argumentos de translate/rotate/scale. Unos siete mil objetos
+desechables por frame, que luego hay que recoger.
+
+Ahora la proyección se cachea por canvas y se rehace solo si cambia la relación
+de aspecto, y las matrices salen de un buffer reutilizado. Dibujar es síncrono y
+nunca reentrante, así que compartir ese buffer es seguro.
+
+**Coste de CPU de la pasada de dibujo: 10,5 ms → 6,0 ms.**
+
+Además arregla un acoplamiento que era un bug esperando: el campo de visión y la
+profundidad estaban escritos **dos veces** —en `Shape.draw` y en
+`Camera.viewExtents`— y tenían que coincidir sin que nada lo dijera. Cambiar la
+profundidad de una forma desajustaba en silencio los límites de mapa de la
+cámara. Ahora viven en `components/render/projection.js` y nada más.
+
+### No se dibuja lo que no se ve
+
+`app.culling = true` descarta las entidades que no pueden estar en pantalla. En
+el bosque eso es **57 de 1397**.
+
+**Frame: 51,9 ms → 25,3 ms (51% menos).**
+
+Está apagado por defecto, y el radio de recorte es un círculo que envuelve la
+forma —generoso a propósito—: esconder algo que sí se veía se nota como cosas
+que aparecen de golpe en el borde, y eso es mucho peor que dibujar algún quad de
+más. La prueba de esto no compara píxeles (la animación avanza entre capturas y
+eso daba falsos positivos), sino que **proyecta cada vértice con las matrices
+reales** y comprueba que nada de lo que cae dentro del volumen de vista quede
+descartado.
+
+### Lo que no se optimizó
+
+Las llamadas a GL siguen siendo una por forma. Agruparlas en lotes por textura
+es la siguiente ganancia, y es un cambio grande; con el culling puesto, las 57
+formas que quedan no lo justifican todavía.
 
 ## Formas disponibles
 

@@ -94,6 +94,11 @@ export default class ForestScene extends Scene {
         this._buildHud();
         this._bindInput();
 
+        // The map is far bigger than the view, so most of those sprites are
+        // off screen at any moment. Skipping them is the single biggest saving
+        // available here.
+        this.app.culling = true;
+
         this.camera.zoom = 0.95;
         this.camera.smoothing = 7;
         this.camera.centerOn(0, 0);
@@ -249,10 +254,18 @@ export default class ForestScene extends Scene {
         this.shadow.setPosition({ x: this.position.x, y: this.position.y - 0.02 });
     }
 
+    // Acorns bob and pulse. The pulse is one shared frame index rather than an
+    // Animator each: they are all in step, so a dozen private clocks would be a
+    // dozen copies of the same number.
     _bobAcorns() {
+        const frame = this.sheet.frame(Math.floor(this.elapsed * 3) % 2 ? ITEM.ACORN_B : ITEM.ACORN_A);
+        const pulsed = frame !== this._acornFrame;
+        this._acornFrame = frame;
+
         for (const acorn of this.acorns) {
             if (acorn.taken) continue;
             acorn.sprite.setPosition({ y: acorn.y + Math.sin(this.elapsed * 3 + acorn.phase) * 0.1 });
+            if (pulsed) acorn.sprite.setFrame(frame);
         }
     }
 
@@ -327,5 +340,8 @@ export default class ForestScene extends Scene {
     exit() {
         this.finished = false;
         this.paused = false;
+        // The menu draws a handful of shapes and moves the camera differently;
+        // leave the engine as it was found.
+        this.app.culling = false;
     }
 }

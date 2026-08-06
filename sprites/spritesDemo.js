@@ -18,6 +18,7 @@ import App from "../components/app.js";
 import { el, kv, slider, card, button, hint } from "../components/ui/index.js";
 import { Sprite, Circle } from "../components/shapes/index.js";
 import { Texture, SpriteSheet, Animator } from "../components/render/index.js";
+import { createRandom } from "../components/math/random.js";
 
 const CELL = 32;              // pixels per sheet cell
 const PPU = 32;               // pixels per world unit → one tile is one unit
@@ -87,12 +88,9 @@ function drawSheet() {
     const speckle = (col, base, fleck, seed) => {
         const x = col * CELL;
         px(x, CELL, CELL, CELL, base);
-        let s = seed;
+        const random = createRandom(seed);
         for (let i = 0; i < 26; i++) {
-            s = (s * 1664525 + 1013904223) >>> 0;
-            const dx = s % CELL;
-            const dy = (s >>> 8) % CELL;
-            px(x + dx, CELL + dy, 2, 2, fleck);
+            px(Math.floor(random() * CELL), Math.floor(random() * CELL), 2, 2, fleck);
         }
     };
     speckle(0, "#2f6b3a", "#387d45", 7);      // grass
@@ -144,8 +142,7 @@ App.boot({ title: "Sprites · texturas y animación", styles: STYLES }, (app) =>
     // --- The map ----------------------------------------------------------
     // Deterministic, so the layout is the same every time (and the tests can
     // rely on it).
-    let seed = 20260806;
-    const random = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+    const random = createRandom(20260806);
 
     const tileAt = (x, y) => {
         if (y === Math.floor(MAP.height / 2)) return TILE.path;

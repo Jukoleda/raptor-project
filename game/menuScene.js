@@ -12,6 +12,7 @@
 import Scene from "../components/scenes/scene.js";
 import { el, button } from "../components/ui/index.js";
 import { Rectangle, Circle, Triangle } from "../components/shapes/index.js";
+import { createRandom, randomRange } from "../components/math/random.js";
 
 export const MENU_STYLES = `
     .menu {
@@ -69,14 +70,13 @@ export default class MenuScene extends Scene {
             .setColor({ red: 0.11, green: 0.22, blue: 0.14 }).setLayer(-30).init());
 
         this.drifting = [];
-        let seed = 4242;
-        const random = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+        const random = createRandom(4242);
 
         for (let i = 0; i < 26; i++) {
             const x = (random() - 0.5) * 9;
             const y = (random() - 0.5) * 6;
-            const size = 0.3 + random() * 0.55;
-            const green = 0.28 + random() * 0.22;
+            const size = randomRange(random, 0.3, 0.85);
+            const green = randomRange(random, 0.28, 0.5);
             const canopy = this.add(new Circle(gl, { radius: size, segments: 12 })
                 .setColor({ red: green * 0.35, green, blue: green * 0.45 })
                 .setPosition({ x, y }).setLayer(-20).init());

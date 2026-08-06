@@ -7,22 +7,18 @@
 //
 //     assets.texture("bosque", "bosque.png");   // en vez de sheetUrl()
 
+import { createRandom, randomInt } from "../components/math/random.js";
+
 export const CELL = 32;                 // pixels per sheet cell
 export const PPU = 32;                  // pixels per world unit → a tile is 1
 
 // Cell indices into the sheet, named so the map code reads like a map.
 export const TILE = { GRASS: 0, GRASS_ALT: 1, DIRT: 2, FLOWERS: 3, WATER: 4, PATH: 5 };
 export const PROP = { TRUNK: 6, CANOPY: 7, BUSH: 8, ROCK: 9, STUMP: 10, LOG: 11 };
-export const ITEM = { ACORN_A: 12, ACORN_B: 13, SPARK: 14, SHADOW: 15 };
-export const HERO = { WALK_0: 16, WALK_1: 17, WALK_2: 18, WALK_3: 19, IDLE_0: 20, IDLE_1: 21 };
+export const ITEM = { ACORN_A: 12, ACORN_B: 13, SHADOW: 14 };
+export const HERO = { WALK_0: 15, WALK_1: 16, WALK_2: 17, WALK_3: 18, IDLE_0: 19, IDLE_1: 20 };
 
 const COLUMNS = 6;
-
-// A tiny deterministic generator, so the art is identical on every run.
-function rng(seed) {
-    let s = seed >>> 0;
-    return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
-}
 
 // Draws the whole sheet: 6 columns × 4 rows of 32×32 cells.
 export function sheetUrl() {
@@ -43,9 +39,9 @@ export function sheetUrl() {
     // --- Ground -----------------------------------------------------------
     const ground = (index, base, fleck, seed, extra = null) => cell(index, (px) => {
         px(0, 0, CELL, CELL, base);
-        const random = rng(seed);
+        const random = createRandom(seed);
         for (let i = 0; i < 30; i++) {
-            px(Math.floor(random() * CELL), Math.floor(random() * CELL), 2, 2, fleck);
+            px(randomInt(random, 0, CELL - 1), randomInt(random, 0, CELL - 1), 2, 2, fleck);
         }
         if (extra) extra(px);
     });
@@ -101,8 +97,8 @@ export function sheetUrl() {
     });
 
     // --- Items ------------------------------------------------------------
-    // Two acorn frames: the second is a pixel taller, which is enough of a
-    // difference to read as a gentle pulse once it is animating.
+    // Two acorn frames: the second sits a pixel higher, which is enough of a
+    // difference to read as a gentle pulse. The forest animates between them.
     const acorn = (index, lift) => cell(index, (px, c) => {
         const y = 14 - lift;
         c.fillStyle = "#c98a3a";                       // el cuerpo, redondeado
@@ -118,11 +114,6 @@ export function sheetUrl() {
     acorn(ITEM.ACORN_A, 0);
     acorn(ITEM.ACORN_B, 1);
 
-    cell(ITEM.SPARK, (px) => {
-        px(14, 8, 4, 16, "#fff3b0");
-        px(8, 14, 16, 4, "#fff3b0");
-        px(12, 12, 8, 8, "#ffe066");
-    });
     cell(ITEM.SHADOW, (px, c) => {
         c.fillStyle = "rgba(0,0,0,.32)";
         c.beginPath(); c.ellipse(16, 22, 11, 5, 0, 0, Math.PI * 2); c.fill();

@@ -147,6 +147,12 @@ export default class App {
     get entities() { return this.engine.entities; }
     get running() { return this.engine.running; }
 
+    // Skipping off-screen entities. Worth it as soon as the world is bigger
+    // than the view; pointless when everything fits on screen anyway.
+    get culling() { return this.engine.culling; }
+    set culling(on) { this.engine.culling = on; }
+    get drawnLastFrame() { return this.engine.drawnLastFrame; }
+
     add(entity) { return this.engine.add(entity); }
     remove(entity) { this.engine.remove(entity); return this; }
     onUpdate(fn) { this.engine.addUpdater(fn); return fn; }
