@@ -3,10 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Raptor — Cañón vs Blindaje</title>
+    <title>Raptor 3D — Texturas y billboards</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/render/projection.js, components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/ui/loadingScreen.js, components/scenes/sceneManager.js, components/input/keyboard.js, components/input/touchpad.js, components/render/texture.js, components/assets/assets.js, components/math/angles.js, components/render3d/camera3d.js, components/app.js, components/ui/index.js, components/render/shaders.js, components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/shapes/sprite.js, components/shapes/index.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/armor.js, components/weapons/index.js, weapons/tanksDemo.js + vendor/gl-matrix-min.js
+        Source: components/render/projection.js, components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/ui/loadingScreen.js, components/scenes/sceneManager.js, components/input/keyboard.js, components/input/touchpad.js, components/render/texture.js, components/assets/assets.js, components/math/angles.js, components/render3d/camera3d.js, components/app.js, components/ui/index.js, components/render3d/shaders3d.js, components/render3d/mesh.js, components/render3d/geometry.js, components/render3d/index.js, components/render/spriteSheet.js, components/render/shaders.js, components/render/index.js, components/math/random.js, demos3d/sprites3d.js + vendor/gl-matrix-min.js
         Regenerate with: node tools/build.mjs
         This file is fully self-contained: open it directly in any browser.
     -->
@@ -2023,6 +2023,924 @@ class App {
 // ===== components/ui/index.js =====
 // Barrel for the UI layer.
 
+// ===== components/render3d/shaders3d.js =====
+// The 3D shader programs.
+//
+// Two, and the difference matters more than it sounds: **without shading, 3D
+// looks like 2D**. A sphere lit by nothing is a flat circle; a cube is a
+// hexagon. What tells you a shape has volume is that its faces catch the light
+// differently, so the lit program is the default and the unlit one is only for
+// things that should not pretend to be solid — helper lines, a sky dome.
+//
+// Lighting is computed per fragment rather than per vertex. On a cube it makes
+// no difference, but on a sphere with few segments, per-vertex shading shows
+// the triangles as bands; per-fragment does not, and this is a framework where
+// low-poly spheres are the norm.
+//
+// The model is deliberately simple: one directional light, plus ambient, plus a
+// touch of hemisphere tint so faces pointing away from the light are coloured
+// by the "sky" instead of going flat black. That last part is what stops the
+// unlit side of everything from looking like a hole.
+
+const LIT_VS = `
+    attribute vec4 aVertexPosition;
+    attribute vec3 aVertexNormal;
+
+    uniform mat4 uModelViewMatrix;
+    uniform mat4 uProjectionMatrix;
+    uniform mat3 uNormalMatrix;
+
+    varying highp vec3 vNormal;
+    varying highp vec3 vViewPosition;
+
+    void main() {
+        vec4 viewPosition = uModelViewMatrix * aVertexPosition;
+        gl_Position = uProjectionMatrix * viewPosition;
+        // Normals need the inverse-transpose, not the model-view: a non-uniform
+        // scale would otherwise tilt them and the lighting would slide off the
+        // geometry.
+        vNormal = normalize(uNormalMatrix * aVertexNormal);
+        vViewPosition = viewPosition.xyz;
+    }
+`;
+
+const LIT_FS = `
+    precision mediump float;
+
+    varying highp vec3 vNormal;
+    varying highp vec3 vViewPosition;
+
+    uniform vec4 uColor;
+    uniform vec3 uLightDirection;   // hacia la luz, en espacio de vista
+    uniform vec3 uLightColor;
+    uniform vec3 uAmbientColor;
+    uniform vec3 uSkyColor;
+    uniform float uShininess;       // 0 = mate
+
+    void main() {
+        vec3 normal = normalize(vNormal);
+        vec3 toLight = normalize(uLightDirection);
+
+        float lambert = max(dot(normal, toLight), 0.0);
+
+        // Hemisphere ambient: the side facing up picks up the sky colour, the
+        // side facing down stays with the ambient. Cheap, and it keeps the
+        // shadowed half readable instead of black.
+        float upness = normal.y * 0.5 + 0.5;
+        vec3 ambient = mix(uAmbientColor, uSkyColor, upness);
+
+        vec3 lit = uColor.rgb * (ambient + uLightColor * lambert);
+
+        if (uShininess > 0.0) {
+            vec3 toEye = normalize(-vViewPosition);
+            vec3 halfway = normalize(toLight + toEye);
+            float specular = pow(max(dot(normal, halfway), 0.0), uShininess);
+            lit += uLightColor * specular * 0.35;
+        }
+
+        gl_FragColor = vec4(lit, uColor.a);
+    }
+`;
+
+// The lit shader again, with a texture multiplied in. Kept as a separate
+// program rather than a branch on a uniform: a shader that samples a texture it
+// was told to ignore still pays for the sample on some hardware.
+const TEXTURED_VS = `
+    attribute vec4 aVertexPosition;
+    attribute vec3 aVertexNormal;
+    attribute vec2 aTextureCoord;
+
+    uniform mat4 uModelViewMatrix;
+    uniform mat4 uProjectionMatrix;
+    uniform mat3 uNormalMatrix;
+
+    varying highp vec3 vNormal;
+    varying highp vec2 vTextureCoord;
+
+    void main() {
+        vec4 viewPosition = uModelViewMatrix * aVertexPosition;
+        gl_Position = uProjectionMatrix * viewPosition;
+        vNormal = normalize(uNormalMatrix * aVertexNormal);
+        vTextureCoord = aTextureCoord;
+    }
+`;
+
+const TEXTURED_FS = `
+    precision mediump float;
+
+    varying highp vec3 vNormal;
+    varying highp vec2 vTextureCoord;
+
+    uniform sampler2D uSampler;
+    uniform vec4 uColor;
+    uniform vec3 uLightDirection;
+    uniform vec3 uLightColor;
+    uniform vec3 uAmbientColor;
+    uniform vec3 uSkyColor;
+    uniform vec2 uTextureRepeat;
+
+    void main() {
+        vec4 texel = texture2D(uSampler, vTextureCoord * uTextureRepeat);
+        if (texel.a < 0.01) discard;
+
+        // gl_FrontFacing tells us we are looking at the back of a sheet; the
+        // normal is then pointing away, and using it as-is would paint the back
+        // of every billboard black.
+        vec3 normal = normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0);
+        float lambert = max(dot(normal, normalize(uLightDirection)), 0.0);
+        float upness = normal.y * 0.5 + 0.5;
+        vec3 ambient = mix(uAmbientColor, uSkyColor, upness);
+
+        gl_FragColor = vec4(texel.rgb * uColor.rgb * (ambient + uLightColor * lambert), texel.a * uColor.a);
+    }
+`;
+
+const FLAT_VS = `
+    attribute vec4 aVertexPosition;
+
+    uniform mat4 uModelViewMatrix;
+    uniform mat4 uProjectionMatrix;
+
+    void main() {
+        gl_Position = uProjectionMatrix * uModelViewMatrix * aVertexPosition;
+    }
+`;
+
+const FLAT_FS = `
+    precision mediump float;
+    uniform vec4 uColor;
+
+    void main() {
+        gl_FragColor = uColor;
+    }
+`;
+
+const PROGRAM_LIT = "lit3d";
+const PROGRAM_FLAT = "flat3d";
+const PROGRAM_TEXTURED = "textured3d";
+
+const PROGRAMS_3D = {
+    [PROGRAM_LIT]: {
+        vertex: LIT_VS,
+        fragment: LIT_FS,
+        attributes: { vertexPosition: "aVertexPosition", vertexNormal: "aVertexNormal" },
+        uniforms: {
+            projectionMatrix: "uProjectionMatrix", modelViewMatrix: "uModelViewMatrix",
+            normalMatrix: "uNormalMatrix", color: "uColor",
+            lightDirection: "uLightDirection", lightColor: "uLightColor",
+            ambientColor: "uAmbientColor", skyColor: "uSkyColor", shininess: "uShininess",
+        },
+    },
+    [PROGRAM_TEXTURED]: {
+        vertex: TEXTURED_VS,
+        fragment: TEXTURED_FS,
+        attributes: {
+            vertexPosition: "aVertexPosition", vertexNormal: "aVertexNormal",
+            textureCoord: "aTextureCoord",
+        },
+        uniforms: {
+            projectionMatrix: "uProjectionMatrix", modelViewMatrix: "uModelViewMatrix",
+            normalMatrix: "uNormalMatrix", color: "uColor", sampler: "uSampler",
+            lightDirection: "uLightDirection", lightColor: "uLightColor",
+            ambientColor: "uAmbientColor", skyColor: "uSkyColor", textureRepeat: "uTextureRepeat",
+        },
+    },
+    [PROGRAM_FLAT]: {
+        vertex: FLAT_VS,
+        fragment: FLAT_FS,
+        attributes: { vertexPosition: "aVertexPosition" },
+        uniforms: {
+            projectionMatrix: "uProjectionMatrix", modelViewMatrix: "uModelViewMatrix",
+            color: "uColor",
+        },
+    },
+};
+
+function compile3D(gl, type, source, kind) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        const log = gl.getShaderInfoLog(shader);
+        gl.deleteShader(shader);
+        throw new Error(`Raptor 3D: no compila el shader "${kind}": ${log}`);
+    }
+    return shader;
+}
+
+function build3D(gl, kind) {
+    const spec = PROGRAMS_3D[kind];
+    if (!spec) throw new Error(`Raptor 3D: programa desconocido "${kind}"`);
+
+    const program = gl.createProgram();
+    gl.attachShader(program, compile3D(gl, gl.VERTEX_SHADER, spec.vertex, kind));
+    gl.attachShader(program, compile3D(gl, gl.FRAGMENT_SHADER, spec.fragment, kind));
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        throw new Error(`Raptor 3D: no enlaza "${kind}": ${gl.getProgramInfoLog(program)}`);
+    }
+
+    const attribLocations = {};
+    for (const [name, glsl] of Object.entries(spec.attributes)) {
+        attribLocations[name] = gl.getAttribLocation(program, glsl);
+    }
+    const uniformLocations = {};
+    for (const [name, glsl] of Object.entries(spec.uniforms)) {
+        uniformLocations[name] = gl.getUniformLocation(program, glsl);
+    }
+    return { kind, program, attribLocations, uniformLocations };
+}
+
+const cache3D = new WeakMap();
+
+function getProgram3D(gl, kind = PROGRAM_LIT) {
+    let byKind = cache3D.get(gl);
+    if (!byKind) { byKind = new Map(); cache3D.set(gl, byKind); }
+    if (!byKind.has(kind)) byKind.set(kind, build3D(gl, kind));
+    return byKind.get(kind);
+}
+
+// ===== components/render3d/mesh.js =====
+// A drawable solid: geometry on the GPU, a transform, a colour and a material.
+//
+// `Mesh` is to 3D what `Shape` is to 2D, and it is deliberately the same shape
+// of object — `position`, `rotation`, `scale`, `setColor`, `draw(camera)`, a
+// `cullRadius` — so the engine draws either without knowing which it has, and a
+// scene can mix them.
+//
+// The differences are the ones the extra dimension forces:
+//
+// - **Rotation is three numbers, not one.** Applied Y then X then Z, which is
+//   the order that makes "turn, then look up, then roll" behave the way people
+//   expect when they type it.
+// - **Indexed drawing.** A cube's corners are shared between triangles, so the
+//   geometry ships an index buffer and draws with `drawElements`.
+// - **A normal matrix.** Normals cannot ride the model-view matrix: under a
+//   non-uniform scale they come out tilted and the lighting slides off the
+//   surface. The inverse-transpose of the upper 3×3 fixes it.
+
+
+// The default light, in world space. Scenes override it through `Mesh.light`.
+const DEFAULT_LIGHT = {
+    direction: { x: 0.45, y: 0.8, z: 0.35 },   // hacia la luz
+    color: { red: 1, green: 0.97, blue: 0.9 },
+    ambient: { red: 0.22, green: 0.23, blue: 0.26 },
+    sky: { red: 0.38, green: 0.44, blue: 0.52 },
+};
+
+class Mesh {
+    constructor(context, geometry = null, { lit = true, texture = null, textureRepeat = { x: 1, y: 1 } } = {}) {
+        this.context = context;
+        this.geometry = geometry;
+
+        this.position = { x: 0, y: 0, z: 0 };
+        this.rotation = { x: 0, y: 0, z: 0 };   // grados
+        this.scale = { x: 1, y: 1, z: 1 };
+        this.color = { red: 0.8, green: 0.8, blue: 0.85, alpha: 1 };
+        this.shininess = 0;
+        this.visible = true;
+
+        // Backface culling assumes a mesh is a closed solid with an inside
+        // nobody sees. A billboard, a leaf card or a flag is a *sheet*: it has
+        // two outsides, and culling makes it vanish from one of them.
+        this.doubleSided = false;
+        this.layer = 0;
+
+        this.texture = texture;
+        this.textureRepeat = textureRepeat;
+        this.program = texture ? PROGRAM_TEXTURED : (lit ? PROGRAM_LIT : PROGRAM_FLAT);
+        this.light = DEFAULT_LIGHT;
+
+        this.programInfo = null;
+        this.buffers = null;
+        this.indexCount = 0;
+        this._localRadius = null;
+
+        const { mat4, mat3, vec3 } = glMatrix;
+        this._model = mat4.create();
+        this._modelView = mat4.create();
+        this._normalMatrix = mat3.create();
+        this._viewRotation = mat3.create();
+        this._lightView = vec3.create();
+    }
+
+    // Same contract as Shape: a radius that is guaranteed to contain the mesh,
+    // so the engine can skip it when it cannot be on screen.
+    get cullRadius() {
+        if (this._localRadius === null) return null;
+        return this._localRadius * Math.max(
+            Math.abs(this.scale.x), Math.abs(this.scale.y), Math.abs(this.scale.z),
+        );
+    }
+
+    init() {
+        const gl = this.context;
+        if (!this.geometry) throw new Error("Raptor 3D: un Mesh necesita geometría");
+        this.programInfo = getProgram3D(gl, this.program);
+
+        const { positions, normals, uvs, indices } = this.geometry;
+
+        let furthest = 0;
+        for (let i = 0; i < positions.length; i += 3) {
+            const d = positions[i] ** 2 + positions[i + 1] ** 2 + positions[i + 2] ** 2;
+            if (d > furthest) furthest = d;
+        }
+        this._localRadius = Math.sqrt(furthest);
+
+        const position = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, position);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+
+        let uv = null;
+        if (uvs && this.program === PROGRAM_TEXTURED) {
+            uv = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, uv);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uvs), gl.STATIC_DRAW);
+        }
+
+        let normal = null;
+        if (normals && this.program !== PROGRAM_FLAT) {
+            normal = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, normal);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+        }
+
+        const index = gl.createBuffer();
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, index);
+        // Unsigned short caps a mesh at 65 536 vertices. Past that you want
+        // several meshes anyway, and the extension is not universal.
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+        this.indexCount = indices.length;
+
+        this.buffers = { position, normal, uv, index };
+        return this;
+    }
+
+    // World transform. Y first so `rotation.y` reads as "which way is it
+    // facing", which is the one people set most.
+    modelMatrix() {
+        const { mat4 } = glMatrix;
+        const m = this._model;
+        mat4.identity(m);
+        mat4.translate(m, m, [this.position.x, this.position.y, this.position.z]);
+        if (this.rotation.y) mat4.rotateY(m, m, this.rotation.y * DEG_TO_RAD);
+        if (this.rotation.x) mat4.rotateX(m, m, this.rotation.x * DEG_TO_RAD);
+        if (this.rotation.z) mat4.rotateZ(m, m, this.rotation.z * DEG_TO_RAD);
+        mat4.scale(m, m, [this.scale.x, this.scale.y, this.scale.z]);
+        return m;
+    }
+
+    draw(camera) {
+        if (!this.visible || !this.buffers) return;
+        const gl = this.context;
+        const { mat4, mat3, vec3 } = glMatrix;
+        const { program, attribLocations, uniformLocations } = this.programInfo;
+
+        mat4.multiply(this._modelView, camera.viewMatrix(), this.modelMatrix());
+
+        gl.useProgram(program);
+        gl.uniformMatrix4fv(uniformLocations.projectionMatrix, false, camera.projectionMatrix(gl.canvas));
+        gl.uniformMatrix4fv(uniformLocations.modelViewMatrix, false, this._modelView);
+        gl.uniform4f(uniformLocations.color, this.color.red, this.color.green, this.color.blue, this.color.alpha);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.position);
+        gl.vertexAttribPointer(attribLocations.vertexPosition, 3, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(attribLocations.vertexPosition);
+        const enabled = [attribLocations.vertexPosition];
+
+        if (this.buffers.normal) {
+            mat3.normalFromMat4(this._normalMatrix, this._modelView);
+            gl.uniformMatrix3fv(uniformLocations.normalMatrix, false, this._normalMatrix);
+
+            // The light is given in world space but the shader works in view
+            // space, so it has to be rotated into it. Only *rotated*: a
+            // direction has no position, so the view matrix's translation must
+            // not touch it — which is why this goes through the upper-left 3×3
+            // and not through `transformMat4`.
+            const { direction, color, ambient, sky } = this.light;
+            mat3.fromMat4(this._viewRotation, camera.viewMatrix());
+            vec3.set(this._lightView, direction.x, direction.y, direction.z);
+            vec3.transformMat3(this._lightView, this._lightView, this._viewRotation);
+            vec3.normalize(this._lightView, this._lightView);
+            gl.uniform3f(uniformLocations.lightDirection,
+                this._lightView[0], this._lightView[1], this._lightView[2]);
+            gl.uniform3f(uniformLocations.lightColor, color.red, color.green, color.blue);
+            gl.uniform3f(uniformLocations.ambientColor, ambient.red, ambient.green, ambient.blue);
+            gl.uniform3f(uniformLocations.skyColor, sky.red, sky.green, sky.blue);
+            gl.uniform1f(uniformLocations.shininess, this.shininess);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.normal);
+            gl.vertexAttribPointer(attribLocations.vertexNormal, 3, gl.FLOAT, false, 0, 0);
+            gl.enableVertexAttribArray(attribLocations.vertexNormal);
+            enabled.push(attribLocations.vertexNormal);
+        }
+
+        if (this.buffers.uv && this.texture) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.uv);
+            gl.vertexAttribPointer(attribLocations.textureCoord, 2, gl.FLOAT, false, 0, 0);
+            gl.enableVertexAttribArray(attribLocations.textureCoord);
+            enabled.push(attribLocations.textureCoord);
+
+            this.texture.bind(0);
+            gl.uniform1i(uniformLocations.sampler, 0);
+            gl.uniform2f(uniformLocations.textureRepeat, this.textureRepeat.x, this.textureRepeat.y);
+        }
+
+        // Lighting a sheet from behind would leave the back face black, so a
+        // double-sided mesh flips its normal towards the viewer instead.
+        const wasCulling = this.doubleSided && gl.isEnabled(gl.CULL_FACE);
+        if (wasCulling) gl.disable(gl.CULL_FACE);
+
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.buffers.index);
+        gl.drawElements(gl.TRIANGLES, this.indexCount, gl.UNSIGNED_SHORT, 0);
+
+        if (wasCulling) gl.enable(gl.CULL_FACE);
+        for (const location of enabled) gl.disableVertexAttribArray(location);
+    }
+
+    // --- Fluent configuration --------------------------------------------
+
+    setPosition({ x, y, z } = {}) {
+        this.position = {
+            x: x ?? this.position.x, y: y ?? this.position.y, z: z ?? this.position.z,
+        };
+        return this;
+    }
+
+    setRotation({ x, y, z } = {}) {
+        this.rotation = {
+            x: x ?? this.rotation.x, y: y ?? this.rotation.y, z: z ?? this.rotation.z,
+        };
+        return this;
+    }
+
+    setScale(scale) {
+        const s = typeof scale === "number" ? { x: scale, y: scale, z: scale } : scale;
+        this.scale = { x: s.x ?? 1, y: s.y ?? 1, z: s.z ?? 1 };
+        return this;
+    }
+
+    setColor({ red, green, blue, alpha } = {}) {
+        this.color = {
+            red: red ?? 0, green: green ?? 0, blue: blue ?? 0, alpha: alpha ?? 1,
+        };
+        return this;
+    }
+
+    setShininess(value) {
+        this.shininess = value;
+        return this;
+    }
+
+    setTexture(texture, { repeat = this.textureRepeat } = {}) {
+        this.texture = texture;
+        this.textureRepeat = repeat;
+        this.program = texture ? PROGRAM_TEXTURED : PROGRAM_LIT;
+        if (this.buffers) { this.buffers = null; this.init(); }
+        return this;
+    }
+
+    setLight(light) {
+        this.light = { ...DEFAULT_LIGHT, ...light };
+        return this;
+    }
+
+    // For sheets: visible from both sides, and lit from both.
+    setDoubleSided(doubleSided) {
+        this.doubleSided = doubleSided;
+        return this;
+    }
+
+    setVisible(visible) {
+        this.visible = visible;
+        return this;
+    }
+
+    setLayer(layer) {
+        if (layer !== this.layer) {
+            this.layer = layer;
+            if (this._onLayerChange) this._onLayerChange(this);
+        }
+        return this;
+    }
+}
+
+// ===== components/render3d/geometry.js =====
+// Geometry builders: positions, normals and indices for the usual solids.
+//
+// Every builder returns the same shape of data —
+//
+//     { positions: [...], normals: [...], indices: [...] }
+//
+// — so `Mesh` never has to know which primitive it is drawing, and a hand-built
+// mesh is exactly as first-class as a box.
+//
+// Two things worth saying about normals, because they are what makes 3D look
+// like 3D:
+//
+// - **A box has 24 vertices, not 8.** Each corner belongs to three faces that
+//   point in three different directions, and a vertex carries one normal. Share
+//   the corners and the cube shades like a badly inflated ball.
+// - **A sphere shares its vertices**, because its normal really is continuous:
+//   the normal at a point on a unit sphere is the point itself.
+//
+// Indices exist so a face's four corners are stored once and referenced twice,
+// which is both less memory and fewer vertices for the GPU to transform.
+
+// --- Box -----------------------------------------------------------------
+
+function boxGeometry({ width = 1, height = 1, depth = 1 } = {}) {
+    const x = width / 2, y = height / 2, z = depth / 2;
+    const positions = [];
+    const normals = [];
+    const indices = [];
+
+    // Each face: four corners in counter-clockwise order seen from outside,
+    // which is what backface culling relies on to know what to throw away.
+    const uvs = [];
+    const face = (corners, normal) => {
+        const base = positions.length / 3;
+        for (const [px, py, pz] of corners) {
+            positions.push(px, py, pz);
+            normals.push(...normal);
+        }
+        // Each face gets the whole texture, which is what you want for a crate
+        // and easy to override with `textureRepeat` when you want a tiling.
+        uvs.push(0, 0, 1, 0, 1, 1, 0, 1);
+        indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    };
+
+    face([[-x, -y, z], [x, -y, z], [x, y, z], [-x, y, z]], [0, 0, 1]);    // frente
+    face([[x, -y, -z], [-x, -y, -z], [-x, y, -z], [x, y, -z]], [0, 0, -1]); // fondo
+    face([[-x, y, z], [x, y, z], [x, y, -z], [-x, y, -z]], [0, 1, 0]);    // arriba
+    face([[-x, -y, -z], [x, -y, -z], [x, -y, z], [-x, -y, z]], [0, -1, 0]); // abajo
+    face([[x, -y, z], [x, -y, -z], [x, y, -z], [x, y, z]], [1, 0, 0]);    // derecha
+    face([[-x, -y, -z], [-x, -y, z], [-x, y, z], [-x, y, -z]], [-1, 0, 0]); // izquierda
+
+    return { positions, normals, uvs, indices };
+}
+
+// --- Sphere --------------------------------------------------------------
+
+function sphereGeometry({ radius = 0.5, segments = 24, rings = 16 } = {}) {
+    const positions = [];
+    const normals = [];
+    const uvs = [];
+    const indices = [];
+
+    for (let ring = 0; ring <= rings; ring++) {
+        const v = ring / rings;
+        const phi = v * Math.PI;            // 0 arriba, π abajo
+        const sinPhi = Math.sin(phi), cosPhi = Math.cos(phi);
+
+        for (let segment = 0; segment <= segments; segment++) {
+            const u = segment / segments;
+            const theta = u * Math.PI * 2;
+            const nx = sinPhi * Math.cos(theta);
+            const ny = cosPhi;
+            const nz = sinPhi * Math.sin(theta);
+            // On a unit sphere the normal *is* the position, which is why these
+            // two lines look redundant and are not.
+            positions.push(nx * radius, ny * radius, nz * radius);
+            normals.push(nx, ny, nz);
+            uvs.push(u, 1 - v);
+        }
+    }
+
+    const stride = segments + 1;
+    for (let ring = 0; ring < rings; ring++) {
+        for (let segment = 0; segment < segments; segment++) {
+            const a = ring * stride + segment;
+            const b = a + stride;
+            indices.push(a, b, a + 1, a + 1, b, b + 1);
+        }
+    }
+
+    return { positions, normals, uvs, indices };
+}
+
+// --- Cylinder, and the cone it becomes when the top radius is zero --------
+
+function cylinderGeometry({
+    radiusTop = 0.5, radiusBottom = 0.5, height = 1, segments = 24, caps = true,
+} = {}) {
+    const positions = [];
+    const normals = [];
+    const indices = [];
+    const halfHeight = height / 2;
+
+    // The side normal is not horizontal unless the two radii match: on a cone it
+    // tilts by the slope, and getting that wrong makes the lighting look painted
+    // on rather than lit.
+    const slope = (radiusBottom - radiusTop) / height;
+    const normalScale = 1 / Math.hypot(1, slope);
+
+    for (let ring = 0; ring <= 1; ring++) {
+        const radius = ring === 0 ? radiusBottom : radiusTop;
+        const y = ring === 0 ? -halfHeight : halfHeight;
+        for (let segment = 0; segment <= segments; segment++) {
+            const theta = (segment / segments) * Math.PI * 2;
+            const cos = Math.cos(theta), sin = Math.sin(theta);
+            positions.push(cos * radius, y, sin * radius);
+            normals.push(cos * normalScale, slope * normalScale, sin * normalScale);
+        }
+    }
+
+    const stride = segments + 1;
+    for (let segment = 0; segment < segments; segment++) {
+        const a = segment, b = segment + stride;
+        indices.push(a, a + 1, b, a + 1, b + 1, b);
+    }
+
+    if (caps) {
+        for (const [radius, y, normal] of [[radiusBottom, -halfHeight, -1], [radiusTop, halfHeight, 1]]) {
+            if (radius <= 0) continue;         // un cono no tiene tapa arriba
+            const centre = positions.length / 3;
+            positions.push(0, y, 0);
+            normals.push(0, normal, 0);
+            for (let segment = 0; segment <= segments; segment++) {
+                const theta = (segment / segments) * Math.PI * 2;
+                positions.push(Math.cos(theta) * radius, y, Math.sin(theta) * radius);
+                normals.push(0, normal, 0);
+            }
+            for (let segment = 0; segment < segments; segment++) {
+                const a = centre + 1 + segment;
+                // The winding flips between the two caps, or one of them faces
+                // inwards and vanishes under backface culling. Seen from above,
+                // increasing theta with x = cos and z = sin runs *clockwise*,
+                // so the top cap is the one that needs reversing — the opposite
+                // of what it looks like written down.
+                if (normal > 0) indices.push(centre, a + 1, a);
+                else indices.push(centre, a, a + 1);
+            }
+        }
+    }
+
+    return { positions, normals, indices };
+}
+
+const coneGeometry = ({ radius = 0.5, height = 1, segments = 24 } = {}) =>
+    cylinderGeometry({ radiusTop: 0, radiusBottom: radius, height, segments });
+
+// --- Plane, lying in XZ so it works as ground ----------------------------
+
+function planeGeometry({ width = 1, depth = 1, segmentsX = 1, segmentsZ = 1 } = {}) {
+    const positions = [];
+    const normals = [];
+    const indices = [];
+
+    const uvs = [];
+    for (let z = 0; z <= segmentsZ; z++) {
+        for (let x = 0; x <= segmentsX; x++) {
+            positions.push(
+                (x / segmentsX - 0.5) * width,
+                0,
+                (z / segmentsZ - 0.5) * depth,
+            );
+            normals.push(0, 1, 0);
+            uvs.push(x / segmentsX, z / segmentsZ);
+        }
+    }
+    const stride = segmentsX + 1;
+    for (let z = 0; z < segmentsZ; z++) {
+        for (let x = 0; x < segmentsX; x++) {
+            const a = z * stride + x;
+            indices.push(a, a + stride, a + 1, a + 1, a + stride, a + stride + 1);
+        }
+    }
+    return { positions, normals, uvs, indices };
+}
+
+// --- Torus ---------------------------------------------------------------
+
+function torusGeometry({ radius = 0.5, tube = 0.2, segments = 32, sides = 16 } = {}) {
+    const positions = [];
+    const normals = [];
+    const indices = [];
+
+    for (let i = 0; i <= segments; i++) {
+        const u = (i / segments) * Math.PI * 2;
+        const cosU = Math.cos(u), sinU = Math.sin(u);
+        for (let j = 0; j <= sides; j++) {
+            const v = (j / sides) * Math.PI * 2;
+            const cosV = Math.cos(v), sinV = Math.sin(v);
+            // The normal points away from the centre of the tube, not from the
+            // centre of the torus.
+            const nx = cosV * cosU, ny = sinV, nz = cosV * sinU;
+            positions.push((radius + tube * cosV) * cosU, tube * sinV, (radius + tube * cosV) * sinU);
+            normals.push(nx, ny, nz);
+        }
+    }
+    const stride = sides + 1;
+    for (let i = 0; i < segments; i++) {
+        for (let j = 0; j < sides; j++) {
+            const a = i * stride + j;
+            const b = a + stride;
+            indices.push(a, b, a + 1, a + 1, b, b + 1);
+        }
+    }
+    return { positions, normals, indices };
+}
+
+// --- Extrusion, for anything the primitives do not cover ------------------
+
+// Takes a flat outline in XZ and gives it height: walls plus a flat top and
+// bottom. It is how the tank hulls and the editor's odd shapes get made without
+// a modelling tool.
+function prismGeometry({ points = [], height = 1 } = {}) {
+    const positions = [];
+    const normals = [];
+    const indices = [];
+    const halfHeight = height / 2;
+    const count = points.length;
+    if (count < 3) return { positions, normals, indices };
+
+    // Walls: one quad per edge, each with its own normal, so the corners stay
+    // sharp instead of smearing into a cylinder.
+    for (let i = 0; i < count; i++) {
+        const current = points[i];
+        const next = points[(i + 1) % count];
+        const dx = next.x - current.x;
+        const dz = next.z - current.z;
+        const length = Math.hypot(dx, dz) || 1;
+        const nx = dz / length, nz = -dx / length;
+
+        const base = positions.length / 3;
+        positions.push(
+            current.x, -halfHeight, current.z,
+            next.x, -halfHeight, next.z,
+            next.x, halfHeight, next.z,
+            current.x, halfHeight, current.z,
+        );
+        for (let k = 0; k < 4; k++) normals.push(nx, 0, nz);
+        indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+
+    // Caps, as a triangle fan from the first point. Fine for convex outlines,
+    // which is all the physics layer accepts anyway.
+    for (const [y, normal] of [[halfHeight, 1], [-halfHeight, -1]]) {
+        const base = positions.length / 3;
+        for (const point of points) {
+            positions.push(point.x, y, point.z);
+            normals.push(0, normal, 0);
+        }
+        // Same handedness trap as the cylinder caps: the top fan runs clockwise
+        // when seen from above unless it is reversed.
+        for (let i = 1; i < count - 1; i++) {
+            if (normal > 0) indices.push(base, base + i + 1, base + i);
+            else indices.push(base, base + i, base + i + 1);
+        }
+    }
+
+    return { positions, normals, indices };
+}
+
+// ===== components/render3d/index.js =====
+// Barrel for the 3D layer.
+
+// ===== components/render/spriteSheet.js =====
+// Slicing a texture into frames, and playing them back.
+//
+// A sheet is a grid: every frame the same size, optionally with a margin around
+// the edge and spacing between cells (exporters add those to stop neighbouring
+// frames bleeding into each other when filtering is on).
+//
+//     const sheet = new SpriteSheet(texture, { frameWidth: 16, frameHeight: 16 });
+//     sheet.frame(0)            // by index, left to right then down
+//     sheet.frame(2, 1)         // by column and row
+//     sheet.range(0, 3)         // [0,1,2,3] as frame rectangles
+//
+// An Animation is a list of those rectangles plus a frame rate. It holds *time*,
+// not a frame counter, so playback speed does not depend on the refresh rate:
+// at 8 fps a walk cycle takes the same wall-clock time at 30 Hz and at 144 Hz.
+
+class SpriteSheet {
+    constructor(texture, { frameWidth, frameHeight, margin = 0, spacing = 0 } = {}) {
+        this.texture = texture;
+        this.frameWidth = frameWidth;
+        this.frameHeight = frameHeight;
+        this.margin = margin;
+        this.spacing = spacing;
+    }
+
+    get columns() {
+        const usable = (this.texture.width - this.margin * 2) + this.spacing;
+        return Math.max(1, Math.floor(usable / (this.frameWidth + this.spacing)));
+    }
+
+    get rows() {
+        const usable = (this.texture.height - this.margin * 2) + this.spacing;
+        return Math.max(1, Math.floor(usable / (this.frameHeight + this.spacing)));
+    }
+
+    get count() {
+        return this.columns * this.rows;
+    }
+
+    // `frame(i)` walks the grid in reading order; `frame(col, row)` is explicit.
+    frame(a, b = null) {
+        const [col, row] = b === null ? [a % this.columns, Math.floor(a / this.columns)] : [a, b];
+        return {
+            x: this.margin + col * (this.frameWidth + this.spacing),
+            y: this.margin + row * (this.frameHeight + this.spacing),
+            width: this.frameWidth,
+            height: this.frameHeight,
+        };
+    }
+
+    // Inclusive range of indices, as frame rectangles — the usual way to say
+    // "frames 4 through 7 are the walk cycle".
+    range(from, to) {
+        const frames = [];
+        for (let i = from; i <= to; i++) frames.push(this.frame(i));
+        return frames;
+    }
+
+    // Convenience: build an Animation straight from indices.
+    animation(from, to, options = {}) {
+        return new Animation(this.range(from, to), options);
+    }
+}
+
+class Animation {
+    constructor(frames, { fps = 8, loop = true, onEnd = null } = {}) {
+        this.frames = frames;
+        this.fps = fps;
+        this.loop = loop;
+        this.onEnd = onEnd;
+        this.time = 0;
+        this.index = 0;
+        this.finished = false;
+    }
+
+    get frame() {
+        return this.frames[this.index];
+    }
+
+    reset() {
+        this.time = 0;
+        this.index = 0;
+        this.finished = false;
+        return this;
+    }
+
+    // Advances by dt seconds and returns true if the frame changed, so callers
+    // only touch the GPU when there is something new to show.
+    update(dt) {
+        if (this.finished || this.frames.length < 2) return false;
+        const previous = this.index;
+        this.time += dt;
+
+        const step = 1 / this.fps;
+        while (this.time >= step) {
+            this.time -= step;
+            if (this.index + 1 < this.frames.length) {
+                this.index++;
+            } else if (this.loop) {
+                this.index = 0;
+            } else {
+                this.finished = true;
+                if (this.onEnd) this.onEnd(this);
+                break;
+            }
+        }
+        return this.index !== previous;
+    }
+}
+
+// Drives a Sprite from named animations, which is the shape gameplay code
+// actually wants: `animator.play("walk")`, not a frame index.
+class Animator {
+    constructor(sprite, animations = {}, { initial = null } = {}) {
+        this.sprite = sprite;
+        this.animations = animations;
+        this.current = null;
+        this.name = null;
+        const first = initial || Object.keys(animations)[0];
+        if (first) this.play(first);
+    }
+
+    // Replaying the animation that is already running is a no-op, so calling
+    // `play("walk")` every frame while a key is held does not reset it to frame
+    // zero forever — the mistake that makes a character look frozen mid-stride.
+    play(name, { restart = false } = {}) {
+        if (this.name === name && !restart) return this;
+        const animation = this.animations[name];
+        if (!animation) return this;
+        this.name = name;
+        this.current = animation.reset();
+        this.sprite.setFrame(animation.frame);
+        return this;
+    }
+
+    update(dt) {
+        if (this.current && this.current.update(dt)) {
+            this.sprite.setFrame(this.current.frame);
+        }
+        return this;
+    }
+}
+
 // ===== components/render/shaders.js =====
 // The shader programs, compiled once per WebGL context and shared.
 //
@@ -2169,1207 +3087,253 @@ function getProgramInfo(gl, kind = PROGRAM_COLOR) {
     return byKind.get(kind);
 }
 
-// ===== components/shapes/shape.js =====
-// Base class for every 2D shape the engine can draw.
+// ===== components/render/index.js =====
+// Barrel for the render layer.
+
+// ===== components/math/random.js =====
+// A seeded random number generator.
 //
-// Shapes share the draw pipeline — the same matrices, the same transform, the
-// same loop — and differ in three things a subclass can override:
+// `Math.random()` cannot be seeded, and a game that cannot be seeded cannot be
+// replayed, cannot be tested and cannot hand a friend the same level. So this
+// is a plain linear congruential generator — the same constants as Numerical
+// Recipes — which had been copied by hand into five different files before it
+// lived here.
 //
-//   getVertices()   the local-space geometry
-//   drawMode        TRIANGLES, TRIANGLE_STRIP, TRIANGLE_FAN…
-//   program         which shader to use (see components/render/shaders.js)
+//     const random = createRandom(20260806);
+//     random();                 // 0 ≤ n < 1
+//     randomInt(random, 1, 6);  // un dado
 //
-// Anything needing extra vertex data (a sprite's texture coordinates) adds it
-// in `initBuffers` and binds it in `bindAttributes`, without touching the
-// matrix maths. See components/shapes/sprite.js for the one that does.
+// It is not cryptographically anything. It is fast, deterministic and short,
+// which is what a level generator wants.
 
+const MULTIPLIER = 1664525;
+const INCREMENT = 1013904223;
+const MODULUS = 4294967296; // 2³²
 
-// Used when draw() is called without a camera: pan 0, zoom 1 (world == screen).
-const IDENTITY_CAMERA = { x: 0, y: 0, zoom: 1 };
-
-class Shape {
-    constructor(context) {
-        this.context = context;
-
-        // Transform, in world space. Position/scale are 2D; depth is how far the
-        // shape sits from the perspective camera along -Z.
-        this.position = { x: 0, y: 0 };
-        this.rotation = 0; // degrees, counter-clockwise
-        this.scale = { x: 1, y: 1 };
-        this.depth = -DEFAULT_DEPTH;
-
-        this.color = { red: 1, green: 1, blue: 1, alpha: 1 };
-
-        // Subclasses override this (e.g. TRIANGLE_STRIP, TRIANGLE_FAN, TRIANGLES).
-        this.drawMode = context.TRIANGLES;
-
-        // How the physics layer should treat this shape: "polygon" (convex
-        // outline from getColliderVertices) or "circle" (uses this.radius).
-        this.colliderShape = "polygon";
-
-        // Which shader program to draw with. Subclasses override it; the
-        // default is flat per-vertex colour.
-        this.program = PROGRAM_COLOR;
-
-        // Draw order. Lower layers are drawn first, so higher ones land on top;
-        // within a layer, insertion order decides. Without this the only way to
-        // put a background behind a player is to add it first and never change
-        // your mind.
-        this.layer = 0;
-
-        this.programInfo = null;
-        this.buffers = null;
-        this.vCount = 0;
-
-        // Radius of the shape's own geometry, in local units. Filled in by
-        // initBuffers, and used by the engine to skip shapes that cannot be on
-        // screen. Null means "no idea" — such a shape is always drawn.
-        this._localRadius = null;
-    }
-
-    // A circle around the shape that is guaranteed to contain it, in world
-    // units. Conservative on purpose: culling something that *is* visible shows
-    // up as things popping in at the edge of the screen, which is far worse
-    // than drawing a few extra quads.
-    get cullRadius() {
-        if (this._localRadius === null) return null;
-        return this._localRadius * Math.max(Math.abs(this.scale.x), Math.abs(this.scale.y));
-    }
-
-    // Must be implemented by subclasses. Returns a flat array of local-space
-    // vertex positions: [x0, y0, x1, y1, ...].
-    getVertices() {
-        throw new Error(`${this.constructor.name} must implement getVertices()`);
-    }
-
-    // Convex outline used for collision, as an ordered list of local-space
-    // points [{x, y}, ...] (no fan center, no duplicated closing vertex).
-    // Polygon shapes override this; circle shapes set colliderShape = "circle".
-    getColliderVertices() {
-        throw new Error(`${this.constructor.name} must implement getColliderVertices()`);
-    }
-
-    // Uploads geometry to the GPU. Call once, after configuring the shape.
-    init() {
-        this.programInfo = getProgramInfo(this.context, this.program);
-        this.initBuffers();
-        return this;
-    }
-
-    initBuffers() {
-        const gl = this.context;
-
-        const vertices = this.getVertices();
-        this.vCount = vertices.length / 2;
-
-        // The furthest vertex from the origin. Computed here because the
-        // geometry is already in hand — asking for it again later would mean
-        // rebuilding it.
-        let furthest = 0;
-        for (let i = 0; i < vertices.length; i += 2) {
-            const distance = vertices[i] * vertices[i] + vertices[i + 1] * vertices[i + 1];
-            if (distance > furthest) furthest = distance;
-        }
-        this._localRadius = Math.sqrt(furthest);
-
-        const positionBuffer = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
-
-        const colorBuffer = gl.createBuffer();
-
-        this.buffers = { position: positionBuffer, color: colorBuffer };
-
-        this.uploadColors();
-    }
-
-    // (Re)fills the per-vertex color buffer with the current color. Safe to call
-    // after init() to recolor a shape without rebuilding its geometry.
-    uploadColors() {
-        const gl = this.context;
-        const { red, green, blue, alpha } = this.color;
-
-        const colors = [];
-        for (let i = 0; i < this.vCount; i++) {
-            colors.push(red, green, blue, alpha);
-        }
-
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.color);
-        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
-    }
-
-    // `camera` is an optional { x, y, zoom }; omitted (or the identity default)
-    // means "no camera", i.e. world space maps straight to the screen as before.
-    draw(camera = IDENTITY_CAMERA) {
-        const gl = this.context;
-
-        // View transform: pan by the camera center, then zoom about it. Depth is
-        // constant, so scaling the world coordinates scales the screen linearly.
-        const zoom = camera.zoom ?? 1;
-
-        // Both matrices come from shared, reused storage — see the note in
-        // components/render/projection.js on why that is safe and why it
-        // matters at a thousand-odd shapes a frame.
-        const projectionMatrix = projectionFor(gl.canvas);
-        const modelViewMatrix = modelViewFor({
-            x: (this.position.x - (camera.x ?? 0)) * zoom,
-            y: (this.position.y - (camera.y ?? 0)) * zoom,
-            depth: this.depth,
-            rotationDegrees: this.rotation,
-            scaleX: this.scale.x * zoom,
-            scaleY: this.scale.y * zoom,
-        });
-
-        const { uniformLocations, program } = this.programInfo;
-
-        gl.useProgram(program);
-        gl.uniformMatrix4fv(uniformLocations.projectionMatrix, false, projectionMatrix);
-        gl.uniformMatrix4fv(uniformLocations.modelViewMatrix, false, modelViewMatrix);
-
-        const enabled = this.bindAttributes(gl);
-        gl.drawArrays(this.drawMode, 0, this.vCount);
-
-        // Attribute arrays are global state, not part of the program: leaving
-        // one enabled makes the *next* shape read a buffer its shader never
-        // asked for. Now that there is more than one program, they have to be
-        // turned off again.
-        for (const location of enabled) gl.disableVertexAttribArray(location);
-    }
-
-    // Binds this shape's vertex data and returns the attribute locations it
-    // switched on, so draw() can switch them back off.
-    bindAttributes(gl) {
-        const { attribLocations } = this.programInfo;
-
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.position);
-        gl.vertexAttribPointer(attribLocations.vertexPosition, 2, gl.FLOAT, false, 0, 0);
-        gl.enableVertexAttribArray(attribLocations.vertexPosition);
-
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.color);
-        gl.vertexAttribPointer(attribLocations.vertexColor, 4, gl.FLOAT, false, 0, 0);
-        gl.enableVertexAttribArray(attribLocations.vertexColor);
-
-        return [attribLocations.vertexPosition, attribLocations.vertexColor];
-    }
-
-    // --- Fluent configuration helpers (chainable) ---
-
-    setColor({ red, green, blue, alpha } = {}) {
-        this.color = {
-            red: red ?? 0.0,
-            green: green ?? 0.0,
-            blue: blue ?? 0.0,
-            alpha: alpha ?? 1.0,
-        };
-        if (this.buffers) {
-            this.uploadColors();
-        }
-        return this;
-    }
-
-    setPosition({ x, y } = {}) {
-        this.position = { x: x ?? this.position.x, y: y ?? this.position.y };
-        return this;
-    }
-
-    setScale({ x, y } = {}) {
-        this.scale = { x: x ?? 1.0, y: y ?? 1.0 };
-        return this;
-    }
-
-    setRotation(degrees) {
-        this.rotation = degrees;
-        return this;
-    }
-
-    setDepth(depth) {
-        this.depth = depth;
-        return this;
-    }
-
-    // Draw order. The engine re-sorts when this changes, so it is safe to call
-    // at any time — not just before the shape is added.
-    setLayer(layer) {
-        if (layer !== this.layer) {
-            this.layer = layer;
-            if (this._onLayerChange) this._onLayerChange(this);
-        }
-        return this;
-    }
+// Returns a function that yields the next number in [0, 1) each time it is
+// called. Two generators built from the same seed produce the same sequence.
+function createRandom(seed = 1) {
+    let state = seed >>> 0;
+    return () => ((state = (state * MULTIPLIER + INCREMENT) >>> 0) / MODULUS);
 }
 
-// ===== components/shapes/rectangle.js =====
-// An axis-aligned rectangle centered on its origin.
-class Rectangle extends Shape {
-    constructor(context, { width = 1, height = 1 } = {}) {
-        super(context);
-        this.width = width;
-        this.height = height;
-        this.drawMode = context.TRIANGLE_STRIP;
-    }
-
-    getVertices() {
-        const hw = this.width / 2;
-        const hh = this.height / 2;
-
-        // Order matters for TRIANGLE_STRIP: two triangles sharing an edge.
-        return [
-             hw,  hh,
-            -hw,  hh,
-             hw, -hh,
-            -hw, -hh,
-        ];
-    }
-
-    getColliderVertices() {
-        const hw = this.width / 2;
-        const hh = this.height / 2;
-        // Counter-clockwise outline.
-        return [
-            { x: -hw, y: -hh },
-            { x:  hw, y: -hh },
-            { x:  hw, y:  hh },
-            { x: -hw, y:  hh },
-        ];
-    }
+// An integer in [min, max], both ends included — which is what people mean by
+// "a number between 1 and 6", and not what a naive floor() gives you.
+function randomInt(random, min, max) {
+    return min + Math.floor(random() * (max - min + 1));
 }
 
-// ===== components/shapes/square.js =====
-// A square is just a rectangle with equal sides.
-class Square extends Rectangle {
-    constructor(context, { size = 1 } = {}) {
-        super(context, { width: size, height: size });
-    }
+function randomRange(random, min, max) {
+    return min + random() * (max - min);
 }
 
-// ===== components/shapes/triangle.js =====
-// An isosceles triangle centered on its origin, apex pointing up.
-class Triangle extends Shape {
-    constructor(context, { width = 1, height = 1 } = {}) {
-        super(context);
-        this.width = width;
-        this.height = height;
-        this.drawMode = context.TRIANGLES;
-    }
-
-    getVertices() {
-        const hw = this.width / 2;
-        const hh = this.height / 2;
-
-        return [
-              0,  hh, // apex
-            -hw, -hh, // bottom-left
-             hw, -hh, // bottom-right
-        ];
-    }
-
-    getColliderVertices() {
-        const hw = this.width / 2;
-        const hh = this.height / 2;
-        // Counter-clockwise outline.
-        return [
-            { x: -hw, y: -hh },
-            { x:  hw, y: -hh },
-            { x:   0, y:  hh },
-        ];
-    }
-}
-
-// ===== components/shapes/polygon.js =====
-// A filled convex polygon defined by an explicit list of points, e.g.
-//   new Polygon(gl, { points: [ {x:0,y:0.6}, {x:0.6,y:0}, {x:-0.6,y:0} ] })
+// ===== demos3d/sprites3d.js =====
+// Textures on solids, and the billboard trick.
 //
-// Rendered as a TRIANGLE_FAN, which correctly fills any convex polygon. For
-// concave polygons a real triangulation (ear clipping) would be needed.
-class Polygon extends Shape {
-    constructor(context, { points = [] } = {}) {
-        super(context);
-        this.points = points;
-        this.drawMode = context.TRIANGLE_FAN;
-    }
-
-    getVertices() {
-        const vertices = [];
-        for (const p of this.points) {
-            vertices.push(p.x, p.y);
-        }
-        return vertices;
-    }
-
-    getColliderVertices() {
-        return this.points.map((p) => ({ x: p.x, y: p.y }));
-    }
-}
-
-// A regular N-sided polygon (equilateral triangle, pentagon, hexagon, ...).
-// Built as a TRIANGLE_FAN around a center vertex so any side count fills solidly.
-class RegularPolygon extends Shape {
-    constructor(context, { sides = 6, radius = 0.5 } = {}) {
-        super(context);
-        this.sides = Math.max(3, sides);
-        this.radius = radius;
-        this.drawMode = context.TRIANGLE_FAN;
-    }
-
-    getVertices() {
-        const vertices = [0, 0]; // center of the fan
-
-        // Start at the top (-90°) and go around once, repeating the first rim
-        // point at the end to close the shape.
-        for (let i = 0; i <= this.sides; i++) {
-            const angle = (i / this.sides) * Math.PI * 2 - Math.PI / 2;
-            vertices.push(Math.cos(angle) * this.radius, Math.sin(angle) * this.radius);
-        }
-
-        return vertices;
-    }
-
-    getColliderVertices() {
-        const points = [];
-        // The rim points only (no center, no duplicated closing vertex).
-        for (let i = 0; i < this.sides; i++) {
-            const angle = (i / this.sides) * Math.PI * 2 - Math.PI / 2;
-            points.push({ x: Math.cos(angle) * this.radius, y: Math.sin(angle) * this.radius });
-        }
-        return points;
-    }
-}
-
-// ===== components/shapes/circle.js =====
-// A circle is a regular polygon with enough sides to look round. Increase
-// `segments` for a smoother edge on large circles.
-class Circle extends RegularPolygon {
-    constructor(context, { radius = 0.5, segments = 48 } = {}) {
-        super(context, { sides: segments, radius });
-        // Treated as a true circle by the physics layer (uses this.radius),
-        // not as a 48-gon.
-        this.colliderShape = "circle";
-    }
-}
-
-// ===== components/shapes/sprite.js =====
-// A textured quad: the shape you make a game out of.
+// The 2D sprites page was about drawing part of a texture on a flat quad. Here
+// the same texture wraps a box, tiles across a floor and — the bit that only
+// exists in 3D — stands up as a **billboard**: a flat quad that turns to face
+// the camera every frame, so it looks like a solid object from any angle while
+// costing two triangles.
 //
-// A Sprite is a rectangle that draws part of a Texture instead of a flat
-// colour. "Part of" is the important bit — real games keep every frame of every
-// animation in one image (an *atlas*, or a sprite sheet) and draw sub-rectangles
-// of it, because switching textures is the expensive thing in a renderer.
-// `setFrame({ x, y, width, height })` takes that rectangle **in pixels**, which
-// is how a sheet is actually measured, and converts it to the 0..1 texture
-// coordinates the GPU wants.
-//
-//     const sheet = Texture.fromImage(gl, "hero.png");
-//     const hero = new Sprite(gl, { texture: sheet, frame: { x: 0, y: 0, width: 16, height: 16 } })
-//         .setPosition({ x: 0, y: 0 })
-//         .init();
-//
-// Size: give `width`/`height` in world units, or let it derive them from the
-// frame's pixel size divided by `pixelsPerUnit`. The default of 32 means a
-// 32×32 frame is one world unit — pick whatever suits your art and stay
-// consistent, because that ratio *is* your game's scale.
-//
-// The colour set by `setColor` acts as a **tint**: the shader multiplies the
-// texel by it, so white draws the image untouched, a colour tints it, and
-// alpha < 1 fades it. That is how you flash a sprite red on a hit without a
-// second image.
+// Billboards are how grass, particles and distant trees are drawn in almost
+// every 3D game, and the giveaway is exactly what this page lets you do: turn
+// the billboard off and walk around, and the "tree" reveals itself as a sheet
+// of paper.
 
 
-class Sprite extends Shape {
-    constructor(context, {
-        texture = null,
-        frame = null,              // { x, y, width, height } in texture pixels
-        width = null,              // world units; derived from the frame if null
-        height = null,
-        pixelsPerUnit = 32,
-        flipX = false,
-        flipY = false,
-    } = {}) {
-        super(context);
-        this.program = PROGRAM_TEXTURE;
-        this.drawMode = context.TRIANGLE_STRIP;
 
-        this.texture = texture;
-        this.frame = frame;
-        this.pixelsPerUnit = pixelsPerUnit;
-        this.flipX = flipX;
-        this.flipY = flipY;
-        this._width = width;
-        this._height = height;
 
-        // A sprite is white by default so the texture comes through unchanged —
-        // the inherited default would be opaque black, which multiplies the
-        // image away to nothing.
-        this.color = { red: 1, green: 1, blue: 1, alpha: 1 };
 
-        // A texture that is still loading has no size yet, so a sprite sized
-        // from its frame has to rebuild once the image lands.
-        if (texture && !texture.ready) {
-            texture.onLoad = () => { if (this.buffers) this.refresh(); };
-        }
-    }
 
-    // Size in world units, derived from the frame (or the whole texture) when
-    // not given explicitly.
-    get width() {
-        if (this._width !== null) return this._width;
-        const px = this.frame ? this.frame.width : (this.texture?.width ?? this.pixelsPerUnit);
-        return px / this.pixelsPerUnit;
-    }
-
-    get height() {
-        if (this._height !== null) return this._height;
-        const px = this.frame ? this.frame.height : (this.texture?.height ?? this.pixelsPerUnit);
-        return px / this.pixelsPerUnit;
-    }
-
-    // TRIANGLE_STRIP order: top-left, bottom-left, top-right, bottom-right.
-    getVertices() {
-        const hw = this.width / 2;
-        const hh = this.height / 2;
-        return [-hw, hh, -hw, -hh, hw, hh, hw, -hh];
-    }
-
-    getColliderVertices() {
-        const hw = this.width / 2;
-        const hh = this.height / 2;
-        // Counter-clockwise, which is what the collision and ballistics code
-        // assumes when it derives outward normals.
-        return [
-            { x: -hw, y: -hh },
-            { x: hw, y: -hh },
-            { x: hw, y: hh },
-            { x: -hw, y: hh },
-        ];
-    }
-
-    // The frame's pixel rectangle as 0..1 texture coordinates. The texture was
-    // uploaded Y-flipped, so a frame's `y` counts from the *top* of the image —
-    // the way a sprite sheet is laid out and the way anyone reading it counts.
-    getTextureCoords() {
-        const texture = this.texture;
-        const tw = texture?.width || 1;
-        const th = texture?.height || 1;
-        const frame = this.frame || { x: 0, y: 0, width: tw, height: th };
-
-        let u0 = frame.x / tw;
-        let u1 = (frame.x + frame.width) / tw;
-        let v1 = 1 - frame.y / th;
-        let v0 = 1 - (frame.y + frame.height) / th;
-
-        if (this.flipX) [u0, u1] = [u1, u0];
-        if (this.flipY) [v0, v1] = [v1, v0];
-
-        // Same order as getVertices().
-        return [u0, v1, u0, v0, u1, v1, u1, v0];
-    }
-
-    initBuffers() {
-        super.initBuffers();
-        const gl = this.context;
-        this.buffers.texCoord = gl.createBuffer();
-        this.uploadTextureCoords();
-    }
-
-    uploadTextureCoords() {
-        const gl = this.context;
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.texCoord);
-        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(this.getTextureCoords()), gl.DYNAMIC_DRAW);
-        return this;
-    }
-
-    // Rebuilds geometry and texture coordinates. Called for you when the frame,
-    // the texture or a flip changes — animation goes through here every frame it
-    // advances, which is why the buffers are DYNAMIC_DRAW.
-    refresh() {
-        if (!this.buffers) return this;
-        const gl = this.context;
-        const vertices = this.getVertices();
-        this.vCount = vertices.length / 2;
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.position);
-        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.DYNAMIC_DRAW);
-        this.uploadColors();
-        this.uploadTextureCoords();
-        return this;
-    }
-
-    bindAttributes(gl) {
-        const enabled = super.bindAttributes(gl);
-        const { attribLocations, uniformLocations } = this.programInfo;
-
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.texCoord);
-        gl.vertexAttribPointer(attribLocations.textureCoord, 2, gl.FLOAT, false, 0, 0);
-        gl.enableVertexAttribArray(attribLocations.textureCoord);
-        enabled.push(attribLocations.textureCoord);
-
-        // Unit 0 for everything: one texture per sprite is the whole point of
-        // an atlas.
-        if (this.texture) this.texture.bind(0);
-        gl.uniform1i(uniformLocations.sampler, 0);
-
-        return enabled;
-    }
-
-    // --- Fluent configuration (chainable) --------------------------------
-
-    setTexture(texture, { frame = null } = {}) {
-        this.texture = texture;
-        if (frame) this.frame = frame;
-        if (texture && !texture.ready) texture.onLoad = () => { if (this.buffers) this.refresh(); };
-        return this.refresh();
-    }
-
-    // The sub-rectangle to draw, in texture pixels. Passing a frame of a
-    // different size resizes the sprite too, unless width/height were pinned.
-    setFrame(frame) {
-        const resized = !this.frame || frame.width !== this.frame.width || frame.height !== this.frame.height;
-        this.frame = frame;
-        if (!this.buffers) return this;
-        // Only the vertices need rebuilding when the frame *size* changes;
-        // otherwise the texture coordinates are enough, which is the common case
-        // for an animation stepping through same-sized frames.
-        return resized ? this.refresh() : this.uploadTextureCoords();
-    }
-
-    setSize({ width, height } = {}) {
-        if (width !== undefined) this._width = width;
-        if (height !== undefined) this._height = height;
-        return this.refresh();
-    }
-
-    // Mirrors the image without touching the transform — which is what you want
-    // for a character turning around, because rotating would flip it over.
-    setFlip({ x = this.flipX, y = this.flipY } = {}) {
-        if (x === this.flipX && y === this.flipY) return this;
-        this.flipX = x;
-        this.flipY = y;
-        return this.buffers ? this.uploadTextureCoords() : this;
-    }
-
-    // Alias for setColor, because on a sprite that is what it does.
-    setTint(color) {
-        return this.setColor(color);
-    }
-}
-
-// ===== components/shapes/index.js =====
-// Convenience barrel for every shape primitive the engine ships with.
-
-// ===== components/weapons/ballistics.js =====
-// Ballistics: where bullets meet armor.
-//
-// Bullets are treated as swept segments (raycast from their previous to their
-// current position), not as physics bodies. That avoids fast bullets tunnelling
-// through thin armor and gives us the exact hit point and, crucially, the
-// surface normal — which is what the angle-based penetration model needs.
-//
-// Penetration model (arcade, à la World of Tanks):
-//   effectiveArmor = nominalArmor / cos(theta)
-//   theta = angle between the shell's path and the surface normal
-//   - ricochet if theta >= ricochetAngle (too steep, shell skips off)
-//   - penetration if shellPenetration >= effectiveArmor
-//   - block otherwise (shell stops, no damage)
-
-// Transforms a shape's local collider outline into world space. Mirrors the
-// transform used by Shape.draw and the physics layer (rotation is CCW degrees).
-// Named apart from the physics layer's equivalent: both end up as globals in the
-// standalone build, and one silently overwriting the other is a trap.
-function hullOutline(shape) {
-    const angle = (shape.rotation * Math.PI) / 180;
-    const cos = Math.cos(angle);
-    const sin = Math.sin(angle);
-    return shape.getColliderVertices().map((p) => {
-        const x = p.x * shape.scale.x;
-        const y = p.y * shape.scale.y;
-        return {
-            x: shape.position.x + x * cos - y * sin,
-            y: shape.position.y + x * sin + y * cos,
-        };
-    });
-}
-
-// Intersection of segment A->B with segment P->Q. Returns { t, point } where t
-// is the position along A->B in [0, 1], or null when they do not cross.
-function segmentIntersect(a, b, p, q) {
-    const r = { x: b.x - a.x, y: b.y - a.y };
-    const s = { x: q.x - p.x, y: q.y - p.y };
-    const denom = r.x * s.y - r.y * s.x;
-    if (Math.abs(denom) < 1e-9) return null; // parallel
-
-    const t = ((p.x - a.x) * s.y - (p.y - a.y) * s.x) / denom;
-    const u = ((p.x - a.x) * r.y - (p.y - a.y) * r.x) / denom;
-    if (t < 0 || t > 1 || u < 0 || u > 1) return null;
-
-    return { t, point: { x: a.x + r.x * t, y: a.y + r.y * t } };
-}
-
-// Casts the segment a->b against a polygon shape. Returns the first face hit as
-// { point, normal, edgeIndex, t } (normal points outward), or null.
-function raycastShape(a, b, shape) {
-    const poly = hullOutline(shape);
-    let best = null;
-
-    for (let i = 0; i < poly.length; i++) {
-        const p = poly[i];
-        const q = poly[(i + 1) % poly.length];
-        const hit = segmentIntersect(a, b, p, q);
-        if (hit && (!best || hit.t < best.t)) {
-            const dx = q.x - p.x;
-            const dy = q.y - p.y;
-            const len = Math.hypot(dx, dy) || 1;
-            // Outward normal for a counter-clockwise winding.
-            const normal = { x: dy / len, y: -dx / len };
-            best = { point: hit.point, normal, edgeIndex: i, t: hit.t };
-        }
-    }
-    return best;
-}
-
-// Decides what happens when a shell of `penetration` mm hits `armor` mm of plate
-// whose outward `normal` is hit head-on by a shell travelling along `direction`.
-// `normalizes` controls the slope model: true (solid shot) makes sloped armor
-// count more (effective = nominal / cosθ); false (shaped charge / HE) defeats the
-// nominal thickness regardless of slope.
-// Returns { result: "penetration" | "ricochet" | "block", angle, effectiveArmor }.
-function evaluateImpact({ direction, normal, penetration, armor, ricochetAngle = 70, normalizes = true }) {
-    // cos of the impact angle measured from the surface normal.
-    const cos = -(direction.x * normal.x + direction.y * normal.y);
-    const angle = (Math.acos(Math.max(-1, Math.min(1, cos))) * 180) / Math.PI;
-
-    if (cos <= 1e-4) {
-        // Grazing or hitting the inside of a face — treat as a ricochet.
-        return { result: "ricochet", angle, effectiveArmor: Infinity };
-    }
-
-    const effectiveArmor = normalizes ? armor / cos : armor;
-    if (angle >= ricochetAngle) {
-        return { result: "ricochet", angle, effectiveArmor };
-    }
-    if (penetration >= effectiveArmor) {
-        return { result: "penetration", angle, effectiveArmor };
-    }
-    return { result: "block", angle, effectiveArmor };
-}
-
-// Reflects a velocity vector off a surface with the given unit normal.
-function reflect(velocity, normal) {
-    const dot = velocity.x * normal.x + velocity.y * normal.y;
-    return { x: velocity.x - 2 * dot * normal.x, y: velocity.y - 2 * dot * normal.y };
-}
-
-// ===== components/weapons/projectiles.js =====
-// Basic projectile (shell) types and the damage scheme that turns a ballistics
-// result into hit points.
-//
-// Every type bends the shared penetration model (see ballistics.js) and decides
-// how a hit becomes damage. The fields:
-//
-//   id / name         identifier and readable Spanish label
-//   penMultiplier     scales the gun's nominal penetration (mm)
-//   damageMultiplier  scales the gun's nominal damage on a clean penetration
-//   ricochetAngle     impact angle from the surface normal beyond which the
-//                     shell skips off (90 = never ricochets)
-//   normalizes        true  -> sloped armor counts more (effective = nominal/cosθ)
-//                     false -> the shell defeats the nominal thickness regardless
-//                              of slope (shaped charge / surface burst)
-//   splash            fraction of damage that still leaks through on a non-pen,
-//                     i.e. fragments spraying past un-breached plate (HE)
-//
-// The four staples of arcade tank games:
-//   AP    Perforante     — the all-rounder: solid shot, slope matters, skips off
-//                          steep plates.
-//   APCR  Subcalibre     — more penetration, less damage, ricochets sooner.
-//   HEAT  Carga hueca    — shaped charge: ignores slope, never ricochets, steady
-//                          damage; the answer to angled armor.
-//   HE    Alto explosivo — little penetration but a big punch, and even a non-pen
-//                          chips the target with fragments.
-
-const PROJECTILES = {
-    AP:   { id: "AP",   name: "Perforante",     penMultiplier: 1.0,  damageMultiplier: 1.0, ricochetAngle: 70, normalizes: true,  splash: 0 },
-    APCR: { id: "APCR", name: "Subcalibre",     penMultiplier: 1.4,  damageMultiplier: 0.7, ricochetAngle: 68, normalizes: true,  splash: 0 },
-    HEAT: { id: "HEAT", name: "Carga hueca",    penMultiplier: 1.2,  damageMultiplier: 1.1, ricochetAngle: 90, normalizes: false, splash: 0 },
-    HE:   { id: "HE",   name: "Alto explosivo", penMultiplier: 0.35, damageMultiplier: 1.8, ricochetAngle: 90, normalizes: false, splash: 0.25 },
-};
-
-// Default type when a weapon / bullet does not name one.
-const DEFAULT_PROJECTILE = PROJECTILES.AP;
-
-// Resolves a shot end to end: runs the penetration model tuned for the shell
-// `type`, then applies its damage scheme. Returns the ballistics result extended
-// with `damage` (hit points actually dealt to the plate):
-//   penetration -> full damage
-//   block       -> splash * damage (HE fragments; 0 for solid shot)
-//   ricochet    -> no damage
-function resolveShot({ type = DEFAULT_PROJECTILE, penetration, damage, direction, normal, armor }) {
-    const impact = evaluateImpact({
-        direction,
-        normal,
-        penetration,
-        armor,
-        ricochetAngle: type.ricochetAngle,
-        normalizes: type.normalizes,
-    });
-
-    let dealt = 0;
-    if (impact.result === "penetration") {
-        dealt = damage;
-    } else if (impact.result === "block") {
-        dealt = Math.round(damage * type.splash);
-    }
-
-    return { ...impact, type, damage: dealt };
-}
-
-// ===== components/weapons/bullet.js =====
-// A shell in flight. It stores its previous position so the ballistics layer can
-// raycast the segment travelled during the last frame (continuous collision).
-
-class Bullet {
-    constructor({ x, y, vx, vy, penetration, damage = 100, owner = null, life = 3, type = DEFAULT_PROJECTILE }) {
-        this.position = { x, y };
-        this.prev = { x, y };
-        this.velocity = { x: vx, y: vy };
-        this.penetration = penetration;
-        this.damage = damage;
-        this.type = type; // projectile type (AP / APCR / HEAT / HE), drives the damage scheme
-        this.owner = owner;
-        this.alive = true;
-        this.life = life; // seconds before it despawns
-    }
-
-    // Unit vector of travel.
-    get direction() {
-        const speed = Math.hypot(this.velocity.x, this.velocity.y) || 1;
-        return { x: this.velocity.x / speed, y: this.velocity.y / speed };
-    }
-
-    get speed() {
-        return Math.hypot(this.velocity.x, this.velocity.y);
-    }
-
-    update(dt) {
-        this.prev.x = this.position.x;
-        this.prev.y = this.position.y;
-        this.position.x += this.velocity.x * dt;
-        this.position.y += this.velocity.y * dt;
-        this.life -= dt;
-        if (this.life <= 0) this.alive = false;
-    }
-}
-
-// ===== components/weapons/weapon.js =====
-// A gun that fires shells. Tracks its own reload cooldown; call update(dt) each
-// frame and fire(...) to shoot when ready. `penetration` and `damage` are the
-// gun's nominal values; each projectile type scales them by its own multipliers.
-
-class Weapon {
-    constructor({ penetration = 100, muzzleSpeed = 12, reload = 1.0, damage = 34, type = DEFAULT_PROJECTILE } = {}) {
-        this.penetration = penetration; // mm the shell can defeat head-on
-        this.muzzleSpeed = muzzleSpeed; // world units / second
-        this.reload = reload;           // seconds between shots
-        this.damage = damage;           // hit points on penetration
-        this.type = type;               // loaded projectile type (AP / APCR / HEAT / HE)
-        this.cooldown = 0;
-    }
-
-    update(dt) {
-        if (this.cooldown > 0) this.cooldown -= dt;
-    }
-
-    get ready() {
-        return this.cooldown <= 0;
-    }
-
-    // Progress of the current reload in [0, 1] (1 = ready).
-    get reloadProgress() {
-        return this.reload <= 0 ? 1 : Math.min(1, 1 - this.cooldown / this.reload);
-    }
-
-    // Fires a shell from (x, y) toward (dirX, dirY) using projectile `type`
-    // (defaults to the loaded one). The type's multipliers scale the gun's
-    // nominal penetration and damage. Returns a Bullet, or null if reloading.
-    fire(x, y, dirX, dirY, owner = null, type = this.type) {
-        if (!this.ready) return null;
-        this.cooldown = this.reload;
-        const len = Math.hypot(dirX, dirY) || 1;
-        return new Bullet({
-            x,
-            y,
-            vx: (dirX / len) * this.muzzleSpeed,
-            vy: (dirY / len) * this.muzzleSpeed,
-            penetration: this.penetration * type.penMultiplier,
-            damage: this.damage * type.damageMultiplier,
-            type,
-            owner,
-        });
-    }
-}
-
-// ===== components/weapons/armor.js =====
-// Per-face armor for a target shape. Each collider edge (in getColliderVertices
-// order) has a nominal armor thickness in mm and a readable face name. The armor
-// travels with the shape's rotation, so angling the hull changes which value a
-// shell meets — exactly what drives the penetration model.
-
-class Armor {
-    // faces: array aligned to the shape's collider edges, each { armor, name }.
-    constructor(shape, faces, { hp = 100 } = {}) {
-        this.shape = shape;
-        this.faces = faces;
-        this.maxHp = hp;
-        this.hp = hp;
-        this.alive = true;
-    }
-
-    faceForEdge(index) {
-        return this.faces[index];
-    }
-
-    takeDamage(amount) {
-        this.hp = Math.max(0, this.hp - amount);
-        if (this.hp === 0) this.alive = false;
-        return this.hp;
-    }
-
-    // Builds per-face armor for any convex hull by looking at where each face
-    // actually points in the shape's local space: faces within `frontArc` of
-    // local +Y (forward) are frontal, those as far from it are the rear, and the
-    // rest are sides. Works for a rectangle, a wedge, a hexagon — anything with
-    // a counter-clockwise collider outline, which is what the raycast assumes.
-    static forHull(shape, { front, side, rear, hp = 100, frontArc = 75 } = {}) {
-        const points = shape.getColliderVertices();
-        const faces = points.map((p, i) => {
-            const q = points[(i + 1) % points.length];
-            const dx = q.x - p.x;
-            const dy = q.y - p.y;
-            const len = Math.hypot(dx, dy) || 1;
-            // Outward normal of a CCW edge is (dy, -dx); we only need its Y to
-            // know how far the face is turned away from "forward".
-            const ny = -dx / len;
-            const angle = (Math.acos(Math.max(-1, Math.min(1, ny))) * 180) / Math.PI;
-            if (angle <= frontArc) return { armor: front, name: "Frontal" };
-            if (angle >= 180 - frontArc) return { armor: rear, name: "Trasera" };
-            return { armor: side, name: "Lateral" };
-        });
-        return new Armor(shape, faces, { hp });
-    }
-
-    // Convenience for a rectangular hull. `frontEdge` is the collider edge that
-    // faces the enemy; its opposite becomes the rear, the other two the sides.
-    static rectangle(shape, { front, side, rear, frontEdge = 3, hp = 100 } = {}) {
-        const faces = [];
-        for (let i = 0; i < 4; i++) faces.push({ armor: side, name: "Lateral" });
-        faces[frontEdge % 4] = { armor: front, name: "Frontal" };
-        faces[(frontEdge + 2) % 4] = { armor: rear, name: "Trasera" };
-        return new Armor(shape, faces, { hp });
-    }
-}
-
-// ===== components/weapons/index.js =====
-// Barrel for the weapons / ballistics layer.
-
-// ===== weapons/tanksDemo.js =====
-// Arcade tanks demo: a cannon on the left fires shells at a target hull on the
-// right. Rotate the hull to angle its armor and watch the shell PENETRATE,
-// RICOCHET or fail to penetrate — driven by the ballistics penetration model
-// (effective armor = nominal / cos(angle)).
-
-
-
-
-const MUZZLE = { x: -2.25, y: 0 };
-const CULL = { x: 4.2, y: 3.0 };
-const HULL_TURN = 90; // degrees per second while an arrow is held
-
-const RESULT_INFO = {
-    penetration: { label: "PENETRA", color: [0.2, 0.9, 0.35] },
-    ricochet: { label: "REBOTE", color: [0.95, 0.85, 0.2] },
-    block: { label: "NO PENETRA", color: [0.9, 0.25, 0.2] },
-    splash: { label: "ESQUIRLAS", color: [0.95, 0.55, 0.2] },
-};
-
-// Selectable ammo, in the order shown in the panel.
-const AMMO = [PROJECTILES.AP, PROJECTILES.APCR, PROJECTILES.HEAT, PROJECTILES.HE];
-
-// Only this page's own chrome: the panel, rows, buttons and readouts come from
-// the framework (components/ui/).
 const STYLES = `
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    button.fire { border-color: #7a2f2f; background: #5a2626; font-weight: 600; }
-    button.fire:hover:not(:disabled) { background: #6d2e2e; }
-    .ammo { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    button.shell { text-align: left; line-height: 1.3; }
-    button.shell.active { border-color: #4a7fb5; background: #2b3a4a; box-shadow: inset 0 0 0 1px #4a7fb5; }
-    button.shell b { display: block; font-size: 13px; }
-    button.shell small { color: #9aa0a6; font-size: 11px; }
-    .row .bar { flex: 1; min-width: 0; }
-    .bar { height: 12px; background: #1b1d21; border-radius: 6px; overflow: hidden; border: 1px solid #3a3f45; }
-    .bar > i { display: block; height: 100%; background: #43c06a; transition: width .12s, background .12s; }
-    #result { font-size: 20px; font-weight: 700; letter-spacing: .04em; }
-    .armorline { font-size: 12px; color: #9aa0a6; margin-top: 8px; }
+    .sheet { display: block; width: 100%; height: auto; image-rendering: pixelated;
+             border-radius: 6px; border: 1px solid #3a3f45; background: #14171b; }
 `;
 
-App.boot({ title: "Cañón vs Blindaje", styles: STYLES, touch: false }, (app) => {
-    const { gl, stage, keyboard } = app;
-    const game = app;
+// A crate texture and a leafy one, drawn rather than loaded so the page stays a
+// single file — the same approach as the 2D pages.
+function crateTexture() {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 64;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#8a6236"; ctx.fillRect(0, 0, 64, 64);
+    ctx.fillStyle = "#6d4c28";
+    for (const [x, y, w, h] of [[0, 0, 64, 6], [0, 58, 64, 6], [0, 0, 6, 64], [58, 0, 6, 64], [0, 29, 64, 6]]) {
+        ctx.fillRect(x, y, w, h);
+    }
+    ctx.strokeStyle = "#5a3f20"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(6, 6); ctx.lineTo(58, 28); ctx.moveTo(58, 6); ctx.lineTo(6, 28); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(6, 35); ctx.lineTo(58, 57); ctx.moveTo(58, 35); ctx.lineTo(6, 57); ctx.stroke();
+    const random = createRandom(99);
+    ctx.fillStyle = "rgba(255,255,255,.06)";
+    for (let i = 0; i < 90; i++) ctx.fillRect(random() * 64, random() * 64, 2, 2);
+    return canvas;
+}
 
-    // --- Scene ---
-    const cannon = new Rectangle(gl, { width: 0.7, height: 0.28 })
-        .setColor({ red: 0.5, green: 0.5, blue: 0.56 }).setPosition({ x: -2.6, y: 0 }).init();
-    game.add(cannon);
+function grassTexture() {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 64;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#2f6b3a"; ctx.fillRect(0, 0, 64, 64);
+    const random = createRandom(7);
+    for (let i = 0; i < 220; i++) {
+        ctx.fillStyle = random() < 0.5 ? "#347342" : "#285c32";
+        ctx.fillRect(Math.floor(random() * 64), Math.floor(random() * 64), 3, 3);
+    }
+    return canvas;
+}
 
-    const tankColor = { red: 0.27, green: 0.55, blue: 0.35 };
-    const tank = new Rectangle(gl, { width: 0.5, height: 2.1 })
-        .setColor(tankColor).setPosition({ x: 1.6, y: 0 }).init();
-    game.add(tank);
+function treeTexture() {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 64;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, 64, 64);
+    ctx.fillStyle = "#4a3320"; ctx.fillRect(28, 34, 8, 30);
+    for (const [x, y, r, c] of [[32, 26, 18, "#1f5c31"], [24, 22, 12, "#2a7a41"], [40, 24, 10, "#256b36"]]) {
+        ctx.fillStyle = c;
+        ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    }
+    return canvas;
+}
 
-    // Front armor is the hull's left face (edge 3), the one facing the cannon.
-    const armor = Armor.rectangle(tank, { front: 120, side: 50, rear: 30, frontEdge: 3, hp: 100 });
+App.boot({ title: "Texturas y billboards 3D", styles: STYLES }, (app) => {
+    const gl = app.gl;
+    const camera = app.use3D({ clearColor: { red: 0.44, green: 0.58, blue: 0.72 } });
+    camera.orbit({ yaw: 24, pitch: 20, distance: 15, target: { x: 0, y: 1, z: 0 } });
 
-    const weapon = new Weapon({ penetration: 150, muzzleSpeed: 10, reload: 0.6, damage: 25 });
+    const crateCanvas = crateTexture();
+    const crate = Texture.fromCanvas(gl, crateCanvas, { smooth: false });
+    const grass = Texture.fromCanvas(gl, grassTexture(), { smooth: false, wrap: true });
+    const tree = Texture.fromCanvas(gl, treeTexture(), { smooth: false });
 
-    const bullets = [];
-    const markers = [];
-    let flash = 0;
-    let angle = 0;
-    let ammo = PROJECTILES.AP; // currently loaded projectile type
+    // The ground tiles the texture instead of stretching one copy over 120
+    // metres, which is what `textureRepeat` is for.
+    app.add(new Mesh(gl, planeGeometry({ width: 120, depth: 120 }), {
+        texture: grass, textureRepeat: { x: 60, y: 60 },
+    }).init());
 
-    // --- Panel ---
-    const fireBtn = button("Disparar", fire, { className: "fire" });
-    const resetBtn = button("Reiniciar", reset);
+    // A stack of textured crates: the same 64×64 image on every face.
+    const crates = [];
+    for (const [x, y, z, size] of [[-3, 0.7, 0, 1.4], [-3, 2.1, 0, 1.4], [-1.4, 0.7, 1.2, 1.4], [-4.4, 0.7, -1.1, 1.4]]) {
+        crates.push(app.add(new Mesh(gl, boxGeometry({ width: size, height: size, depth: size }), { texture: crate })
+            .setPosition({ x, y, z }).init()));
+    }
+    // A textured sphere, to show the UV wrap the sphere builder produces.
+    const globe = app.add(new Mesh(gl, sphereGeometry({ radius: 1.1, segments: 32, rings: 24 }), { texture: crate })
+        .setPosition({ x: 1.8, y: 1.1, z: -1.5 }).init());
 
-    const penCtl = slider("Penetración base", { min: 40, max: 260, step: 5, value: weapon.penetration,
-        apply: (v) => { weapon.penetration = v; refreshAmmo(); } });
+    // --- Billboards ---------------------------------------------------------
+    // Flat quads standing upright. Every frame they are turned to face the
+    // camera, which is the whole trick.
+    const billboards = [];
+    const random = createRandom(20260806);
+    for (let i = 0; i < 14; i++) {
+        const angle = (i / 14) * Math.PI * 2;
+        const distance = randomRange(random, 5, 11);
+        const height = randomRange(random, 1.8, 3);
+        const mesh = app.add(new Mesh(gl, planeGeometry({ width: height * 0.9, depth: height }), { texture: tree })
+            .setPosition({ x: Math.cos(angle) * distance, y: height / 2, z: Math.sin(angle) * distance })
+            // The plane builder lies flat in XZ, so it is stood up once here and
+            // only spun about Y from then on. The sign matters: standing it up
+            // the other way flips the texture's V axis and the tree grows
+            // downwards.
+            .setRotation({ x: -90 })
+            .setDoubleSided(true)
+            .init());
+        billboards.push(mesh);
+    }
 
-    // One button per projectile type; clicking loads it and highlights it.
-    const ammoBtns = AMMO.map((type) =>
-        el("button", {
-            className: "shell",
-            onclick: () => setAmmo(type),
-        }, [
-            el("b", { textContent: type.name }),
-            el("small", { textContent: ammoStats(type) }),
-        ]),
-    );
-    const ammoBox = el("div", { className: "ammo" }, ammoBtns);
-    const angleCtl = slider("Ángulo hull", { min: -80, max: 80, value: 0, apply: (v) => setAngle(v) });
-    const frontCtl = slider("Blindaje frontal", { min: 20, max: 220, step: 5, value: armor.faces[3].armor,
-        apply: (v) => { armor.faces[3].armor = v; refreshArmorLine(); } });
+    let facing = true;
+    let spinning = true;
+    let elapsed = 0;
 
-    const armorLine = el("div", { className: "armorline" });
-    const hpFill = el("i");
-    hpFill.style.width = "100%";
-    const hpBar = el("div", { className: "bar" }, [hpFill]);
+    // --- Panel --------------------------------------------------------------
+    const preview = el("canvas", { className: "sheet", width: 64, height: 64 });
+    preview.getContext("2d").drawImage(crateCanvas, 0, 0);
 
-    const result = el("div", { id: "result", textContent: "—" });
-    const kFace = kv("Cara"), kAngle = kv("Ángulo impacto"), kEff = kv("Blindaje efectivo"), kPen = kv("Penetración"), kDmg = kv("Daño");
+    const kFacing = kv("Billboards"), kTris = kv("Triángulos"), kCam = kv("Cámara");
+    const faceBtn = button("", () => setFacing(!facing));
+    const spinBtn = button("⏸ Parar cajas", () => {
+        spinning = !spinning;
+        spinBtn.textContent = spinning ? "⏸ Parar cajas" : "▶ Girar cajas";
+    });
+    const smoothBtn = button("Filtrado: nítido (L)", () => {
+        const smooth = !crate.smooth;
+        for (const t of [crate, grass, tree]) t.setSmooth(smooth);
+        smoothBtn.textContent = smooth ? "Filtrado: suave (L)" : "Filtrado: nítido (L)";
+    });
+    const repeatCtl = slider("Repetición del suelo", {
+        min: 1, max: 120, value: 60,
+        apply: (v) => { app.entities[0].textureRepeat = { x: v, y: v }; }, format: (v) => `${v}×`,
+    });
 
     app.addPanel(
-        card("Disparo", [
-            el("div", { className: "grid" }, [fireBtn, resetBtn]),
-            hint("Espacio dispara · ←/→ giran el hull · 1-4 cambian munición"),
+        card("La textura", [preview, hint("64×64, dibujada al arrancar y subida con Texture.fromCanvas")]),
+        card("Escena", [
+            el("div", { className: "grid2" }, [faceBtn, spinBtn]),
+            el("div", { style: "margin-top:8px" }, [smoothBtn]),
+            repeatCtl.row, kFacing.row, kTris.row, kCam.row,
         ]),
-        card("Munición", [ammoBox, penCtl.row]),
-        card("Blanco", [
-            angleCtl.row, frontCtl.row, armorLine,
-            el("div", { className: "row" }, [el("label", { textContent: "Integridad" }), hpBar]),
+        card("Qué mirar", [
+            hint("Apaga «mirar a cámara» y gira la vista: los árboles se ven de canto y se revelan como láminas. Ese es todo el truco del billboard, y es como se dibuja la vegetación en casi cualquier juego 3D."),
         ]),
-        card("Último impacto", [result, kFace.row, kAngle.row, kEff.row, kPen.row, kDmg.row]),
     );
-    refreshArmorLine();
-    refreshAmmo();
-    updateHp();
 
-    // Debug handle for the console / automated tests.
-    const api = { game, weapon, armor, bullets, fire, setAngle, setAmmo, PROJECTILES, get ammo() { return ammo; }, last: null };
-    window.raptorTanks = api;
-
-    app.onUpdate(update);
-
-    // --- Input ---
-    // Firing and loading are one-shot; the arrows are *held*, so they are read
-    // per frame in update() instead — that keeps the hull turning at the same
-    // rate whatever the key-repeat setting is.
-    keyboard.on([" ", "Space"], () => fire());
-    for (let i = 0; i < AMMO.length; i++) keyboard.on(String(i + 1), () => setAmmo(AMMO[i]));
-    stage.addEventListener("click", fire);
-
-    // --- Behaviour ---
-
-    function refreshArmorLine() {
-        // Faces: [0]=side, [1]=rear, [2]=side, [3]=front (frontEdge = 3).
-        armorLine.textContent = `Frontal ${armor.faces[3].armor} · Lateral ${armor.faces[0].armor} · Trasera ${armor.faces[1].armor} mm`;
-    }
-
-    function setAngle(v) {
-        angle = Math.max(-80, Math.min(80, v));
-        tank.setRotation(angle);
-        angleCtl.set(angle);
-    }
-
-    // Short one-line summary of what a shell does, for its button label.
-    function ammoStats(type) {
-        const pen = Math.round(weapon.penetration * type.penMultiplier);
-        const dmg = Math.round(weapon.damage * type.damageMultiplier);
-        return `${pen} mm · ${dmg} daño`;
-    }
-
-    function setAmmo(type) {
-        ammo = type;
-        weapon.type = type;
-        refreshAmmo();
-    }
-
-    // Reflect the loaded type in the selector (highlight + fresh stats).
-    function refreshAmmo() {
-        AMMO.forEach((type, i) => {
-            ammoBtns[i].classList.toggle("active", type === ammo);
-            ammoBtns[i].querySelector("small").textContent = ammoStats(type);
+    // --- Camera -------------------------------------------------------------
+    let dragging = null;
+    app.canvas.addEventListener("pointerdown", (e) => {
+        dragging = { x: e.clientX, y: e.clientY, yaw: camera.yaw, pitch: camera.pitch };
+        app.canvas.setPointerCapture(e.pointerId);
+    });
+    app.canvas.addEventListener("pointermove", (e) => {
+        if (!dragging) return;
+        camera.orbit({
+            yaw: dragging.yaw - (e.clientX - dragging.x) * 0.4,
+            pitch: dragging.pitch + (e.clientY - dragging.y) * 0.3,
         });
-    }
+    });
+    for (const ev of ["pointerup", "pointercancel"]) app.canvas.addEventListener(ev, () => { dragging = null; });
+    app.canvas.addEventListener("wheel", (e) => {
+        e.preventDefault();
+        camera.orbit({ distance: clamp(camera.distance + Math.sign(e.deltaY), 5, 40) });
+    }, { passive: false });
 
-    function fire() {
-        const bullet = weapon.fire(MUZZLE.x, MUZZLE.y, 1, 0, null, ammo);
-        if (!bullet) return;
-        bullet._entity = new Circle(gl, { radius: 0.05 })
-            .setColor({ red: 1, green: 0.8, blue: 0.2 }).setPosition({ x: MUZZLE.x, y: MUZZLE.y }).init();
-        game.add(bullet._entity);
-        bullets.push(bullet);
-    }
+    app.keyboard.on("b", () => setFacing(!facing)).on("l", () => smoothBtn.click());
 
-    function spawnMarker(point, resultKey) {
-        const [r, g, b] = RESULT_INFO[resultKey].color;
-        const marker = new Circle(gl, { radius: 0.09 })
-            .setColor({ red: r, green: g, blue: b }).setPosition(point).init();
-        game.add(marker);
-        markers.push({ shape: marker, life: 0.5 });
-    }
+    setFacing(true);
 
-    function showImpact(shot, face, penetration) {
-        // A blocked hit that still chips the target (HE fragments) reads as
-        // "ESQUIRLAS" rather than a flat "NO PENETRA".
-        const key = shot.result === "block" && shot.damage > 0 ? "splash" : shot.result;
-        const info = RESULT_INFO[key];
-        api.last = { type: shot.type.id, result: shot.result, dealt: shot.damage, face: face.name, armor: face.armor, angle: shot.angle, effectiveArmor: shot.effectiveArmor, penetration };
-        result.textContent = `${info.label} · ${shot.type.name}`;
-        result.style.color = `rgb(${info.color.map((c) => Math.round(c * 255)).join(",")})`;
-        kFace.v.textContent = `${face.name} (${face.armor} mm)`;
-        kAngle.v.textContent = `${shot.angle.toFixed(0)}°`;
-        kEff.v.textContent = Number.isFinite(shot.effectiveArmor) ? `${shot.effectiveArmor.toFixed(0)} mm` : "∞";
-        kPen.v.textContent = `${Math.round(penetration)} mm`;
-        kDmg.v.textContent = shot.damage > 0 ? `${Math.round(shot.damage)} HP` : "—";
-    }
+    window.raptorSprites3D = {
+        app, camera, crate, grass, tree, billboards, crates, globe,
+        get facing() { return facing; },
+        setFacing,
+    };
 
-    function killBullet(bullet, at) {
-        bullet.alive = false;
-        if (at) bullet._entity.setPosition(at);
-    }
-
-    function destroyTank() {
-        tank.setColor({ red: 0.25, green: 0.25, blue: 0.28 });
-    }
-
-    function reset() {
-        for (const b of bullets) game.remove(b._entity);
-        bullets.length = 0;
-        for (const m of markers) game.remove(m.shape);
-        markers.length = 0;
-        armor.hp = armor.maxHp;
-        armor.alive = true;
-        tank.setColor(tankColor);
-        setAngle(0);
-        result.textContent = "—";
-        result.style.color = "";
-        kFace.v.textContent = kAngle.v.textContent = kEff.v.textContent = kPen.v.textContent = kDmg.v.textContent = "—";
-        updateHp();
-    }
-
-    function updateHp() {
-        const pct = (armor.hp / armor.maxHp) * 100;
-        hpFill.style.width = `${pct}%`;
-        hpFill.style.background = pct > 50 ? "#43c06a" : pct > 20 ? "#d8b13a" : "#d84a3a";
-    }
-
-    function update(dt) {
-        const spin = keyboard.axis("ArrowLeft", "ArrowRight");
-        if (spin) setAngle(angle + spin * HULL_TURN * dt);
-
-        weapon.update(dt);
-        fireBtn.disabled = !weapon.ready;
-        fireBtn.textContent = weapon.ready ? "Disparar" : "Recargando…";
-
-        for (const bullet of bullets.slice()) {
-            bullet.update(dt);
-
-            if (armor.alive) {
-                const hit = raycastShape(bullet.prev, bullet.position, tank);
-                if (hit) {
-                    const face = armor.faceForEdge(hit.edgeIndex);
-                    const shot = resolveShot({
-                        type: bullet.type,
-                        penetration: bullet.penetration,
-                        damage: bullet.damage,
-                        direction: bullet.direction,
-                        normal: hit.normal,
-                        armor: face.armor,
-                    });
-                    const markerKey = shot.result === "block" && shot.damage > 0 ? "splash" : shot.result;
-                    spawnMarker(hit.point, markerKey);
-                    showImpact(shot, face, bullet.penetration);
-
-                    if (shot.result === "ricochet") {
-                        bullet.velocity = reflect(bullet.velocity, hit.normal);
-                        bullet.velocity.x *= 0.7;
-                        bullet.velocity.y *= 0.7;
-                        bullet.penetration *= 0.8;
-                        bullet.position = { x: hit.point.x + hit.normal.x * 0.04, y: hit.point.y + hit.normal.y * 0.04 };
-                        bullet.prev = { x: bullet.position.x, y: bullet.position.y };
-                    } else {
-                        // Penetration deals full damage; a blocked HE shell still
-                        // sprays fragments (shot.damage > 0). Either way the shell stops.
-                        if (shot.damage > 0) {
-                            armor.takeDamage(shot.damage);
-                            updateHp();
-                            flash = 0.12;
-                            if (!armor.alive) destroyTank();
-                        }
-                        killBullet(bullet, hit.point);
-                    }
-                }
-            }
-
-            if (Math.abs(bullet.position.x) > CULL.x || Math.abs(bullet.position.y) > CULL.y) {
-                bullet.alive = false;
-            }
-
-            if (!bullet.alive) {
-                game.remove(bullet._entity);
-                bullets.splice(bullets.indexOf(bullet), 1);
-            } else {
-                bullet._entity.setPosition(bullet.position);
+    app.onUpdate((dt) => {
+        elapsed += dt;
+        if (spinning) {
+            crates.forEach((mesh, i) => mesh.setRotation({ y: elapsed * 25 + i * 40 }));
+            globe.setRotation({ y: elapsed * 18 });
+        }
+        if (facing) {
+            // Turn each quad about Y until its face points at the camera. Only
+            // yaw: tilting them would make the trees lean as you rise, which
+            // looks worse than the flatness it hides.
+            for (const mesh of billboards) {
+                const dx = camera.position.x - mesh.position.x;
+                const dz = camera.position.z - mesh.position.z;
+                mesh.setRotation({ x: -90, y: Math.atan2(dx, dz) * RAD_TO_DEG });
             }
         }
+        kCam.set(`${Math.round(camera.yaw)}° / ${Math.round(camera.pitch)}°`);
+        kTris.set(String(app.entities.reduce((sum, m) => sum + (m.indexCount || 0) / 3, 0)));
+    });
 
-        // Fade the tank flash back to its base color.
-        if (flash > 0) {
-            flash -= dt;
-            const t = Math.max(0, flash / 0.12);
-            if (armor.alive) {
-                tank.setColor({
-                    red: tankColor.red + (1 - tankColor.red) * t,
-                    green: tankColor.green + (1 - tankColor.green) * t,
-                    blue: tankColor.blue + (1 - tankColor.blue) * t,
-                });
-            }
-        }
-
-        // Expire impact markers.
-        for (const marker of markers.slice()) {
-            marker.life -= dt;
-            if (marker.life <= 0) {
-                game.remove(marker.shape);
-                markers.splice(markers.indexOf(marker), 1);
-            }
-        }
+    function setFacing(on) {
+        facing = on;
+        faceBtn.textContent = on ? "🎭 Mirando a cámara (B)" : "🃏 Fijos (B)";
+        kFacing.set(on ? "giran hacia la cámara" : "orientación fija");
+        if (!on) for (const mesh of billboards) mesh.setRotation({ x: -90, y: 0 });
     }
 });
     </script>

@@ -36,6 +36,14 @@ export default class RaptorEngine {
         this.culling = false;
         this.drawnLastFrame = 0;
 
+        // 3D needs two things a 2D scene must not have. Depth testing, so a
+        // near face hides a far one instead of whatever was drawn last winning;
+        // and backface culling, so the inside of a solid is never rasterised.
+        // Both off by default: in 2D, draw order *is* the depth, and a shape
+        // has no inside.
+        this.depthTest = false;
+        this.backfaceCulling = false;
+
         this.running = false;
         this._lastTime = undefined;
 
@@ -126,19 +134,45 @@ export default class RaptorEngine {
     // --- GL state ---------------------------------------------------------
 
     // One-time GL state configuration. Runs once, not per frame.
+    // The colour the frame is cleared to. In 3D it reads as the sky, so it is
+    // worth being able to set it.
+    setClearColor({ red = 0, green = 0, blue = 0, alpha = 1 } = {}) {
+        this.clearColor = { red, green, blue, alpha };
+        if (this.context) this.context.clearColor(red, green, blue, alpha);
+        return this;
+    }
+
+    // Runs on every start(), not only the first, so a scene that switched the
+    // engine into 3D and back gets the state it asked for.
     configure() {
         const gl = this.context;
-        gl.clearColor(0.0, 0.0, 0.0, 1.0);
-        // 2D engine: depth testing is not needed. Enable alpha blending so
-        // translucent objects composite correctly.
-        gl.disable(gl.DEPTH_TEST);
+        const { red = 0, green = 0, blue = 0, alpha = 1 } = this.clearColor || {};
+        gl.clearColor(red, green, blue, alpha);
+
+        if (this.depthTest) {
+            gl.enable(gl.DEPTH_TEST);
+            gl.depthFunc(gl.LEQUAL);
+        } else {
+            gl.disable(gl.DEPTH_TEST);
+        }
+
+        if (this.backfaceCulling) {
+            gl.enable(gl.CULL_FACE);
+            gl.cullFace(gl.BACK);
+        } else {
+            gl.disable(gl.CULL_FACE);
+        }
+
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         return this;
     }
 
     clearScreen() {
-        this.context.clear(this.context.COLOR_BUFFER_BIT);
+        const gl = this.context;
+        // Clearing colour but not depth leaves last frame's depth in place, and
+        // then nothing new ever passes the test — a black screen with no error.
+        gl.clear(gl.COLOR_BUFFER_BIT | (this.depthTest ? gl.DEPTH_BUFFER_BIT : 0));
         return this;
     }
 
@@ -166,7 +200,9 @@ export default class RaptorEngine {
     // The visible rectangle in world units, or null when culling is off. Worked
     // out once per frame rather than per shape.
     viewBounds() {
-        if (!this.culling || !this.canvas) return null;
+        // A 3D camera has no flat view rectangle, so the 2D cull does not apply
+        // to it. Meshes are skipped by their own camera's frustum, or not at all.
+        if (!this.culling || !this.canvas || typeof this.camera.viewExtents !== "function") return null;
         const { halfW, halfH } = this.camera.viewExtents(this.canvas);
         return {
             minX: this.camera.x - halfW, maxX: this.camera.x + halfW,

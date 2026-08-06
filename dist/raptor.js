@@ -1,5 +1,5 @@
-// Raptor 0.5.0 — GENERADO por tools/build.mjs, no editar a mano.
-// Fuente: raptor.js y sus dependencias (52 módulos).
+// Raptor 0.6.0 — GENERADO por tools/build.mjs, no editar a mano.
+// Fuente: raptor.js y sus dependencias (58 módulos).
 
 // ===== components/render/projection.js =====
 // The projection, in one place.
@@ -192,6 +192,14 @@ class RaptorEngine {
         this.culling = false;
         this.drawnLastFrame = 0;
 
+        // 3D needs two things a 2D scene must not have. Depth testing, so a
+        // near face hides a far one instead of whatever was drawn last winning;
+        // and backface culling, so the inside of a solid is never rasterised.
+        // Both off by default: in 2D, draw order *is* the depth, and a shape
+        // has no inside.
+        this.depthTest = false;
+        this.backfaceCulling = false;
+
         this.running = false;
         this._lastTime = undefined;
 
@@ -282,19 +290,45 @@ class RaptorEngine {
     // --- GL state ---------------------------------------------------------
 
     // One-time GL state configuration. Runs once, not per frame.
+    // The colour the frame is cleared to. In 3D it reads as the sky, so it is
+    // worth being able to set it.
+    setClearColor({ red = 0, green = 0, blue = 0, alpha = 1 } = {}) {
+        this.clearColor = { red, green, blue, alpha };
+        if (this.context) this.context.clearColor(red, green, blue, alpha);
+        return this;
+    }
+
+    // Runs on every start(), not only the first, so a scene that switched the
+    // engine into 3D and back gets the state it asked for.
     configure() {
         const gl = this.context;
-        gl.clearColor(0.0, 0.0, 0.0, 1.0);
-        // 2D engine: depth testing is not needed. Enable alpha blending so
-        // translucent objects composite correctly.
-        gl.disable(gl.DEPTH_TEST);
+        const { red = 0, green = 0, blue = 0, alpha = 1 } = this.clearColor || {};
+        gl.clearColor(red, green, blue, alpha);
+
+        if (this.depthTest) {
+            gl.enable(gl.DEPTH_TEST);
+            gl.depthFunc(gl.LEQUAL);
+        } else {
+            gl.disable(gl.DEPTH_TEST);
+        }
+
+        if (this.backfaceCulling) {
+            gl.enable(gl.CULL_FACE);
+            gl.cullFace(gl.BACK);
+        } else {
+            gl.disable(gl.CULL_FACE);
+        }
+
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         return this;
     }
 
     clearScreen() {
-        this.context.clear(this.context.COLOR_BUFFER_BIT);
+        const gl = this.context;
+        // Clearing colour but not depth leaves last frame's depth in place, and
+        // then nothing new ever passes the test — a black screen with no error.
+        gl.clear(gl.COLOR_BUFFER_BIT | (this.depthTest ? gl.DEPTH_BUFFER_BIT : 0));
         return this;
     }
 
@@ -322,7 +356,9 @@ class RaptorEngine {
     // The visible rectangle in world units, or null when culling is off. Worked
     // out once per frame rather than per shape.
     viewBounds() {
-        if (!this.culling || !this.canvas) return null;
+        // A 3D camera has no flat view rectangle, so the 2D cull does not apply
+        // to it. Meshes are skipped by their own camera's frustum, or not at all.
+        if (!this.culling || !this.canvas || typeof this.camera.viewExtents !== "function") return null;
         const { halfW, halfH } = this.camera.viewExtents(this.canvas);
         return {
             minX: this.camera.x - halfW, maxX: this.camera.x + halfW,
@@ -1492,6 +1528,165 @@ Assets.register(ASSET_KIND.TEXT, (entry, assets) => assets._loadFetch(entry.url,
 Assets.register(ASSET_KIND.SOUND, (entry, assets) => assets._loadSound(entry));
 Assets.register(ASSET_KIND.FONT, (entry, assets) => assets._loadFont(entry));
 
+// ===== components/math/angles.js =====
+// Degrees in, radians out.
+//
+// Every rotation in Raptor's public API is in **degrees**, because that is what
+// people type and read; every trigonometric function underneath wants radians.
+// That conversion was written inline in a dozen places as `(x * Math.PI) / 180`,
+// which is fine until one of them is `/ 180` on the wrong side of the multiply.
+
+const DEG_TO_RAD = Math.PI / 180;
+const RAD_TO_DEG = 180 / Math.PI;
+
+const toRadians = (degrees) => degrees * DEG_TO_RAD;
+const toDegrees = (radians) => radians * RAD_TO_DEG;
+
+// Wraps an angle to (−180, 180]. The difference between two headings is only
+// meaningful once it is wrapped: 350° and 10° are twenty degrees apart, not
+// three hundred and forty.
+function wrapDegrees(degrees) {
+    let wrapped = (degrees + 180) % 360;
+    if (wrapped < 0) wrapped += 360;
+    return wrapped - 180;
+}
+
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+// ===== components/render3d/camera3d.js =====
+// A camera that can be somewhere and look somewhere else.
+//
+// The 2D camera is a pan and a zoom: it has a centre and that is the whole
+// story. In 3D a camera has a *position*, a *target* and an *up*, and the
+// difference between those is the difference between moving the world and
+// moving yourself through it.
+//
+// Two ways to drive it, which cover almost everything:
+//
+//     camera.orbit({ yaw, pitch, distance })   // gira alrededor del objetivo
+//     camera.lookFrom(pos, target)             // colocada a mano
+//
+// Orbiting is what an editor or a model viewer wants; `follow` on top of it is
+// what a third-person game wants.
+
+
+class Camera3D {
+    constructor({
+        position = { x: 0, y: 4, z: 8 },
+        target = { x: 0, y: 0, z: 0 },
+        up = { x: 0, y: 1, z: 0 },
+        fov = 55,
+        near = 0.1,
+        far = 500,
+        smoothing = 8,
+    } = {}) {
+        this.position = { ...position };
+        this.target = { ...target };
+        this.up = { ...up };
+        this.fov = fov;
+        this.near = near;
+        this.far = far;
+        this.smoothing = smoothing;
+
+        // Spherical placement around the target, in degrees and world units.
+        this.yaw = 0;
+        this.pitch = 25;
+        this.distance = 8;
+
+        const { mat4 } = glMatrix;
+        this._view = mat4.create();
+        this._projection = mat4.create();
+        this._aspect = null;
+    }
+
+    // Places the camera on a sphere around its target. Pitch is clamped just
+    // short of straight up and straight down, because at exactly 90° the view
+    // direction becomes parallel to `up` and the matrix collapses — the classic
+    // gimbal flip where the world spins for one frame.
+    orbit({ yaw = this.yaw, pitch = this.pitch, distance = this.distance, target = null } = {}) {
+        if (target) this.target = { ...target };
+        this.yaw = yaw;
+        this.pitch = clamp(pitch, -89, 89);
+        this.distance = Math.max(0.2, distance);
+
+        const pitchRad = this.pitch * DEG_TO_RAD;
+        const yawRad = this.yaw * DEG_TO_RAD;
+        const horizontal = Math.cos(pitchRad) * this.distance;
+
+        this.position.x = this.target.x + Math.sin(yawRad) * horizontal;
+        this.position.y = this.target.y + Math.sin(pitchRad) * this.distance;
+        this.position.z = this.target.z + Math.cos(yawRad) * horizontal;
+        return this;
+    }
+
+    lookFrom(position, target = this.target) {
+        this.position = { ...position };
+        this.target = { ...target };
+        return this;
+    }
+
+    // Eases the *target* toward a point and re-derives the position from the
+    // current orbit. Following the target rather than the camera is what keeps
+    // a chase camera from swinging wide on every corner.
+    follow(point, dt) {
+        const t = 1 - Math.exp(-this.smoothing * dt);
+        this.target.x += (point.x - this.target.x) * t;
+        this.target.y += ((point.y ?? 0) - this.target.y) * t;
+        this.target.z += (point.z - this.target.z) * t;
+        return this.orbit({});
+    }
+
+    // Straight from where it is to where it looks, normalised.
+    get forward() {
+        const dx = this.target.x - this.position.x;
+        const dy = this.target.y - this.position.y;
+        const dz = this.target.z - this.position.z;
+        const length = Math.hypot(dx, dy, dz) || 1;
+        return { x: dx / length, y: dy / length, z: dz / length };
+    }
+
+    viewMatrix() {
+        const { mat4 } = glMatrix;
+        mat4.lookAt(
+            this._view,
+            [this.position.x, this.position.y, this.position.z],
+            [this.target.x, this.target.y, this.target.z],
+            [this.up.x, this.up.y, this.up.z],
+        );
+        return this._view;
+    }
+
+    // Rebuilt only when the aspect or the lens changes — it is the same matrix
+    // for every mesh in the frame.
+    projectionMatrix(canvas) {
+        const { mat4 } = glMatrix;
+        const aspect = aspectOf(canvas);
+        const key = `${aspect}|${this.fov}|${this.near}|${this.far}`;
+        if (this._aspect !== key) {
+            mat4.perspective(this._projection, this.fov * DEG_TO_RAD, aspect, this.near, this.far);
+            this._aspect = key;
+        }
+        return this._projection;
+    }
+
+    // Projects a world point to canvas pixels, or null if it is behind the
+    // camera. Used to hang a DOM label over a mesh.
+    project(point, canvas) {
+        const { mat4, vec4 } = glMatrix;
+        const clip = vec4.fromValues(point.x, point.y ?? 0, point.z, 1);
+        const viewProjection = mat4.multiply(mat4.create(), this.projectionMatrix(canvas), this.viewMatrix());
+        vec4.transformMat4(clip, clip, viewProjection);
+        if (clip[3] <= 0) return null;
+        const ndcX = clip[0] / clip[3];
+        const ndcY = clip[1] / clip[3];
+        return {
+            x: (ndcX * 0.5 + 0.5) * canvas.clientWidth,
+            y: (1 - (ndcY * 0.5 + 0.5)) * canvas.clientHeight,
+            depth: clip[3],
+        };
+    }
+}
+
 // ===== components/app.js =====
 // The front door. `App` is what you reach for to build something with Raptor;
 // everything else is a part you can also use on its own.
@@ -1514,6 +1709,7 @@ Assets.register(ASSET_KIND.FONT, (entry, assets) => assets._loadFont(entry));
 // does not own: your game. Everything is exposed (`app.engine`, `app.gl`,
 // `app.stage`) so you can drop to the layer below whenever the shell is in the
 // way.
+
 
 
 
@@ -1639,6 +1835,23 @@ class App {
     set camera(camera) { this.engine.camera = camera; }
     get entities() { return this.engine.entities; }
     get running() { return this.engine.running; }
+
+    // Switches the engine into three dimensions: a depth buffer so a near face
+    // hides a far one, backface culling so the inside of a solid is never
+    // drawn, a sky-coloured clear, and a camera that has a position and a
+    // target instead of a centre and a zoom.
+    //
+    // Returns the camera, because that is the thing a 3D scene talks to most.
+    use3D({ clearColor = { red: 0.09, green: 0.11, blue: 0.15 }, camera = {} } = {}) {
+        this.engine.depthTest = true;
+        this.engine.backfaceCulling = true;
+        this.engine.setClearColor(clearColor);
+        this.camera = new Camera3D(camera);
+        // configure() runs on start(), which App.boot calls after setup — but a
+        // scene may switch mid-flight, so apply it now if the loop is running.
+        if (this.engine.running) this.engine.configure();
+        return this.camera;
+    }
 
     // Skipping off-screen entities. Worth it as soon as the world is bigger
     // than the view; pointless when everything fits on screen anyway.
@@ -2642,6 +2855,781 @@ class Animator {
 
 // ===== components/render/index.js =====
 // Barrel for the render layer.
+
+// ===== components/render3d/shaders3d.js =====
+// The 3D shader programs.
+//
+// Two, and the difference matters more than it sounds: **without shading, 3D
+// looks like 2D**. A sphere lit by nothing is a flat circle; a cube is a
+// hexagon. What tells you a shape has volume is that its faces catch the light
+// differently, so the lit program is the default and the unlit one is only for
+// things that should not pretend to be solid — helper lines, a sky dome.
+//
+// Lighting is computed per fragment rather than per vertex. On a cube it makes
+// no difference, but on a sphere with few segments, per-vertex shading shows
+// the triangles as bands; per-fragment does not, and this is a framework where
+// low-poly spheres are the norm.
+//
+// The model is deliberately simple: one directional light, plus ambient, plus a
+// touch of hemisphere tint so faces pointing away from the light are coloured
+// by the "sky" instead of going flat black. That last part is what stops the
+// unlit side of everything from looking like a hole.
+
+const LIT_VS = `
+    attribute vec4 aVertexPosition;
+    attribute vec3 aVertexNormal;
+
+    uniform mat4 uModelViewMatrix;
+    uniform mat4 uProjectionMatrix;
+    uniform mat3 uNormalMatrix;
+
+    varying highp vec3 vNormal;
+    varying highp vec3 vViewPosition;
+
+    void main() {
+        vec4 viewPosition = uModelViewMatrix * aVertexPosition;
+        gl_Position = uProjectionMatrix * viewPosition;
+        // Normals need the inverse-transpose, not the model-view: a non-uniform
+        // scale would otherwise tilt them and the lighting would slide off the
+        // geometry.
+        vNormal = normalize(uNormalMatrix * aVertexNormal);
+        vViewPosition = viewPosition.xyz;
+    }
+`;
+
+const LIT_FS = `
+    precision mediump float;
+
+    varying highp vec3 vNormal;
+    varying highp vec3 vViewPosition;
+
+    uniform vec4 uColor;
+    uniform vec3 uLightDirection;   // hacia la luz, en espacio de vista
+    uniform vec3 uLightColor;
+    uniform vec3 uAmbientColor;
+    uniform vec3 uSkyColor;
+    uniform float uShininess;       // 0 = mate
+
+    void main() {
+        vec3 normal = normalize(vNormal);
+        vec3 toLight = normalize(uLightDirection);
+
+        float lambert = max(dot(normal, toLight), 0.0);
+
+        // Hemisphere ambient: the side facing up picks up the sky colour, the
+        // side facing down stays with the ambient. Cheap, and it keeps the
+        // shadowed half readable instead of black.
+        float upness = normal.y * 0.5 + 0.5;
+        vec3 ambient = mix(uAmbientColor, uSkyColor, upness);
+
+        vec3 lit = uColor.rgb * (ambient + uLightColor * lambert);
+
+        if (uShininess > 0.0) {
+            vec3 toEye = normalize(-vViewPosition);
+            vec3 halfway = normalize(toLight + toEye);
+            float specular = pow(max(dot(normal, halfway), 0.0), uShininess);
+            lit += uLightColor * specular * 0.35;
+        }
+
+        gl_FragColor = vec4(lit, uColor.a);
+    }
+`;
+
+// The lit shader again, with a texture multiplied in. Kept as a separate
+// program rather than a branch on a uniform: a shader that samples a texture it
+// was told to ignore still pays for the sample on some hardware.
+const TEXTURED_VS = `
+    attribute vec4 aVertexPosition;
+    attribute vec3 aVertexNormal;
+    attribute vec2 aTextureCoord;
+
+    uniform mat4 uModelViewMatrix;
+    uniform mat4 uProjectionMatrix;
+    uniform mat3 uNormalMatrix;
+
+    varying highp vec3 vNormal;
+    varying highp vec2 vTextureCoord;
+
+    void main() {
+        vec4 viewPosition = uModelViewMatrix * aVertexPosition;
+        gl_Position = uProjectionMatrix * viewPosition;
+        vNormal = normalize(uNormalMatrix * aVertexNormal);
+        vTextureCoord = aTextureCoord;
+    }
+`;
+
+const TEXTURED_FS = `
+    precision mediump float;
+
+    varying highp vec3 vNormal;
+    varying highp vec2 vTextureCoord;
+
+    uniform sampler2D uSampler;
+    uniform vec4 uColor;
+    uniform vec3 uLightDirection;
+    uniform vec3 uLightColor;
+    uniform vec3 uAmbientColor;
+    uniform vec3 uSkyColor;
+    uniform vec2 uTextureRepeat;
+
+    void main() {
+        vec4 texel = texture2D(uSampler, vTextureCoord * uTextureRepeat);
+        if (texel.a < 0.01) discard;
+
+        // gl_FrontFacing tells us we are looking at the back of a sheet; the
+        // normal is then pointing away, and using it as-is would paint the back
+        // of every billboard black.
+        vec3 normal = normalize(vNormal) * (gl_FrontFacing ? 1.0 : -1.0);
+        float lambert = max(dot(normal, normalize(uLightDirection)), 0.0);
+        float upness = normal.y * 0.5 + 0.5;
+        vec3 ambient = mix(uAmbientColor, uSkyColor, upness);
+
+        gl_FragColor = vec4(texel.rgb * uColor.rgb * (ambient + uLightColor * lambert), texel.a * uColor.a);
+    }
+`;
+
+const FLAT_VS = `
+    attribute vec4 aVertexPosition;
+
+    uniform mat4 uModelViewMatrix;
+    uniform mat4 uProjectionMatrix;
+
+    void main() {
+        gl_Position = uProjectionMatrix * uModelViewMatrix * aVertexPosition;
+    }
+`;
+
+const FLAT_FS = `
+    precision mediump float;
+    uniform vec4 uColor;
+
+    void main() {
+        gl_FragColor = uColor;
+    }
+`;
+
+const PROGRAM_LIT = "lit3d";
+const PROGRAM_FLAT = "flat3d";
+const PROGRAM_TEXTURED = "textured3d";
+
+const PROGRAMS_3D = {
+    [PROGRAM_LIT]: {
+        vertex: LIT_VS,
+        fragment: LIT_FS,
+        attributes: { vertexPosition: "aVertexPosition", vertexNormal: "aVertexNormal" },
+        uniforms: {
+            projectionMatrix: "uProjectionMatrix", modelViewMatrix: "uModelViewMatrix",
+            normalMatrix: "uNormalMatrix", color: "uColor",
+            lightDirection: "uLightDirection", lightColor: "uLightColor",
+            ambientColor: "uAmbientColor", skyColor: "uSkyColor", shininess: "uShininess",
+        },
+    },
+    [PROGRAM_TEXTURED]: {
+        vertex: TEXTURED_VS,
+        fragment: TEXTURED_FS,
+        attributes: {
+            vertexPosition: "aVertexPosition", vertexNormal: "aVertexNormal",
+            textureCoord: "aTextureCoord",
+        },
+        uniforms: {
+            projectionMatrix: "uProjectionMatrix", modelViewMatrix: "uModelViewMatrix",
+            normalMatrix: "uNormalMatrix", color: "uColor", sampler: "uSampler",
+            lightDirection: "uLightDirection", lightColor: "uLightColor",
+            ambientColor: "uAmbientColor", skyColor: "uSkyColor", textureRepeat: "uTextureRepeat",
+        },
+    },
+    [PROGRAM_FLAT]: {
+        vertex: FLAT_VS,
+        fragment: FLAT_FS,
+        attributes: { vertexPosition: "aVertexPosition" },
+        uniforms: {
+            projectionMatrix: "uProjectionMatrix", modelViewMatrix: "uModelViewMatrix",
+            color: "uColor",
+        },
+    },
+};
+
+function compile3D(gl, type, source, kind) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        const log = gl.getShaderInfoLog(shader);
+        gl.deleteShader(shader);
+        throw new Error(`Raptor 3D: no compila el shader "${kind}": ${log}`);
+    }
+    return shader;
+}
+
+function build3D(gl, kind) {
+    const spec = PROGRAMS_3D[kind];
+    if (!spec) throw new Error(`Raptor 3D: programa desconocido "${kind}"`);
+
+    const program = gl.createProgram();
+    gl.attachShader(program, compile3D(gl, gl.VERTEX_SHADER, spec.vertex, kind));
+    gl.attachShader(program, compile3D(gl, gl.FRAGMENT_SHADER, spec.fragment, kind));
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        throw new Error(`Raptor 3D: no enlaza "${kind}": ${gl.getProgramInfoLog(program)}`);
+    }
+
+    const attribLocations = {};
+    for (const [name, glsl] of Object.entries(spec.attributes)) {
+        attribLocations[name] = gl.getAttribLocation(program, glsl);
+    }
+    const uniformLocations = {};
+    for (const [name, glsl] of Object.entries(spec.uniforms)) {
+        uniformLocations[name] = gl.getUniformLocation(program, glsl);
+    }
+    return { kind, program, attribLocations, uniformLocations };
+}
+
+const cache3D = new WeakMap();
+
+function getProgram3D(gl, kind = PROGRAM_LIT) {
+    let byKind = cache3D.get(gl);
+    if (!byKind) { byKind = new Map(); cache3D.set(gl, byKind); }
+    if (!byKind.has(kind)) byKind.set(kind, build3D(gl, kind));
+    return byKind.get(kind);
+}
+
+// ===== components/render3d/mesh.js =====
+// A drawable solid: geometry on the GPU, a transform, a colour and a material.
+//
+// `Mesh` is to 3D what `Shape` is to 2D, and it is deliberately the same shape
+// of object — `position`, `rotation`, `scale`, `setColor`, `draw(camera)`, a
+// `cullRadius` — so the engine draws either without knowing which it has, and a
+// scene can mix them.
+//
+// The differences are the ones the extra dimension forces:
+//
+// - **Rotation is three numbers, not one.** Applied Y then X then Z, which is
+//   the order that makes "turn, then look up, then roll" behave the way people
+//   expect when they type it.
+// - **Indexed drawing.** A cube's corners are shared between triangles, so the
+//   geometry ships an index buffer and draws with `drawElements`.
+// - **A normal matrix.** Normals cannot ride the model-view matrix: under a
+//   non-uniform scale they come out tilted and the lighting slides off the
+//   surface. The inverse-transpose of the upper 3×3 fixes it.
+
+
+// The default light, in world space. Scenes override it through `Mesh.light`.
+const DEFAULT_LIGHT = {
+    direction: { x: 0.45, y: 0.8, z: 0.35 },   // hacia la luz
+    color: { red: 1, green: 0.97, blue: 0.9 },
+    ambient: { red: 0.22, green: 0.23, blue: 0.26 },
+    sky: { red: 0.38, green: 0.44, blue: 0.52 },
+};
+
+class Mesh {
+    constructor(context, geometry = null, { lit = true, texture = null, textureRepeat = { x: 1, y: 1 } } = {}) {
+        this.context = context;
+        this.geometry = geometry;
+
+        this.position = { x: 0, y: 0, z: 0 };
+        this.rotation = { x: 0, y: 0, z: 0 };   // grados
+        this.scale = { x: 1, y: 1, z: 1 };
+        this.color = { red: 0.8, green: 0.8, blue: 0.85, alpha: 1 };
+        this.shininess = 0;
+        this.visible = true;
+
+        // Backface culling assumes a mesh is a closed solid with an inside
+        // nobody sees. A billboard, a leaf card or a flag is a *sheet*: it has
+        // two outsides, and culling makes it vanish from one of them.
+        this.doubleSided = false;
+        this.layer = 0;
+
+        this.texture = texture;
+        this.textureRepeat = textureRepeat;
+        this.program = texture ? PROGRAM_TEXTURED : (lit ? PROGRAM_LIT : PROGRAM_FLAT);
+        this.light = DEFAULT_LIGHT;
+
+        this.programInfo = null;
+        this.buffers = null;
+        this.indexCount = 0;
+        this._localRadius = null;
+
+        const { mat4, mat3, vec3 } = glMatrix;
+        this._model = mat4.create();
+        this._modelView = mat4.create();
+        this._normalMatrix = mat3.create();
+        this._viewRotation = mat3.create();
+        this._lightView = vec3.create();
+    }
+
+    // Same contract as Shape: a radius that is guaranteed to contain the mesh,
+    // so the engine can skip it when it cannot be on screen.
+    get cullRadius() {
+        if (this._localRadius === null) return null;
+        return this._localRadius * Math.max(
+            Math.abs(this.scale.x), Math.abs(this.scale.y), Math.abs(this.scale.z),
+        );
+    }
+
+    init() {
+        const gl = this.context;
+        if (!this.geometry) throw new Error("Raptor 3D: un Mesh necesita geometría");
+        this.programInfo = getProgram3D(gl, this.program);
+
+        const { positions, normals, uvs, indices } = this.geometry;
+
+        let furthest = 0;
+        for (let i = 0; i < positions.length; i += 3) {
+            const d = positions[i] ** 2 + positions[i + 1] ** 2 + positions[i + 2] ** 2;
+            if (d > furthest) furthest = d;
+        }
+        this._localRadius = Math.sqrt(furthest);
+
+        const position = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, position);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+
+        let uv = null;
+        if (uvs && this.program === PROGRAM_TEXTURED) {
+            uv = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, uv);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(uvs), gl.STATIC_DRAW);
+        }
+
+        let normal = null;
+        if (normals && this.program !== PROGRAM_FLAT) {
+            normal = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, normal);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+        }
+
+        const index = gl.createBuffer();
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, index);
+        // Unsigned short caps a mesh at 65 536 vertices. Past that you want
+        // several meshes anyway, and the extension is not universal.
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+        this.indexCount = indices.length;
+
+        this.buffers = { position, normal, uv, index };
+        return this;
+    }
+
+    // World transform. Y first so `rotation.y` reads as "which way is it
+    // facing", which is the one people set most.
+    modelMatrix() {
+        const { mat4 } = glMatrix;
+        const m = this._model;
+        mat4.identity(m);
+        mat4.translate(m, m, [this.position.x, this.position.y, this.position.z]);
+        if (this.rotation.y) mat4.rotateY(m, m, this.rotation.y * DEG_TO_RAD);
+        if (this.rotation.x) mat4.rotateX(m, m, this.rotation.x * DEG_TO_RAD);
+        if (this.rotation.z) mat4.rotateZ(m, m, this.rotation.z * DEG_TO_RAD);
+        mat4.scale(m, m, [this.scale.x, this.scale.y, this.scale.z]);
+        return m;
+    }
+
+    draw(camera) {
+        if (!this.visible || !this.buffers) return;
+        const gl = this.context;
+        const { mat4, mat3, vec3 } = glMatrix;
+        const { program, attribLocations, uniformLocations } = this.programInfo;
+
+        mat4.multiply(this._modelView, camera.viewMatrix(), this.modelMatrix());
+
+        gl.useProgram(program);
+        gl.uniformMatrix4fv(uniformLocations.projectionMatrix, false, camera.projectionMatrix(gl.canvas));
+        gl.uniformMatrix4fv(uniformLocations.modelViewMatrix, false, this._modelView);
+        gl.uniform4f(uniformLocations.color, this.color.red, this.color.green, this.color.blue, this.color.alpha);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.position);
+        gl.vertexAttribPointer(attribLocations.vertexPosition, 3, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(attribLocations.vertexPosition);
+        const enabled = [attribLocations.vertexPosition];
+
+        if (this.buffers.normal) {
+            mat3.normalFromMat4(this._normalMatrix, this._modelView);
+            gl.uniformMatrix3fv(uniformLocations.normalMatrix, false, this._normalMatrix);
+
+            // The light is given in world space but the shader works in view
+            // space, so it has to be rotated into it. Only *rotated*: a
+            // direction has no position, so the view matrix's translation must
+            // not touch it — which is why this goes through the upper-left 3×3
+            // and not through `transformMat4`.
+            const { direction, color, ambient, sky } = this.light;
+            mat3.fromMat4(this._viewRotation, camera.viewMatrix());
+            vec3.set(this._lightView, direction.x, direction.y, direction.z);
+            vec3.transformMat3(this._lightView, this._lightView, this._viewRotation);
+            vec3.normalize(this._lightView, this._lightView);
+            gl.uniform3f(uniformLocations.lightDirection,
+                this._lightView[0], this._lightView[1], this._lightView[2]);
+            gl.uniform3f(uniformLocations.lightColor, color.red, color.green, color.blue);
+            gl.uniform3f(uniformLocations.ambientColor, ambient.red, ambient.green, ambient.blue);
+            gl.uniform3f(uniformLocations.skyColor, sky.red, sky.green, sky.blue);
+            gl.uniform1f(uniformLocations.shininess, this.shininess);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.normal);
+            gl.vertexAttribPointer(attribLocations.vertexNormal, 3, gl.FLOAT, false, 0, 0);
+            gl.enableVertexAttribArray(attribLocations.vertexNormal);
+            enabled.push(attribLocations.vertexNormal);
+        }
+
+        if (this.buffers.uv && this.texture) {
+            gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.uv);
+            gl.vertexAttribPointer(attribLocations.textureCoord, 2, gl.FLOAT, false, 0, 0);
+            gl.enableVertexAttribArray(attribLocations.textureCoord);
+            enabled.push(attribLocations.textureCoord);
+
+            this.texture.bind(0);
+            gl.uniform1i(uniformLocations.sampler, 0);
+            gl.uniform2f(uniformLocations.textureRepeat, this.textureRepeat.x, this.textureRepeat.y);
+        }
+
+        // Lighting a sheet from behind would leave the back face black, so a
+        // double-sided mesh flips its normal towards the viewer instead.
+        const wasCulling = this.doubleSided && gl.isEnabled(gl.CULL_FACE);
+        if (wasCulling) gl.disable(gl.CULL_FACE);
+
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.buffers.index);
+        gl.drawElements(gl.TRIANGLES, this.indexCount, gl.UNSIGNED_SHORT, 0);
+
+        if (wasCulling) gl.enable(gl.CULL_FACE);
+        for (const location of enabled) gl.disableVertexAttribArray(location);
+    }
+
+    // --- Fluent configuration --------------------------------------------
+
+    setPosition({ x, y, z } = {}) {
+        this.position = {
+            x: x ?? this.position.x, y: y ?? this.position.y, z: z ?? this.position.z,
+        };
+        return this;
+    }
+
+    setRotation({ x, y, z } = {}) {
+        this.rotation = {
+            x: x ?? this.rotation.x, y: y ?? this.rotation.y, z: z ?? this.rotation.z,
+        };
+        return this;
+    }
+
+    setScale(scale) {
+        const s = typeof scale === "number" ? { x: scale, y: scale, z: scale } : scale;
+        this.scale = { x: s.x ?? 1, y: s.y ?? 1, z: s.z ?? 1 };
+        return this;
+    }
+
+    setColor({ red, green, blue, alpha } = {}) {
+        this.color = {
+            red: red ?? 0, green: green ?? 0, blue: blue ?? 0, alpha: alpha ?? 1,
+        };
+        return this;
+    }
+
+    setShininess(value) {
+        this.shininess = value;
+        return this;
+    }
+
+    setTexture(texture, { repeat = this.textureRepeat } = {}) {
+        this.texture = texture;
+        this.textureRepeat = repeat;
+        this.program = texture ? PROGRAM_TEXTURED : PROGRAM_LIT;
+        if (this.buffers) { this.buffers = null; this.init(); }
+        return this;
+    }
+
+    setLight(light) {
+        this.light = { ...DEFAULT_LIGHT, ...light };
+        return this;
+    }
+
+    // For sheets: visible from both sides, and lit from both.
+    setDoubleSided(doubleSided) {
+        this.doubleSided = doubleSided;
+        return this;
+    }
+
+    setVisible(visible) {
+        this.visible = visible;
+        return this;
+    }
+
+    setLayer(layer) {
+        if (layer !== this.layer) {
+            this.layer = layer;
+            if (this._onLayerChange) this._onLayerChange(this);
+        }
+        return this;
+    }
+}
+
+// ===== components/render3d/geometry.js =====
+// Geometry builders: positions, normals and indices for the usual solids.
+//
+// Every builder returns the same shape of data —
+//
+//     { positions: [...], normals: [...], indices: [...] }
+//
+// — so `Mesh` never has to know which primitive it is drawing, and a hand-built
+// mesh is exactly as first-class as a box.
+//
+// Two things worth saying about normals, because they are what makes 3D look
+// like 3D:
+//
+// - **A box has 24 vertices, not 8.** Each corner belongs to three faces that
+//   point in three different directions, and a vertex carries one normal. Share
+//   the corners and the cube shades like a badly inflated ball.
+// - **A sphere shares its vertices**, because its normal really is continuous:
+//   the normal at a point on a unit sphere is the point itself.
+//
+// Indices exist so a face's four corners are stored once and referenced twice,
+// which is both less memory and fewer vertices for the GPU to transform.
+
+// --- Box -----------------------------------------------------------------
+
+function boxGeometry({ width = 1, height = 1, depth = 1 } = {}) {
+    const x = width / 2, y = height / 2, z = depth / 2;
+    const positions = [];
+    const normals = [];
+    const indices = [];
+
+    // Each face: four corners in counter-clockwise order seen from outside,
+    // which is what backface culling relies on to know what to throw away.
+    const uvs = [];
+    const face = (corners, normal) => {
+        const base = positions.length / 3;
+        for (const [px, py, pz] of corners) {
+            positions.push(px, py, pz);
+            normals.push(...normal);
+        }
+        // Each face gets the whole texture, which is what you want for a crate
+        // and easy to override with `textureRepeat` when you want a tiling.
+        uvs.push(0, 0, 1, 0, 1, 1, 0, 1);
+        indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    };
+
+    face([[-x, -y, z], [x, -y, z], [x, y, z], [-x, y, z]], [0, 0, 1]);    // frente
+    face([[x, -y, -z], [-x, -y, -z], [-x, y, -z], [x, y, -z]], [0, 0, -1]); // fondo
+    face([[-x, y, z], [x, y, z], [x, y, -z], [-x, y, -z]], [0, 1, 0]);    // arriba
+    face([[-x, -y, -z], [x, -y, -z], [x, -y, z], [-x, -y, z]], [0, -1, 0]); // abajo
+    face([[x, -y, z], [x, -y, -z], [x, y, -z], [x, y, z]], [1, 0, 0]);    // derecha
+    face([[-x, -y, -z], [-x, -y, z], [-x, y, z], [-x, y, -z]], [-1, 0, 0]); // izquierda
+
+    return { positions, normals, uvs, indices };
+}
+
+// --- Sphere --------------------------------------------------------------
+
+function sphereGeometry({ radius = 0.5, segments = 24, rings = 16 } = {}) {
+    const positions = [];
+    const normals = [];
+    const uvs = [];
+    const indices = [];
+
+    for (let ring = 0; ring <= rings; ring++) {
+        const v = ring / rings;
+        const phi = v * Math.PI;            // 0 arriba, π abajo
+        const sinPhi = Math.sin(phi), cosPhi = Math.cos(phi);
+
+        for (let segment = 0; segment <= segments; segment++) {
+            const u = segment / segments;
+            const theta = u * Math.PI * 2;
+            const nx = sinPhi * Math.cos(theta);
+            const ny = cosPhi;
+            const nz = sinPhi * Math.sin(theta);
+            // On a unit sphere the normal *is* the position, which is why these
+            // two lines look redundant and are not.
+            positions.push(nx * radius, ny * radius, nz * radius);
+            normals.push(nx, ny, nz);
+            uvs.push(u, 1 - v);
+        }
+    }
+
+    const stride = segments + 1;
+    for (let ring = 0; ring < rings; ring++) {
+        for (let segment = 0; segment < segments; segment++) {
+            const a = ring * stride + segment;
+            const b = a + stride;
+            indices.push(a, b, a + 1, a + 1, b, b + 1);
+        }
+    }
+
+    return { positions, normals, uvs, indices };
+}
+
+// --- Cylinder, and the cone it becomes when the top radius is zero --------
+
+function cylinderGeometry({
+    radiusTop = 0.5, radiusBottom = 0.5, height = 1, segments = 24, caps = true,
+} = {}) {
+    const positions = [];
+    const normals = [];
+    const indices = [];
+    const halfHeight = height / 2;
+
+    // The side normal is not horizontal unless the two radii match: on a cone it
+    // tilts by the slope, and getting that wrong makes the lighting look painted
+    // on rather than lit.
+    const slope = (radiusBottom - radiusTop) / height;
+    const normalScale = 1 / Math.hypot(1, slope);
+
+    for (let ring = 0; ring <= 1; ring++) {
+        const radius = ring === 0 ? radiusBottom : radiusTop;
+        const y = ring === 0 ? -halfHeight : halfHeight;
+        for (let segment = 0; segment <= segments; segment++) {
+            const theta = (segment / segments) * Math.PI * 2;
+            const cos = Math.cos(theta), sin = Math.sin(theta);
+            positions.push(cos * radius, y, sin * radius);
+            normals.push(cos * normalScale, slope * normalScale, sin * normalScale);
+        }
+    }
+
+    const stride = segments + 1;
+    for (let segment = 0; segment < segments; segment++) {
+        const a = segment, b = segment + stride;
+        indices.push(a, a + 1, b, a + 1, b + 1, b);
+    }
+
+    if (caps) {
+        for (const [radius, y, normal] of [[radiusBottom, -halfHeight, -1], [radiusTop, halfHeight, 1]]) {
+            if (radius <= 0) continue;         // un cono no tiene tapa arriba
+            const centre = positions.length / 3;
+            positions.push(0, y, 0);
+            normals.push(0, normal, 0);
+            for (let segment = 0; segment <= segments; segment++) {
+                const theta = (segment / segments) * Math.PI * 2;
+                positions.push(Math.cos(theta) * radius, y, Math.sin(theta) * radius);
+                normals.push(0, normal, 0);
+            }
+            for (let segment = 0; segment < segments; segment++) {
+                const a = centre + 1 + segment;
+                // The winding flips between the two caps, or one of them faces
+                // inwards and vanishes under backface culling. Seen from above,
+                // increasing theta with x = cos and z = sin runs *clockwise*,
+                // so the top cap is the one that needs reversing — the opposite
+                // of what it looks like written down.
+                if (normal > 0) indices.push(centre, a + 1, a);
+                else indices.push(centre, a, a + 1);
+            }
+        }
+    }
+
+    return { positions, normals, indices };
+}
+
+const coneGeometry = ({ radius = 0.5, height = 1, segments = 24 } = {}) =>
+    cylinderGeometry({ radiusTop: 0, radiusBottom: radius, height, segments });
+
+// --- Plane, lying in XZ so it works as ground ----------------------------
+
+function planeGeometry({ width = 1, depth = 1, segmentsX = 1, segmentsZ = 1 } = {}) {
+    const positions = [];
+    const normals = [];
+    const indices = [];
+
+    const uvs = [];
+    for (let z = 0; z <= segmentsZ; z++) {
+        for (let x = 0; x <= segmentsX; x++) {
+            positions.push(
+                (x / segmentsX - 0.5) * width,
+                0,
+                (z / segmentsZ - 0.5) * depth,
+            );
+            normals.push(0, 1, 0);
+            uvs.push(x / segmentsX, z / segmentsZ);
+        }
+    }
+    const stride = segmentsX + 1;
+    for (let z = 0; z < segmentsZ; z++) {
+        for (let x = 0; x < segmentsX; x++) {
+            const a = z * stride + x;
+            indices.push(a, a + stride, a + 1, a + 1, a + stride, a + stride + 1);
+        }
+    }
+    return { positions, normals, uvs, indices };
+}
+
+// --- Torus ---------------------------------------------------------------
+
+function torusGeometry({ radius = 0.5, tube = 0.2, segments = 32, sides = 16 } = {}) {
+    const positions = [];
+    const normals = [];
+    const indices = [];
+
+    for (let i = 0; i <= segments; i++) {
+        const u = (i / segments) * Math.PI * 2;
+        const cosU = Math.cos(u), sinU = Math.sin(u);
+        for (let j = 0; j <= sides; j++) {
+            const v = (j / sides) * Math.PI * 2;
+            const cosV = Math.cos(v), sinV = Math.sin(v);
+            // The normal points away from the centre of the tube, not from the
+            // centre of the torus.
+            const nx = cosV * cosU, ny = sinV, nz = cosV * sinU;
+            positions.push((radius + tube * cosV) * cosU, tube * sinV, (radius + tube * cosV) * sinU);
+            normals.push(nx, ny, nz);
+        }
+    }
+    const stride = sides + 1;
+    for (let i = 0; i < segments; i++) {
+        for (let j = 0; j < sides; j++) {
+            const a = i * stride + j;
+            const b = a + stride;
+            indices.push(a, b, a + 1, a + 1, b, b + 1);
+        }
+    }
+    return { positions, normals, indices };
+}
+
+// --- Extrusion, for anything the primitives do not cover ------------------
+
+// Takes a flat outline in XZ and gives it height: walls plus a flat top and
+// bottom. It is how the tank hulls and the editor's odd shapes get made without
+// a modelling tool.
+function prismGeometry({ points = [], height = 1 } = {}) {
+    const positions = [];
+    const normals = [];
+    const indices = [];
+    const halfHeight = height / 2;
+    const count = points.length;
+    if (count < 3) return { positions, normals, indices };
+
+    // Walls: one quad per edge, each with its own normal, so the corners stay
+    // sharp instead of smearing into a cylinder.
+    for (let i = 0; i < count; i++) {
+        const current = points[i];
+        const next = points[(i + 1) % count];
+        const dx = next.x - current.x;
+        const dz = next.z - current.z;
+        const length = Math.hypot(dx, dz) || 1;
+        const nx = dz / length, nz = -dx / length;
+
+        const base = positions.length / 3;
+        positions.push(
+            current.x, -halfHeight, current.z,
+            next.x, -halfHeight, next.z,
+            next.x, halfHeight, next.z,
+            current.x, halfHeight, current.z,
+        );
+        for (let k = 0; k < 4; k++) normals.push(nx, 0, nz);
+        indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+
+    // Caps, as a triangle fan from the first point. Fine for convex outlines,
+    // which is all the physics layer accepts anyway.
+    for (const [y, normal] of [[halfHeight, 1], [-halfHeight, -1]]) {
+        const base = positions.length / 3;
+        for (const point of points) {
+            positions.push(point.x, y, point.z);
+            normals.push(0, normal, 0);
+        }
+        // Same handedness trap as the cylinder caps: the top fan runs clockwise
+        // when seen from above unless it is reversed.
+        for (let i = 1; i < count - 1; i++) {
+            if (normal > 0) indices.push(base, base + i + 1, base + i);
+            else indices.push(base, base + i, base + i + 1);
+        }
+    }
+
+    return { positions, normals, indices };
+}
+
+// ===== components/render3d/index.js =====
+// Barrel for the 3D layer.
 
 // ===== components/physics/body.js =====
 // A physics body attached to a shape. The shape remains the source of truth for
@@ -4943,6 +5931,7 @@ class Engine {
 // --- Rendering primitives ----------------------------------------------
 
 
+
 // --- Simulation ---------------------------------------------------------
 
 // --- Input --------------------------------------------------------------
@@ -4976,6 +5965,7 @@ class Engine {
 //
 //   shapes    geometry that knows how to draw itself through a camera
 //   render    textures, sprite sheets, animation and the shader programs
+//   render3d  meshes, geometry builders, lighting and a camera that aims
 //   camera    the movable window onto the world (pan, zoom, follow, bounds)
 //   engine    canvas, GL context and the one render loop
 //   physics   bodies, convex collision (SAT) and a solver
@@ -4994,7 +5984,7 @@ class Engine {
 // generated single-file pages (engine.html, dyno.html, …) come from
 // `node tools/build.mjs`, which also emits dist/raptor.js for consumers.
 
-const VERSION = "0.5.0";
+const VERSION = "0.6.0";
 
 export {
     AI_STATE,
@@ -5013,16 +6003,23 @@ export {
     BASE_STYLES,
     Body,
     boundingRadius,
+    boxGeometry,
     Bullet,
     button,
     Camera,
+    Camera3D,
     card,
     Circle,
+    clamp,
     collide,
+    coneGeometry,
     createRandom,
+    cylinderGeometry,
     DEFAULT_DEPTH,
     DEFAULT_DESIGN,
+    DEFAULT_LIGHT,
     DEFAULT_PROJECTILE,
+    DEG_TO_RAD,
     DYNAMIC,
     el,
     Engine,
@@ -5036,6 +6033,7 @@ export {
     fullscreenElement,
     Gearbox,
     GEARBOX_MODE,
+    getProgram3D,
     getProgramInfo,
     hint,
     injectStyles,
@@ -5044,15 +6042,22 @@ export {
     kv,
     LOADING_STYLES,
     LoadingScreen,
+    Mesh,
     NEAR_PLANE,
     normalizeKey,
     onFullscreenChange,
     PAD_STYLES,
+    planeGeometry,
     Polygon,
+    prismGeometry,
     PROGRAM_COLOR,
+    PROGRAM_FLAT,
+    PROGRAM_LIT,
     PROGRAM_TEXTURE,
+    PROGRAM_TEXTURED,
     PROJECTILES,
     projectionFor,
+    RAD_TO_DEG,
     randomInt,
     randomRange,
     RaptorEngine,
@@ -5068,6 +6073,7 @@ export {
     select,
     Shape,
     slider,
+    sphereGeometry,
     Sprite,
     SpriteSheet,
     Square,
@@ -5077,11 +6083,15 @@ export {
     TankAI,
     TankController,
     Texture,
+    toDegrees,
     toggleFullscreen,
+    toRadians,
+    torusGeometry,
     TouchPad,
     Triangle,
     VERSION,
     viewHalfExtents,
     Weapon,
     World,
+    wrapDegrees,
 };

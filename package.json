@@ -1,6 +1,6 @@
 {
     "name": "raptor-engine",
-    "version": "0.5.0",
+    "version": "0.6.0",
     "description": "Framework 2D en WebGL escrito a mano: formas, cámara, física, entrada, interfaz y audio sintetizado.",
     "type": "module",
     "license": "MIT",

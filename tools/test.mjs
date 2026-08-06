@@ -81,7 +81,7 @@ async function open(file, contextOptions = null, { expect = null } = {}) {
 
 // The assets demo points one entry at a file that does not exist, on purpose,
 // so its failure path is visible. The browser logs that as a console error.
-const EXPECTED_404 = /ERR_FILE_NOT_FOUND|no-existe\/retrato\.png/;
+const EXPECTED_404 = /ERR_FILE_NOT_FOUND|no-existe\/(retrato|cartel)\.png/;
 
 const suites = [];
 const suite = (name, fn) => suites.push({ name, fn });
@@ -827,6 +827,230 @@ suite("extensible", async () => {
     ok("un tipo nuevo se registra sin tocar la clase",
         custom.value === "HOLA BOSQUE" && custom.kind === "mayusculas", JSON.stringify(custom));
     await page.close();
+});
+
+
+// --- 3D: el núcleo y las ocho páginas ------------------------------------
+
+suite("3d", async () => {
+    const pages = [
+        ["shapes3d.html", "raptorShapes3D"], ["editor3d.html", "raptorEditor3D"],
+        ["tanks3d.html", "raptorTanks3D"], ["dyno3d.html", "raptorDyno3D"],
+        ["sprites3d.html", "raptorSprites3D"], ["assets3d.html", "raptorAssets3D"],
+        ["drive3d.html", "raptorDrive3D"], ["bosque3d.html", "raptorBosque3D"],
+    ];
+    for (const [file, handle] of pages) {
+        const { page, errors } = await open(file, null, { expect: EXPECTED_404 });
+        if (file === "bosque3d.html") {
+            await page.waitForFunction(() => window.raptorBosque3D?.scene === "menu", { timeout: 15000 });
+        }
+        const shape = await page.evaluate((h) => {
+            const api = window[h];
+            const app = api?.app || api?.scenes?.app;
+            const gl = app?.gl;
+            return {
+                handle: !!api,
+                // The two bits of state that separate 3D from 2D. Without depth
+                // testing a near face does not hide a far one; without backface
+                // culling you see the inside of every solid.
+                depth: gl ? gl.isEnabled(gl.DEPTH_TEST) : false,
+                cull: gl ? gl.isEnabled(gl.CULL_FACE) : false,
+                glError: gl ? gl.getError() : -1,
+                meshes: app ? app.entities.length : 0,
+            };
+        }, handle);
+        ok(`${file} carga sin errores`, errors.length === 0, errors.join(" | "));
+        ok(`${file} está en modo 3D`, shape.handle && shape.depth && shape.cull, JSON.stringify(shape));
+        ok(`${file} dibuja sin error de GL`, shape.glError === 0 && shape.meshes > 0, JSON.stringify(shape));
+        await page.close();
+    }
+});
+
+suite("geometria", async () => {
+    const { page } = await open("shapes3d.html");
+    await page.waitForFunction(() => !!window.raptorShapes3D, { timeout: 15000 });
+
+    // A box's corners cannot be shared: each belongs to three faces pointing
+    // three different ways, and a vertex carries one normal.
+    const box = await page.evaluate(() => {
+        const g = boxGeometry({ width: 2, height: 2, depth: 2 });
+        const normals = new Set();
+        for (let i = 0; i < g.normals.length; i += 3) normals.add(g.normals.slice(i, i + 3).join(","));
+        return { vertices: g.positions.length / 3, triangles: g.indices.length / 3, distinctNormals: normals.size };
+    });
+    ok("un cubo tiene 24 vértices y 12 triángulos",
+        box.vertices === 24 && box.triangles === 12, JSON.stringify(box));
+    ok("y seis normales distintas, una por cara", box.distinctNormals === 6, String(box.distinctNormals));
+
+    // On a unit sphere the normal is the position, so every normal is unit length.
+    const sphere = await page.evaluate(() => {
+        const g = sphereGeometry({ radius: 3, segments: 16, rings: 12 });
+        let worst = 0;
+        for (let i = 0; i < g.normals.length; i += 3) {
+            const length = Math.hypot(g.normals[i], g.normals[i + 1], g.normals[i + 2]);
+            worst = Math.max(worst, Math.abs(length - 1));
+        }
+        return { worst, hasUvs: g.uvs.length / 2 === g.positions.length / 3 };
+    });
+    ok("las normales de la esfera son unitarias", sphere.worst < 1e-6, `error máx ${sphere.worst.toExponential(1)}`);
+    ok("y trae una UV por vértice", sphere.hasUvs);
+
+    // Every index has to point at a vertex that exists — an off-by-one here
+    // draws garbage or nothing, with no error from WebGL.
+    const bounds = await page.evaluate(() => {
+        const builders = [
+            ["cubo", boxGeometry({})], ["esfera", sphereGeometry({})],
+            ["cilindro", cylinderGeometry({})], ["cono", coneGeometry({})],
+            ["plano", planeGeometry({ segmentsX: 3, segmentsZ: 3 })], ["toro", torusGeometry({})],
+            ["prisma", prismGeometry({ points: [{ x: 0, z: -1 }, { x: 1, z: 1 }, { x: -1, z: 1 }], height: 1 })],
+        ];
+        return builders.map(([name, g]) => ({
+            name,
+            ok: g.indices.every((i) => i >= 0 && i < g.positions.length / 3)
+                && g.normals.length === g.positions.length
+                && g.indices.length % 3 === 0,
+        }));
+    });
+    ok("todos los constructores dan índices y normales coherentes",
+        bounds.every((b) => b.ok), bounds.filter((b) => !b.ok).map((b) => b.name).join(",") || "los siete");
+
+    // The cap-winding bug: with it, looking down at a cylinder you saw straight
+    // through the missing top. Both caps must face outwards.
+    const caps = await page.evaluate(() => {
+        const g = cylinderGeometry({ radiusTop: 1, radiusBottom: 1, height: 2, segments: 8 });
+        const area = (sign) => {
+            let signedArea = 0;
+            for (let t = 0; t < g.indices.length; t += 3) {
+                const p = [0, 1, 2].map((k) => {
+                    const i = g.indices[t + k] * 3;
+                    return { x: g.positions[i], y: g.positions[i + 1], z: g.positions[i + 2] };
+                });
+                // Only the triangles lying on this cap.
+                if (!p.every((v) => Math.abs(v.y - sign) < 1e-6)) continue;
+                signedArea += (p[1].x - p[0].x) * (p[2].z - p[0].z) - (p[2].x - p[0].x) * (p[1].z - p[0].z);
+            }
+            return signedArea;
+        };
+        return { top: area(1), bottom: area(-1) };
+    });
+    // Seen from above, an outward-facing top cap winds the opposite way to an
+    // outward-facing bottom one — so their signed areas must have opposite signs.
+    ok("las dos tapas del cilindro miran hacia fuera",
+        caps.top !== 0 && caps.bottom !== 0 && Math.sign(caps.top) !== Math.sign(caps.bottom),
+        JSON.stringify(caps));
+
+    await page.close();
+});
+
+suite("camara3d", async () => {
+    const { page } = await open("shapes3d.html");
+    await page.waitForFunction(() => !!window.raptorShapes3D, { timeout: 15000 });
+
+    const orbit = await page.evaluate(() => {
+        const camera = window.raptorShapes3D.camera;
+        camera.orbit({ yaw: 0, pitch: 0, distance: 10, target: { x: 0, y: 0, z: 0 } });
+        const front = { ...camera.position };
+        camera.orbit({ yaw: 90 });
+        const side = { ...camera.position };
+        camera.orbit({ pitch: 400 });     // debe recortarse
+        return { front, side, clampedPitch: camera.pitch };
+    });
+    ok("orbitar coloca la cámara en la esfera",
+        Math.abs(orbit.front.z - 10) < 1e-6 && Math.abs(orbit.side.x - 10) < 1e-6,
+        JSON.stringify(orbit));
+    // At exactly 90° the view direction is parallel to `up` and the matrix
+    // collapses, so the pitch is clamped just short of it.
+    ok("el cabeceo se recorta antes de la vertical", orbit.clampedPitch === 89, String(orbit.clampedPitch));
+
+    const projected = await page.evaluate(() => {
+        const s = window.raptorShapes3D;
+        s.camera.orbit({ yaw: 0, pitch: 0, distance: 10, target: { x: 0, y: 0, z: 0 } });
+        const centre = s.camera.project({ x: 0, y: 0, z: 0 }, s.app.canvas);
+        const behind = s.camera.project({ x: 0, y: 0, z: 30 }, s.app.canvas);
+        const right = s.camera.project({ x: 3, y: 0, z: 0 }, s.app.canvas);
+        return {
+            centreX: centre.x, centreY: centre.y,
+            width: s.app.canvas.clientWidth, height: s.app.canvas.clientHeight,
+            behind, rightOfCentre: right.x > centre.x,
+        };
+    });
+    ok("el origen se proyecta al centro del canvas",
+        Math.abs(projected.centreX - projected.width / 2) < 1
+        && Math.abs(projected.centreY - projected.height / 2) < 1,
+        JSON.stringify(projected));
+    ok("un punto a la derecha cae a la derecha", projected.rightOfCentre);
+    ok("lo que queda detrás de la cámara no se proyecta", projected.behind === null);
+
+    // Turning the light off swaps the shader program: same geometry, no volume.
+    await page.evaluate(() => window.raptorShapes3D.setLit(false));
+    ok("apagar la luz cambia de programa",
+        (await page.evaluate(() => window.raptorShapes3D.meshes[0].program)) === "flat3d");
+    await page.evaluate(() => window.raptorShapes3D.setLit(true));
+    ok("y volver a encenderla lo devuelve",
+        (await page.evaluate(() => window.raptorShapes3D.meshes[0].program)) === "lit3d");
+    await page.close();
+});
+
+suite("juegos3d", async () => {
+    // The forest game: same generator, same collision, three scenes.
+    const { page, errors } = await open("bosque3d.html");
+    await page.waitForFunction(() => window.raptorBosque3D?.scene === "menu", { timeout: 15000 });
+    ok("el bosque 3D arranca en el menú",
+        (await page.evaluate(() => window.raptorBosque3D.scene)) === "menu");
+
+    await page.evaluate(() => window.raptorBosque3D.go("juego", { acorns: 8, seconds: 90 }));
+    await page.waitForFunction(() => window.raptorBosque3D.state, { timeout: 15000 });
+    await page.waitForTimeout(300);
+
+    const start = await page.evaluate(() => ({ ...window.raptorBosque3D.state }));
+    await page.keyboard.down("w");
+    await page.waitForTimeout(700);
+    await page.keyboard.up("w");
+    const moved = await page.evaluate(() => ({ ...window.raptorBosque3D.state }));
+    ok("el personaje camina por el bosque 3D",
+        Math.hypot(moved.x - start.x, moved.y - start.y) > 0.5,
+        `(${start.x.toFixed(1)},${start.y.toFixed(1)}) → (${moved.x.toFixed(1)},${moved.y.toFixed(1)})`);
+
+    // The whole point of the port: the collision is the 2D game's, unchanged.
+    const walls = await page.evaluate(async () => {
+        const g = window.raptorBosque3D.game;
+        g.position.x = 0; g.position.y = 0;
+        const kb = window.raptorBosque3D.app.keyboard;
+        kb.press("w");
+        for (let i = 0; i < 260; i++) await new Promise((r) => requestAnimationFrame(r));
+        kb.release("w");
+        return { ...g.position };
+    });
+    ok("los árboles siguen frenando, con el mismo código que en 2D",
+        Math.abs(walls.x) < 17 && Math.abs(walls.y) < 13, JSON.stringify(walls));
+
+    const picked = await page.evaluate(async () => {
+        const g = window.raptorBosque3D.game;
+        const acorn = g.acorns.find((a) => !a.taken);
+        g.position.x = acorn.x; g.position.y = acorn.y;
+        const before = g.collected;
+        for (let i = 0; i < 5; i++) await new Promise((r) => requestAnimationFrame(r));
+        return { before, after: g.collected };
+    });
+    ok("recoger una bellota suma", picked.after === picked.before + 1, JSON.stringify(picked));
+    ok("bosque3d: sin errores", errors.length === 0, errors.join(" | "));
+    await page.close();
+
+    // The battle: the ballistics come from the 2D weapons layer.
+    const battle = await open("drive3d.html");
+    await battle.page.waitForFunction(() => !!window.raptorDrive3D, { timeout: 15000 });
+    const fought = await battle.page.evaluate(async () => {
+        const api = window.raptorDrive3D;
+        api.player.turretAngle = 45;
+        const fired = api.fire(api.player);
+        await new Promise((r) => setTimeout(r, 120));
+        return { fired, shells: api.shells.length, enemies: api.enemies.length, turret: api.player.turretAngle };
+    });
+    ok("drive3d: dispara y la torreta gira aparte del casco",
+        fought.fired && fought.shells > 0 && fought.enemies === 5 && fought.turret === 45,
+        JSON.stringify(fought));
+    ok("drive3d: sin errores", battle.errors.length === 0, battle.errors.join(" | "));
+    await battle.page.close();
 });
 
 // --- Phone ---------------------------------------------------------------

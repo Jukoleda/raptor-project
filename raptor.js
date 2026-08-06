@@ -12,6 +12,7 @@
 //
 //   shapes    geometry that knows how to draw itself through a camera
 //   render    textures, sprite sheets, animation and the shader programs
+//   render3d  meshes, geometry builders, lighting and a camera that aims
 //   camera    the movable window onto the world (pan, zoom, follow, bounds)
 //   engine    canvas, GL context and the one render loop
 //   physics   bodies, convex collision (SAT) and a solver
@@ -32,4 +33,4 @@
 
 export * from "./components/index.js";
 
-export const VERSION = "0.5.0";
+export const VERSION = "0.6.0";

@@ -43,6 +43,16 @@ const PAGES = [
     { out: "sprites.html", title: "Raptor — Sprites y animación", entry: "sprites/spritesDemo.js" },
     { out: "assets.html", title: "Raptor — Carga de assets", entry: "assets/assetsDemo.js" },
     { out: "bosque.html", title: "El Bosque — juego hecho con Raptor", entry: "game/main.js" },
+
+    // --- 3D -------------------------------------------------------------
+    { out: "shapes3d.html", title: "Raptor 3D — Formas", entry: "demos3d/shapes3d.js" },
+    { out: "editor3d.html", title: "Raptor 3D — Editor", entry: "demos3d/editor3d.js" },
+    { out: "tanks3d.html", title: "Raptor 3D — Cañón vs Blindaje", entry: "demos3d/tanks3d.js" },
+    { out: "dyno3d.html", title: "Raptor 3D — Banco de pruebas", entry: "demos3d/dyno3d.js" },
+    { out: "sprites3d.html", title: "Raptor 3D — Texturas y billboards", entry: "demos3d/sprites3d.js" },
+    { out: "assets3d.html", title: "Raptor 3D — Carga de assets", entry: "demos3d/assets3d.js" },
+    { out: "drive3d.html", title: "Raptor 3D — Batalla de tanques", entry: "demos3d/drive3d.js" },
+    { out: "bosque3d.html", title: "El Bosque 3D — juego hecho con Raptor", entry: "demos3d/bosque3d.js" },
 ];
 
 // The library build. Its entry is the framework's public surface.

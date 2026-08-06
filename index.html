@@ -66,6 +66,8 @@
         footer a { color: var(--muted); }
         footer a:hover { color: var(--text); }
         .note { margin-top: 8px; font-size: 12px; color: #6c727a; }
+        .section { margin: 44px 0 4px; font-size: 20px; text-align: center; }
+        .section-note { margin: 0 auto 20px; max-width: 620px; text-align: center; font-size: 14px; color: var(--muted); }
     </style>
 </head>
 <body>
@@ -75,9 +77,9 @@
             <h1>Framework <span class="grad">2D sobre WebGL</span></h1>
             <p class="tagline">
                 Un framework 2D escrito a mano: formas y sprites, cámara, física de
-                colisiones, entrada, interfaz, carga de assets, escenas y audio
-                sintetizado, con un shell que lo conecta todo. Todo lo de abajo está
-                construido con él y se ejecuta en el navegador, sin instalar nada.
+                colisiones, entrada, interfaz, carga de assets, escenas y audio sintetizado
+                — y desde ahora, también render 3D. Todo lo de abajo está construido
+                con él y se ejecuta en el navegador, sin instalar nada.
             </p>
         </header>
 
@@ -128,6 +130,59 @@
                 <span class="icon">🕹️</span>
                 <h2>Conducir tanque</h2>
                 <p>Maneja un tanque con controles estilo oruga: WASD o flechas para avanzar y girar el casco sobre su eje.</p>
+                <span class="go">Abrir demo →</span>
+            </a>
+        </main>
+
+        <h2 class="section">…y las mismas, en 3D</h2>
+        <p class="section-note">Mismo framework, capa de render nueva: profundidad, mallas indexadas, normales e iluminación. La simulación —balística, caja de cambios, generación del mapa, colisión— es exactamente el mismo código.</p>
+        <main class="grid">
+            <a class="card feature" href="bosque3d.html">
+                <span class="icon">🌲</span>
+                <h2>El Bosque 3D</h2>
+                <p>El juego entero en tercera persona: mismo mapa, mismas reglas, mismo código de colisión. Menú, partida y resultado.</p>
+                <span class="go">Jugar →</span>
+            </a>
+            <a class="card" href="shapes3d.html">
+                <span class="icon">🧊</span>
+                <h2>Formas 3D</h2>
+                <p>Cubo, esfera, cilindro, cono, toro y prisma, con luz y cámara orbital. Apaga la luz y vuelven a ser siluetas.</p>
+                <span class="go">Abrir demo →</span>
+            </a>
+            <a class="card" href="editor3d.html">
+                <span class="icon">🎚️</span>
+                <h2>Editor 3D</h2>
+                <p>Añade sólidos, selecciónalos con un clic y edítalos en vivo; dale a play y caen.</p>
+                <span class="go">Abrir editor →</span>
+            </a>
+            <a class="card" href="tanks3d.html">
+                <span class="icon">🎯</span>
+                <h2>Cañón vs Blindaje 3D</h2>
+                <p>La misma balística, ahora pudiendo rodear el blanco para ver qué placa estás golpeando.</p>
+                <span class="go">Abrir demo →</span>
+            </a>
+            <a class="card" href="dyno3d.html">
+                <span class="icon">🏁</span>
+                <h2>Banco de pruebas 3D</h2>
+                <p>El mismo tren motriz visto desde detrás del coche: la cámara se aleja con la velocidad.</p>
+                <span class="go">Abrir demo →</span>
+            </a>
+            <a class="card" href="sprites3d.html">
+                <span class="icon">🪧</span>
+                <h2>Texturas y billboards</h2>
+                <p>Texturas sobre sólidos, suelo repetido y láminas que giran hacia la cámara: así se dibuja la vegetación.</p>
+                <span class="go">Abrir demo →</span>
+            </a>
+            <a class="card" href="assets3d.html">
+                <span class="icon">🗃️</span>
+                <h2>Carga de assets 3D</h2>
+                <p>El manifiesto, y lo que cargó delante: el PNG es la piel de las cajas y el JSON su disposición.</p>
+                <span class="go">Abrir demo →</span>
+            </a>
+            <a class="card" href="drive3d.html">
+                <span class="icon">🛡️</span>
+                <h2>Batalla de tanques 3D</h2>
+                <p>Casco y torreta giran por separado: puedes retroceder apuntando al frente.</p>
                 <span class="go">Abrir demo →</span>
             </a>
         </main>

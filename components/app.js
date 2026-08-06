@@ -28,6 +28,7 @@ import SceneManager, { SCENE_STYLES } from "./scenes/sceneManager.js";
 import Keyboard from "./input/keyboard.js";
 import TouchPad, { PAD_STYLES } from "./input/touchpad.js";
 import Assets from "./assets/assets.js";
+import Camera3D from "./render3d/camera3d.js";
 
 export default class App {
     constructor({
@@ -146,6 +147,23 @@ export default class App {
     set camera(camera) { this.engine.camera = camera; }
     get entities() { return this.engine.entities; }
     get running() { return this.engine.running; }
+
+    // Switches the engine into three dimensions: a depth buffer so a near face
+    // hides a far one, backface culling so the inside of a solid is never
+    // drawn, a sky-coloured clear, and a camera that has a position and a
+    // target instead of a centre and a zoom.
+    //
+    // Returns the camera, because that is the thing a 3D scene talks to most.
+    use3D({ clearColor = { red: 0.09, green: 0.11, blue: 0.15 }, camera = {} } = {}) {
+        this.engine.depthTest = true;
+        this.engine.backfaceCulling = true;
+        this.engine.setClearColor(clearColor);
+        this.camera = new Camera3D(camera);
+        // configure() runs on start(), which App.boot calls after setup — but a
+        // scene may switch mid-flight, so apply it now if the loop is running.
+        if (this.engine.running) this.engine.configure();
+        return this.camera;
+    }
 
     // Skipping off-screen entities. Worth it as soon as the world is bigger
     // than the view; pointless when everything fits on screen anyway.
