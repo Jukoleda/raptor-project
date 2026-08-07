@@ -1,4 +1,4 @@
-// Raptor 0.6.0 — GENERADO por tools/build.mjs, no editar a mano.
+// Raptor 0.7.0 — GENERADO por tools/build.mjs, no editar a mano.
 // Fuente: raptor.js y sus dependencias (58 módulos).
 // Uso: <script src="raptor.global.js"></script> y luego window.Raptor.
 (function (root) {
@@ -1670,6 +1670,58 @@ class Camera3D {
             this._aspect = key;
         }
         return this._projection;
+    }
+
+    // The other direction: a pixel back out into the world, as a ray leaving
+    // the camera. `project` answers "where on screen is this thing"; this one
+    // answers "what did I just click on", which is the question a mouse asks.
+    //
+    // Pixels are relative to the canvas box (subtract getBoundingClientRect()
+    // from a pointer event), matching what `project` returns.
+    rayFromScreen(px, py, canvas) {
+        const { mat4, vec4 } = glMatrix;
+        const width = canvas.clientWidth || 1;
+        const height = canvas.clientHeight || 1;
+        const ndcX = (px / width) * 2 - 1;
+        const ndcY = 1 - (py / height) * 2;
+
+        const inverse = mat4.invert(
+            mat4.create(),
+            mat4.multiply(mat4.create(), this.projectionMatrix(canvas), this.viewMatrix()),
+        );
+        if (!inverse) return null; // degenerate lens (near === far, zero aspect)
+
+        // The same pixel on the near and far planes: the line between them is
+        // the ray. Both come back homogeneous, so both need the perspective
+        // divide before they mean anything.
+        const unproject = (ndcZ) => {
+            const v = vec4.transformMat4(vec4.create(), vec4.fromValues(ndcX, ndcY, ndcZ, 1), inverse);
+            if (!v[3]) return null;
+            return { x: v[0] / v[3], y: v[1] / v[3], z: v[2] / v[3] };
+        };
+        const near = unproject(-1);
+        const far = unproject(1);
+        if (!near || !far) return null;
+
+        const dx = far.x - near.x, dy = far.y - near.y, dz = far.z - near.z;
+        const length = Math.hypot(dx, dy, dz) || 1;
+        return { origin: near, direction: { x: dx / length, y: dy / length, z: dz / length } };
+    }
+
+    // Where that ray meets a horizontal plane — the ground, in other words. This
+    // is how a pointer becomes a world position in a game played on a floor.
+    // Null when the ray runs parallel to the plane or only meets it behind the
+    // camera (pointing at the sky).
+    groundPoint(px, py, canvas, height = 0) {
+        const ray = this.rayFromScreen(px, py, canvas);
+        if (!ray || Math.abs(ray.direction.y) < 1e-6) return null;
+        const t = (height - ray.origin.y) / ray.direction.y;
+        if (t < 0) return null;
+        return {
+            x: ray.origin.x + ray.direction.x * t,
+            y: height,
+            z: ray.origin.z + ray.direction.z * t,
+        };
     }
 
     // Projects a world point to canvas pixels, or null if it is behind the
@@ -5987,7 +6039,7 @@ class Engine {
 // generated single-file pages (engine.html, dyno.html, …) come from
 // `node tools/build.mjs`, which also emits dist/raptor.js for consumers.
 
-const VERSION = "0.6.0";
+const VERSION = "0.7.0";
 
 root.Raptor = {
     AIM_CYCLE: AIM_CYCLE,

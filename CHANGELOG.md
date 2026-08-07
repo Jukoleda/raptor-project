@@ -4,6 +4,56 @@ Todos los cambios notables de este proyecto se documentan en este archivo.
 
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/).
 
+## [0.7.0] - 2026-08-07
+
+`drive3d` deja de ser una versión recortada de la batalla y pasa a ser la
+batalla, vista desde detrás del casco.
+
+### Añadido
+- **`Camera3D.rayFromScreen(px, py, canvas)`** y
+  **`Camera3D.groundPoint(px, py, canvas, alto)`** — la inversa de `project`.
+  `project` dice dónde cae un punto del mundo en pantalla; estas dicen qué hay
+  bajo un píxel. `groundPoint` corta el rayo contra un plano horizontal, que es
+  lo que necesita cualquier juego que se juegue sobre un suelo, y devuelve
+  `null` si el rayo apunta al cielo. Sin esto, apuntar con el ratón en 3D no
+  tenía forma de existir.
+
+### Cambiado (`drive3d`)
+La demo se reescribió sobre el mismo paquete de juego que `controls/driveDemo.js`
+en lugar de reimplementar una versión más pequeña. Lo que antes tenía: un tanque
+fijo de 100 HP, blindaje plano de 95 mm en todas las caras, cinco enemigos y
+munición por teclas 1-4. Lo que tiene ahora, todo compartido con la versión 2D:
+
+- **Garaje de cuatro diseños** (`TANK_DESIGNS`), con sus cascos, vidas, cañones
+  y manejo. El casco 3D es su contorno de colisión extruido con
+  `prismGeometry`, así que las cuatro siluetas son las cuatro de verdad — el
+  cazacarros tiene morro en cuña también aquí.
+- **Blindaje por cara**: el rayo del proyectil (`raycastShape`) encuentra qué
+  arista cruzó y `Armor.forHull` dice si era frontal, lateral o trasera. Un
+  morro triangular golpeado de frente cuenta 30 mm como 90 y rebota.
+- **Escuadrón aliado**: cinco tanques amigos con la misma `TankAI` que los
+  enemigos, y sin fuego amigo. Flechas en el borde de la pantalla para los que
+  quedan fuera de vista.
+- **Auto-apuntado** (`AutoAim`) con sus cinco políticas y retícula 3D sobre el
+  objetivo, y **fuego automático** que espera a que el cañón esté alineado y a
+  tener línea de tiro.
+- **Selector de munición** con AP/APCR/HEAT/HE y sus cifras reales de
+  penetración y daño por cañón, más el panel de último impacto (cara, ángulo,
+  blindaje efectivo, penetración).
+- **Caja de cambios** automática o manual, con marcha y cuentavueltas.
+- **Objetivo tipo rey de la colina**: la zona central, 30 s de control, disputa
+  y decaimiento. Se dibuja como un aro en el suelo y no como un disco: un disco
+  translúcido tapaba todo el primer plano cuando estabas dentro.
+- **Minimapa** con los dos bandos, la zona y la cuña que la cámara ve.
+- **Física real de cuerpos**: SAT contra el escenario y entre tanques, en vez
+  de un test de cajas.
+- **Apuntado con el ratón**, apoyado en `Camera3D.groundPoint`.
+
+### Corregido
+- El grupo de concurrencia de GitHub Pages usaba `cancel-in-progress: true`. El
+  job `deploy` espera en el entorno `github-pages`, así que dos merges seguidos
+  se cancelaban entre sí y no se publicaba ninguno.
+
 ## [0.6.0] - 2026-08-06
 
 Raptor pasa a tener también render 3D, y las ocho demos existen en las dos

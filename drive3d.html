@@ -6,7 +6,7 @@
     <title>Raptor 3D — Batalla de tanques</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/render/projection.js, components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/ui/loadingScreen.js, components/scenes/sceneManager.js, components/input/keyboard.js, components/input/touchpad.js, components/render/texture.js, components/assets/assets.js, components/math/angles.js, components/render3d/camera3d.js, components/app.js, components/ui/index.js, components/render3d/shaders3d.js, components/render3d/mesh.js, components/render3d/geometry.js, components/render3d/index.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/armor.js, components/weapons/index.js, components/math/random.js, demos3d/drive3d.js + vendor/gl-matrix-min.js
+        Source: components/render/projection.js, components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/ui/loadingScreen.js, components/scenes/sceneManager.js, components/input/keyboard.js, components/input/touchpad.js, components/render/texture.js, components/assets/assets.js, components/math/angles.js, components/render3d/camera3d.js, components/app.js, components/ui/index.js, components/render3d/shaders3d.js, components/render3d/mesh.js, components/render3d/geometry.js, components/render3d/index.js, components/controls/tankController.js, components/controls/tankAI.js, components/controls/gearbox.js, components/controls/autoAim.js, components/controls/index.js, components/render/shaders.js, components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/weapons/armor.js, components/vehicles/tank.js, components/vehicles/engine.js, components/vehicles/index.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/index.js, components/physics/body.js, components/physics/collision.js, components/physics/world.js, components/physics/index.js, components/math/random.js, demos3d/drive3d.js + vendor/gl-matrix-min.js
         Regenerate with: node tools/build.mjs
         This file is fully self-contained: open it directly in any browser.
     -->
@@ -1710,6 +1710,58 @@ class Camera3D {
         return this._projection;
     }
 
+    // The other direction: a pixel back out into the world, as a ray leaving
+    // the camera. `project` answers "where on screen is this thing"; this one
+    // answers "what did I just click on", which is the question a mouse asks.
+    //
+    // Pixels are relative to the canvas box (subtract getBoundingClientRect()
+    // from a pointer event), matching what `project` returns.
+    rayFromScreen(px, py, canvas) {
+        const { mat4, vec4 } = glMatrix;
+        const width = canvas.clientWidth || 1;
+        const height = canvas.clientHeight || 1;
+        const ndcX = (px / width) * 2 - 1;
+        const ndcY = 1 - (py / height) * 2;
+
+        const inverse = mat4.invert(
+            mat4.create(),
+            mat4.multiply(mat4.create(), this.projectionMatrix(canvas), this.viewMatrix()),
+        );
+        if (!inverse) return null; // degenerate lens (near === far, zero aspect)
+
+        // The same pixel on the near and far planes: the line between them is
+        // the ray. Both come back homogeneous, so both need the perspective
+        // divide before they mean anything.
+        const unproject = (ndcZ) => {
+            const v = vec4.transformMat4(vec4.create(), vec4.fromValues(ndcX, ndcY, ndcZ, 1), inverse);
+            if (!v[3]) return null;
+            return { x: v[0] / v[3], y: v[1] / v[3], z: v[2] / v[3] };
+        };
+        const near = unproject(-1);
+        const far = unproject(1);
+        if (!near || !far) return null;
+
+        const dx = far.x - near.x, dy = far.y - near.y, dz = far.z - near.z;
+        const length = Math.hypot(dx, dy, dz) || 1;
+        return { origin: near, direction: { x: dx / length, y: dy / length, z: dz / length } };
+    }
+
+    // Where that ray meets a horizontal plane — the ground, in other words. This
+    // is how a pointer becomes a world position in a game played on a floor.
+    // Null when the ray runs parallel to the plane or only meets it behind the
+    // camera (pointing at the sky).
+    groundPoint(px, py, canvas, height = 0) {
+        const ray = this.rayFromScreen(px, py, canvas);
+        if (!ray || Math.abs(ray.direction.y) < 1e-6) return null;
+        const t = (height - ray.origin.y) / ray.direction.y;
+        if (t < 0) return null;
+        return {
+            x: ray.origin.x + ray.direction.x * t,
+            y: height,
+            z: ray.origin.z + ray.direction.z * t,
+        };
+    }
+
     // Projects a world point to canvas pixels, or null if it is behind the
     // camera. Used to hang a DOM label over a mesh.
     project(point, canvas) {
@@ -2798,6 +2850,1816 @@ function prismGeometry({ points = [], height = 1 } = {}) {
 // ===== components/render3d/index.js =====
 // Barrel for the 3D layer.
 
+// ===== components/controls/tankController.js =====
+// Tank-style movement for any shape.
+//
+// Drives a shape like a tracked vehicle: throttle accelerates it forward/back
+// along the way it is facing, and steering rotates the hull in place (tanks can
+// neutral-steer). Coasting bleeds speed off with friction, so it stops shortly
+// after you let go — that heavy, planted feel a car controller wouldn't have.
+//
+// It is input-agnostic. Feed it `setInput({ forward, turn })` each frame from
+// whatever you like, or use the built-in bindings that both drive the same set
+// of held directions:
+//   - `bindKeys()`  — WASD + arrow keys (desktop)
+//   - `bindTouch()` — on-screen buttons via pointer events (touch / mouse)
+// `update(dt)` moves the shape.
+//
+// Facing follows the engine's convention: rotation is CCW degrees and local +Y
+// is "forward", so at rotation 0 the shape drives up the screen.
+
+class TankController {
+    constructor(shape, {
+        accel = 5,           // forward acceleration (world units / s²)
+        maxSpeed = 3,        // top forward speed (world units / s)
+        reverseFactor = 0.5, // reverse is weaker and slower, like real tracks
+        friction = 5,        // how hard it decelerates while coasting
+        turnSpeed = 140,     // steering rate (degrees / s)
+        bounds = null,       // optional { minX, maxX, minY, maxY } to stay inside
+        gearbox = null,      // optional Gearbox; without one the drive is flat
+    } = {}) {
+        this.shape = shape;
+        this.accel = accel;
+        this.maxSpeed = maxSpeed;
+        this.reverseFactor = reverseFactor;
+        this.friction = friction;
+        this.turnSpeed = turnSpeed;
+        this.bounds = bounds;
+
+        // The gearbox needs to know the vehicle's top speed to size its gears.
+        this.gearbox = gearbox;
+        if (gearbox) gearbox.maxSpeed = maxSpeed;
+
+        this.speed = 0;                       // signed scalar along the heading
+        this.input = { forward: 0, turn: 0 }; // each clamped to [-1, 1]
+
+        // Directions currently held down, from any input source. Keyboard and
+        // touch both toggle these, so combining sources "just works".
+        this._held = { forward: false, back: false, left: false, right: false };
+        this._unbindKeys = null;
+        this._unbindTouch = null;
+    }
+
+    // Heading in radians (from the shape's rotation).
+    get heading() {
+        return (this.shape.rotation * Math.PI) / 180;
+    }
+
+    // Unit vector the tank is facing (local +Y rotated by the heading).
+    get forward() {
+        const h = this.heading;
+        return { x: -Math.sin(h), y: Math.cos(h) };
+    }
+
+    // Current world velocity (forward * speed), handy for cameras or collisions.
+    get velocity() {
+        const f = this.forward;
+        return { x: f.x * this.speed, y: f.y * this.speed };
+    }
+
+    // forward/turn in [-1, 1]. Only the given fields change.
+    setInput({ forward = this.input.forward, turn = this.input.turn } = {}) {
+        this.input.forward = Math.max(-1, Math.min(1, forward));
+        this.input.turn = Math.max(-1, Math.min(1, turn));
+        return this;
+    }
+
+    // Presses/releases a logical direction ("forward" | "back" | "left" |
+    // "right"). Any input source can call this; it recomputes setInput.
+    hold(dir, on) {
+        if (!(dir in this._held)) return this;
+        this._held[dir] = !!on;
+        const forward = (this._held.forward ? 1 : 0) - (this._held.back ? 1 : 0);
+        const turn = (this._held.left ? 1 : 0) - (this._held.right ? 1 : 0);
+        return this.setInput({ forward, turn });
+    }
+
+    // Bleeds speed toward zero at `rate` without overshooting past it.
+    _slow(rate, dt) {
+        const drop = rate * dt;
+        this.speed = Math.abs(this.speed) <= drop ? 0 : this.speed - Math.sign(this.speed) * drop;
+    }
+
+    update(dt) {
+        // Steer: rotate the hull. Independent of speed so it can pivot on the spot.
+        this.shape.rotation += this.input.turn * this.turnSpeed * dt;
+
+        const throttle = this.input.forward;
+
+        if (this.gearbox) {
+            // With a gearbox the drive comes from the selected gear: how hard it
+            // pulls (torque) and how fast it can go (the gear's speed limit).
+            const gb = this.gearbox;
+            gb.update(dt, { speed: this.speed, throttle });
+            const dir = gb.direction;
+
+            if (throttle !== 0 && dir !== 0 && Math.sign(throttle) === dir) {
+                this.speed += this.accel * gb.torque * dir * dt;
+            } else if (throttle !== 0 && dir !== 0) {
+                // Asking to go the other way to the selected gear is braking.
+                this._slow(this.friction * 2.2, dt);
+            } else {
+                this._slow(this.friction, dt);
+            }
+
+            const limit = gb.speedLimit;
+            this.speed = Math.max(-limit, Math.min(limit, this.speed));
+        } else if (throttle !== 0) {
+            // Flat drive: reverse pulls with less force than forward.
+            const gain = throttle > 0 ? 1 : this.reverseFactor;
+            this.speed += this.accel * gain * throttle * dt;
+            this.speed = Math.max(-this.maxSpeed * this.reverseFactor, Math.min(this.maxSpeed, this.speed));
+        } else {
+            this._slow(this.friction, dt);
+            this.speed = Math.max(-this.maxSpeed * this.reverseFactor, Math.min(this.maxSpeed, this.speed));
+        }
+
+        // Advance along the heading.
+        const f = this.forward;
+        let x = this.shape.position.x + f.x * this.speed * dt;
+        let y = this.shape.position.y + f.y * this.speed * dt;
+
+        if (this.bounds) {
+            const b = this.bounds;
+            const cx = Math.max(b.minX, Math.min(b.maxX, x));
+            const cy = Math.max(b.minY, Math.min(b.maxY, y));
+            // Bumping a wall scrubs off most of the speed instead of gluing to it.
+            if (cx !== x || cy !== y) this.speed *= 0.3;
+            x = cx;
+            y = cy;
+        }
+
+        this.shape.setPosition({ x, y });
+        return this;
+    }
+
+    // Binds WASD + arrow keys on `target` (default: window). W/↑ and S/↓ drive,
+    // A/← and D/→ steer. Returns an unbind function; also stored for unbind().
+    bindKeys(target = window) {
+        const map = {
+            w: "forward", ArrowUp: "forward",
+            s: "back", ArrowDown: "back",
+            a: "left", ArrowLeft: "left",
+            d: "right", ArrowRight: "right",
+        };
+        const keyOf = (e) => (e.key.length === 1 ? e.key.toLowerCase() : e.key);
+        const onDown = (e) => {
+            const dir = map[keyOf(e)];
+            if (!dir) return;
+            e.preventDefault();
+            this.hold(dir, true);
+        };
+        const onUp = (e) => {
+            const dir = map[keyOf(e)];
+            if (dir) this.hold(dir, false);
+        };
+
+        target.addEventListener("keydown", onDown);
+        target.addEventListener("keyup", onUp);
+        if (this._unbindKeys) this._unbindKeys();
+        this._unbindKeys = () => {
+            target.removeEventListener("keydown", onDown);
+            target.removeEventListener("keyup", onUp);
+            this._unbindKeys = null;
+        };
+        return this._unbindKeys;
+    }
+
+    // Binds on-screen buttons for touch (and mouse) via pointer events. `buttons`
+    // maps a direction to a DOM element: { forward, back, left, right }; any
+    // subset is fine. Multi-touch works — hold two buttons to drive and turn at
+    // once. Returns an unbind function; also stored for unbind().
+    bindTouch(buttons = {}) {
+        const teardown = [];
+        for (const dir of Object.keys(buttons)) {
+            const node = buttons[dir];
+            if (!node || !(dir in this._held)) continue;
+
+            const press = (e) => {
+                e.preventDefault();
+                if (node.setPointerCapture && e.pointerId != null) {
+                    try { node.setPointerCapture(e.pointerId); } catch { /* older browsers */ }
+                }
+                this.hold(dir, true);
+            };
+            const release = () => this.hold(dir, false);
+
+            node.addEventListener("pointerdown", press);
+            node.addEventListener("pointerup", release);
+            node.addEventListener("pointercancel", release);
+            node.addEventListener("pointerleave", release);
+            // Keep touches from scrolling / selecting / zooming the page.
+            node.style.touchAction = "none";
+            node.style.userSelect = "none";
+
+            teardown.push(() => {
+                node.removeEventListener("pointerdown", press);
+                node.removeEventListener("pointerup", release);
+                node.removeEventListener("pointercancel", release);
+                node.removeEventListener("pointerleave", release);
+            });
+        }
+
+        if (this._unbindTouch) this._unbindTouch();
+        this._unbindTouch = () => {
+            for (const fn of teardown) fn();
+            this._unbindTouch = null;
+        };
+        return this._unbindTouch;
+    }
+
+    // Removes any keyboard and touch bindings installed above.
+    unbind() {
+        if (this._unbindKeys) this._unbindKeys();
+        if (this._unbindTouch) this._unbindTouch();
+        return this;
+    }
+}
+
+// ===== components/controls/tankAI.js =====
+// A finite state machine that drives an enemy tank.
+//
+// The AI never touches the engine or the weapons module: it reads the world,
+// writes throttle/steering into a TankController, aims the tank's turret, and
+// raises `wantsToFire` when it has a shot. Whoever owns the tank decides what
+// firing actually means, which keeps this file about behaviour only.
+//
+//   PATROL  wander between random waypoints, gun forward
+//   ADVANCE take the ground it was given (`objective`) and hold it — this is
+//           what replaces aimless patrolling once there is something to contest
+//     │  target within sight
+//     ▼
+//   CHASE   drive at the target, gun tracking it
+//     │  target within attack range          ▲ target slips out of range
+//     ▼                                      │
+//   ATTACK  hold the range, aim, fire when lined up
+//     │  health drops below the retreat threshold
+//     ▼
+//   RETREAT back away while still facing the threat, until it is far behind
+//
+// A tank that cannot make progress (nose against a wall) briefly reverses and
+// turns — without that, a stuck tank grinds forever and the FSM looks broken.
+
+const AI_STATE = {
+    PATROL: "patrol",
+    ADVANCE: "advance",
+    CHASE: "chase",
+    ATTACK: "attack",
+    RETREAT: "retreat",
+    DEAD: "dead",
+};
+
+// Readable Spanish labels, handy for HUDs.
+const AI_STATE_LABEL = {
+    patrol: "Patrulla",
+    advance: "Avanza",
+    chase: "Persigue",
+    attack: "Ataca",
+    retreat: "Se retira",
+    dead: "Destruido",
+};
+
+const DEG = 180 / Math.PI;
+
+// Shortest signed difference between two angles, in degrees, within (-180, 180].
+function angleDiff(from, to) {
+    return (((to - from + 180) % 360) + 360) % 360 - 180;
+}
+
+// Engine convention: local +Y is forward, so the angle whose (-sin, cos) points
+// from `a` to `b`.
+function angleToward(a, b) {
+    return Math.atan2(-(b.x - a.x), b.y - a.y) * DEG;
+}
+
+function distance(a, b) {
+    return Math.hypot(b.x - a.x, b.y - a.y);
+}
+
+class TankAI {
+    constructor(tank, driver, {
+        bounds,                 // { minX, maxX, minY, maxY } to wander inside
+        sightRange = 6.5,       // starts chasing a target this close
+        attackRange = 4.5,      // stops and shoots inside this
+        keepDistance = 0.55,    // backs off below attackRange * this
+        retreatAt = 0.3,        // retreats under this fraction of health
+        fireArc = 7,            // degrees of aim error it will still fire within
+        isBlocked = null,       // optional (from, to) => bool line-of-sight test
+        objective = null,       // optional ground to take and hold: { x, y }
+        objectiveRadius = 1.2,  // how close counts as "holding" it
+    } = {}) {
+        this.tank = tank;
+        this.driver = driver;
+        this.bounds = bounds;
+        this.sightRange = sightRange;
+        this.attackRange = attackRange;
+        this.keepDistance = keepDistance;
+        this.retreatAt = retreatAt;
+        this.fireArc = fireArc;
+        this.isBlocked = isBlocked;
+        this.objective = objective;
+        this.objectiveRadius = objectiveRadius;
+
+        this.state = AI_STATE.PATROL;
+        this.wantsToFire = false;
+        this.waypoint = this._randomWaypoint();
+
+        // Stuck detection.
+        this._lastPos = { x: tank.position.x, y: tank.position.y };
+        this._stuckFor = 0;
+        this._unstickFor = 0;
+    }
+
+    _randomWaypoint() {
+        const b = this.bounds;
+        if (!b) return { x: this.tank.position.x, y: this.tank.position.y };
+        return {
+            x: b.minX + Math.random() * (b.maxX - b.minX),
+            y: b.minY + Math.random() * (b.maxY - b.minY),
+        };
+    }
+
+    // Steering that turns the hull toward `heading` (degrees). It pivots on the
+    // spot when badly misaligned instead of driving a wide arc.
+    _turnToward(heading, forwardWhenAligned = 1) {
+        const diff = angleDiff(this.tank.rotation, heading);
+        return {
+            turn: Math.abs(diff) < 3 ? 0 : Math.sign(diff),
+            forward: Math.abs(diff) < 55 ? forwardWhenAligned : 0,
+        };
+    }
+
+    // Head for a point, nose first.
+    _driveTo(point) {
+        return this._turnToward(angleToward(this.tank.position, point));
+    }
+
+    // Give ground without turning your back: keep the hull facing the threat and
+    // reverse. Slower than fleeing, but it stays covered — used to hold range.
+    _backAwayFrom(point) {
+        const diff = angleDiff(this.tank.rotation, angleToward(this.tank.position, point));
+        return { turn: Math.abs(diff) < 3 ? 0 : Math.sign(diff), forward: -1 };
+    }
+
+    // Run: turn the hull away and drive forward (faster than reverse). The
+    // turret is independent, so the gun can still cover the retreat.
+    _fleeFrom(point) {
+        return this._turnToward(angleToward(point, this.tank.position));
+    }
+
+    // True when the gun is lined up on `point` closely enough to shoot.
+    _onTarget(point) {
+        return this.tank.aimErrorTo(point) <= this.fireArc;
+    }
+
+    _canSee(target) {
+        if (!this.isBlocked) return true;
+        return !this.isBlocked(this.tank.position, target.position);
+    }
+
+    // What it does with nobody to shoot at: take the ground it was given, or
+    // wander if it was given none.
+    get _idleState() {
+        return this.objective ? AI_STATE.ADVANCE : AI_STATE.PATROL;
+    }
+
+    // Picks the state for this frame from distance, health and visibility.
+    _transition(target, dist) {
+        if (!this.tank.alive) return AI_STATE.DEAD;
+        const idle = this._idleState;
+        if (!target || !target.alive) return idle;
+
+        // Wounded tanks disengage, whatever else is going on.
+        if (this.tank.hpRatio < this.retreatAt) {
+            return dist > this.sightRange ? idle : AI_STATE.RETREAT;
+        }
+
+        switch (this.state) {
+            case AI_STATE.PATROL:
+            case AI_STATE.ADVANCE:
+                return dist <= this.sightRange && this._canSee(target) ? AI_STATE.CHASE : idle;
+            case AI_STATE.CHASE:
+                if (dist > this.sightRange * 1.35) return idle;
+                return dist <= this.attackRange ? AI_STATE.ATTACK : AI_STATE.CHASE;
+            case AI_STATE.ATTACK:
+                return dist > this.attackRange * 1.25 ? AI_STATE.CHASE : AI_STATE.ATTACK;
+            case AI_STATE.RETREAT:
+                // Recovered range (health cannot go back up) — back to the job.
+                return dist > this.sightRange ? idle : AI_STATE.RETREAT;
+            default:
+                return idle;
+        }
+    }
+
+    // Runs one frame of behaviour. `target` is the tank it hunts (the player).
+    update(dt, target = null) {
+        this.wantsToFire = false;
+
+        if (!this.tank.alive) {
+            this.state = AI_STATE.DEAD;
+            this.driver.setInput({ forward: 0, turn: 0 });
+            return this;
+        }
+
+        const pos = this.tank.position;
+        const dist = target && target.alive ? distance(pos, target.position) : Infinity;
+        this.state = this._transition(target, dist);
+
+        // --- Nudge out of whatever it is grinding against. ---
+        const moved = distance(pos, this._lastPos);
+        this._lastPos = { x: pos.x, y: pos.y };
+        if (this._unstickFor > 0) {
+            this._unstickFor -= dt;
+            this.driver.setInput({ forward: -1, turn: 1 });
+            const idling = this.state === AI_STATE.PATROL || this.state === AI_STATE.ADVANCE;
+            if (!idling && target) this.tank.aimAt(target.position, dt);
+            return this;
+        }
+        if (this.driver.input.forward !== 0 && moved < 0.004) {
+            this._stuckFor += dt;
+            if (this._stuckFor > 0.7) {
+                this._stuckFor = 0;
+                this._unstickFor = 0.6;
+                this.waypoint = this._randomWaypoint();
+            }
+        } else {
+            this._stuckFor = 0;
+        }
+
+        // --- Act on the current state. ---
+        switch (this.state) {
+            case AI_STATE.PATROL: {
+                if (distance(pos, this.waypoint) < 0.6) this.waypoint = this._randomWaypoint();
+                this.driver.setInput(this._driveTo(this.waypoint));
+                // Gun rests forward while nothing is in sight.
+                this.tank.turnTurretTo(this.tank.rotation, dt);
+                break;
+            }
+
+            case AI_STATE.ADVANCE: {
+                // Head for the ground it was sent to, then sit on it and watch.
+                if (distance(pos, this.objective) > this.objectiveRadius) {
+                    this.driver.setInput(this._driveTo(this.objective));
+                } else {
+                    this.driver.setInput({ forward: 0, turn: 0 });
+                }
+                this.tank.turnTurretTo(this.tank.rotation, dt);
+                break;
+            }
+
+            case AI_STATE.CHASE: {
+                this.driver.setInput(this._driveTo(target.position));
+                this.tank.aimAt(target.position, dt);
+                break;
+            }
+
+            case AI_STATE.ATTACK: {
+                // Hold a firing distance: give ground when the target crowds it,
+                // otherwise stand still, face it and let the turret do the work.
+                const tooClose = dist < this.attackRange * this.keepDistance;
+                const steer = tooClose ? this._backAwayFrom(target.position) : this._driveTo(target.position);
+                this.driver.setInput({ forward: tooClose ? steer.forward : 0, turn: steer.turn });
+                this.tank.aimAt(target.position, dt);
+                this.wantsToFire = this._onTarget(target.position) && this._canSee(target);
+                break;
+            }
+
+            case AI_STATE.RETREAT: {
+                // Break contact, gun still trained on the threat.
+                this.driver.setInput(this._fleeFrom(target.position));
+                this.tank.aimAt(target.position, dt);
+                break;
+            }
+        }
+
+        return this;
+    }
+}
+
+// ===== components/controls/gearbox.js =====
+// A gearbox for the drivetrain: what turns a flat "hold W to accelerate" into
+// something that feels mechanical.
+//
+// Each forward gear reaches a fraction of the vehicle's top speed (`ratios`).
+// Short gears pull hard but run out of revs early; the top gear barely pulls but
+// is the only way to reach full speed. Engine revs (`rpm`, normalised 0..1) come
+// from how far into the current gear's speed band you are, and a torque curve
+// makes the engine bog down under load and taper off near the redline. Changing
+// gear cuts the drive for `shiftTime`, which is what you actually feel.
+//
+// Two modes:
+//   AUTO    shifts by itself on revs (with hysteresis so it does not hunt), and
+//           picks reverse when you ask to back up from a standstill.
+//   MANUAL  you pick the gear: R · N · 1 · 2 · … Leave it in too high a gear and
+//           it bogs; hold it too long and you bounce off the limiter.
+//
+// It knows nothing about input — a TankController feeds it the current speed and
+// throttle, and reads back `torque` and `speedLimit`.
+//
+// Given real gear ratios and an Engine it switches to a *mechanical* mode: revs
+// come from road speed through the drivetrain (`engineRpm`), and `wheelTorque` /
+// `wheelForce` say what actually reaches the ground, so a caller can integrate
+// real vehicle physics. Without them it keeps the light normalised model above.
+
+const GEARBOX_MODE = { AUTO: "auto", MANUAL: "manual" };
+
+// Revs below this count as "about to stall", above as "into the limiter".
+const TORQUE_PEAK = 0.65;   // revs where the engine pulls hardest
+const TORQUE_SPREAD = 1.7;  // how quickly torque falls away from the peak
+const TORQUE_FLOOR = 0.45;  // never less than this fraction of the gear's pull
+const STOPPED = 0.15;       // speed under which the vehicle counts as stopped
+// Inverse of the engine module's rad/s conversion, named apart from it: both
+// become globals in the standalone build and a clash there is fatal.
+const RPM_PER_RAD = 60 / (2 * Math.PI);
+
+class Gearbox {
+    constructor({
+        ratios = [0.3, 0.52, 0.75, 1.0], // fraction of top speed per forward gear
+        reverseRatio = 0.4,
+        maxSpeed = 3,          // vehicle top speed; the controller keeps this in sync
+        shiftTime = 0.25,      // seconds of cut drive while changing gear
+        upshiftAt = 0.88,      // revs that trigger an automatic upshift
+        downshiftAt = 0.35,    // revs that trigger an automatic downshift
+        mode = GEARBOX_MODE.AUTO,
+
+        // --- Mechanical mode (optional) -------------------------------------
+        // Give it real gear ratios and an Engine and it stops guessing: revs
+        // come from road speed through the drivetrain, and `wheelTorque` is what
+        // actually reaches the ground. `ratios` above is then unused.
+        engine = null,
+        gearRatios = null,     // e.g. [3.6, 2.1, 1.4, 1.0, 0.8]
+        reverseGearRatio = 3.2,
+        finalDrive = 3.9,
+        wheelRadius = 0.34,    // metres
+    } = {}) {
+        this.ratios = ratios;
+        this.reverseRatio = reverseRatio;
+        this.maxSpeed = maxSpeed;
+        this.engine = engine;
+        this.gearRatios = gearRatios;
+        this.reverseGearRatio = reverseGearRatio;
+        this.finalDrive = finalDrive;
+        this.wheelRadius = wheelRadius;
+        this.shiftTime = shiftTime;
+        this.upshiftAt = upshiftAt;
+        this.downshiftAt = downshiftAt;
+        this.mode = mode;
+
+        this.gear = 1;      // -1 reverse · 0 neutral · 1..N forward
+        this.speed = 0;     // last speed the controller reported
+        this._shiftFor = 0; // seconds left of the current gear change
+        this.shifts = 0;    // how many changes so far (handy for HUDs/tests)
+    }
+
+    // True when it is driven by a real engine and real ratios.
+    get mechanical() {
+        return !!(this.engine && this.gearRatios);
+    }
+
+    // Selectable gears in order, so manual shifting can walk the list.
+    get sequence() {
+        return [-1, 0, ...Array.from({ length: this.topGear }, (_, i) => i + 1)];
+    }
+
+    get topGear() {
+        return (this.mechanical ? this.gearRatios : this.ratios).length;
+    }
+
+    // Gear ratio actually turning the driveshaft (mechanical mode only).
+    get gearRatio() {
+        if (!this.mechanical || this.gear === 0) return 0;
+        return this.gear === -1 ? this.reverseGearRatio : this.gearRatios[this.gear - 1];
+    }
+
+    // Total reduction from crank to wheel.
+    get driveRatio() {
+        return this.gearRatio * this.finalDrive;
+    }
+
+    // Engine revs for the current road speed and gear. Idles when the clutch is
+    // out (neutral or mid-shift) or when the wheels are barely turning.
+    get engineRpm() {
+        if (!this.mechanical) return 0;
+        const { idleRpm, redlineRpm } = this.engine;
+        if (this.gear === 0) return idleRpm;
+        const wheelRadPerSec = Math.abs(this.speed) / this.wheelRadius;
+        const rpm = wheelRadPerSec * Math.abs(this.driveRatio) * RPM_PER_RAD;
+        return Math.max(idleRpm, Math.min(redlineRpm, rpm));
+    }
+
+    // Torque reaching the wheels, in N·m. Zero with the drive cut.
+    get wheelTorque() {
+        if (!this.mechanical || this.shifting || this.gear === 0) return 0;
+        return this.engine.torqueAt(this.engineRpm) * Math.abs(this.driveRatio);
+    }
+
+    // Tractive force at the contact patch, in newtons.
+    get wheelForce() {
+        return this.wheelTorque / this.wheelRadius;
+    }
+
+    // What the engine is making right now, for a readout.
+    get power() {
+        return this.mechanical ? this.engine.powerAt(this.engineRpm) : 0;
+    }
+
+    // Road speed the current gear tops out at (redline in that gear).
+    get gearTopSpeed() {
+        if (!this.mechanical || this.gear === 0) return Infinity;
+        return (this.engine.redlineRpm / RPM_PER_RAD) * this.wheelRadius / Math.abs(this.driveRatio);
+    }
+
+    get inReverse() {
+        return this.gear === -1;
+    }
+
+    get inNeutral() {
+        return this.gear === 0;
+    }
+
+    // Which way the current gear drives: +1 forward, -1 reverse, 0 in neutral.
+    get direction() {
+        return this.gear === 0 ? 0 : Math.sign(this.gear);
+    }
+
+    // Fraction of top speed the current gear can reach.
+    get ratio() {
+        if (this.gear === -1) return this.reverseRatio;
+        if (this.gear === 0) return 0;
+        return this.ratios[this.gear - 1];
+    }
+
+    // Fastest the vehicle can go in this gear. Neutral does not drive, but it
+    // must not brake either — coasting keeps whatever speed it had.
+    get speedLimit() {
+        if (this.mechanical) return this.gear === 0 ? Infinity : this.gearTopSpeed;
+        return this.gear === 0 ? this.maxSpeed : this.maxSpeed * this.ratio;
+    }
+
+    // Revs as a 0..1 fraction of the redline — what the shift logic and the
+    // tachometer both read, in either mode.
+    get rpm() {
+        if (this.mechanical) return this.engineRpm / this.engine.redlineRpm;
+        const limit = this.maxSpeed * this.ratio;
+        if (limit <= 0) return 0;
+        return Math.min(1, Math.abs(this.speed) / limit);
+    }
+
+    get shifting() {
+        return this._shiftFor > 0;
+    }
+
+    // Multiplier the controller applies to its acceleration. Zero while the
+    // drive is cut (mid-shift or in neutral).
+    get torque() {
+        if (this.shifting || this.gear === 0) return 0;
+        // Short gears multiply the pull; the top gear barely does.
+        const gearPull = 0.5 / this.ratio;
+        const off = this.rpm - TORQUE_PEAK;
+        const curve = Math.max(TORQUE_FLOOR, 1 - TORQUE_SPREAD * off * off);
+        return gearPull * curve;
+    }
+
+    // Readable gear for a HUD: "R", "N", "1", "2", ...
+    get label() {
+        if (this.gear === -1) return "R";
+        if (this.gear === 0) return "N";
+        return String(this.gear);
+    }
+
+    setMode(mode) {
+        this.mode = mode;
+        return this;
+    }
+
+    toggleMode() {
+        return this.setMode(this.mode === GEARBOX_MODE.AUTO ? GEARBOX_MODE.MANUAL : GEARBOX_MODE.AUTO);
+    }
+
+    // Engages a gear, cutting the drive while the change happens.
+    shiftTo(gear) {
+        const target = Math.max(-1, Math.min(this.topGear, gear));
+        if (target === this.gear || this.shifting) return this;
+        this.gear = target;
+        this._shiftFor = this.shiftTime;
+        this.shifts++;
+        return this;
+    }
+
+    // Manual shifting: step through R · N · 1 · 2 · …
+    shiftUp() {
+        const seq = this.sequence;
+        const i = seq.indexOf(this.gear);
+        return i < seq.length - 1 ? this.shiftTo(seq[i + 1]) : this;
+    }
+
+    shiftDown() {
+        const seq = this.sequence;
+        const i = seq.indexOf(this.gear);
+        return i > 0 ? this.shiftTo(seq[i - 1]) : this;
+    }
+
+    // Called once per frame by the controller with the current drivetrain state.
+    // `throttle` is the driver's demand in [-1, 1].
+    update(dt, { speed = 0, throttle = 0 } = {}) {
+        this.speed = speed;
+        if (this._shiftFor > 0) {
+            this._shiftFor = Math.max(0, this._shiftFor - dt);
+            return this;
+        }
+        if (this.mode === GEARBOX_MODE.AUTO) this._autoShift(throttle);
+        return this;
+    }
+
+    // Automatic logic: pick reverse/forward from a standstill, then ride the
+    // revs. The gap between upshiftAt and downshiftAt stops it hunting.
+    _autoShift(throttle) {
+        const stopped = Math.abs(this.speed) < STOPPED;
+
+        if (throttle < 0 && stopped && !this.inReverse) return void this.shiftTo(-1);
+        if (throttle >= 0 && this.inReverse && stopped) return void this.shiftTo(1);
+        if (this.inReverse || this.inNeutral) return;
+
+        const revs = this.rpm;
+        if (revs > this.upshiftAt && this.gear < this.topGear) this.shiftTo(this.gear + 1);
+        else if (revs < this.downshiftAt && this.gear > 1) this.shiftTo(this.gear - 1);
+    }
+}
+
+// ===== components/controls/autoAim.js =====
+// Auto-aim: hands the turret over to a target-picking policy.
+//
+// One button cycles through the policies, so the driver can go from "point at
+// whatever is closest" to "finish off the wounded one" to "deal with the big
+// one" without ever letting go of the wheel:
+//
+//   OFF → NEAREST → WEAKEST → TOUGHEST → STRONGEST → OFF …
+//
+//   NEAREST    the closest target — the one most likely to be shooting at you
+//   WEAKEST    the least health left — finish it off
+//   TOUGHEST   the most health left — chip away at the one that will last
+//   STRONGEST  the biggest threat by design (durability × damage per second),
+//              regardless of how hurt it currently is
+//
+// It only picks the target and points the gun; it never fires. Ties break by
+// distance, and the current target wins an exact tie so the gun does not
+// twitch between two equal candidates.
+
+const AIM_MODE = {
+    OFF: "off",
+    NEAREST: "nearest",
+    WEAKEST: "weakest",
+    TOUGHEST: "toughest",
+    STRONGEST: "strongest",
+};
+
+// Order the button walks through.
+const AIM_CYCLE = [AIM_MODE.OFF, AIM_MODE.NEAREST, AIM_MODE.WEAKEST, AIM_MODE.TOUGHEST, AIM_MODE.STRONGEST];
+
+const AIM_MODE_LABEL = {
+    off: "Desactivado",
+    nearest: "Más cercano",
+    weakest: "Menos vida",
+    toughest: "Más vida",
+    strongest: "Más fuerte",
+};
+
+// How each mode scores a candidate. Higher score wins; distance is passed in so
+// modes can use it directly or just as a tie-breaker.
+const SCORES = {
+    [AIM_MODE.NEAREST]: (tank, dist) => -dist,
+    [AIM_MODE.WEAKEST]: (tank) => -tank.hp,
+    [AIM_MODE.TOUGHEST]: (tank) => tank.hp,
+    [AIM_MODE.STRONGEST]: (tank) => tank.power,
+};
+
+class AutoAim {
+    constructor(tank, { mode = AIM_MODE.OFF, cycle = AIM_CYCLE } = {}) {
+        this.tank = tank;
+        this.cycleOrder = cycle;
+        this.mode = mode;
+        this.target = null;
+    }
+
+    get enabled() {
+        return this.mode !== AIM_MODE.OFF;
+    }
+
+    get label() {
+        return AIM_MODE_LABEL[this.mode];
+    }
+
+    setMode(mode) {
+        this.mode = mode;
+        if (!this.enabled) this.target = null;
+        return this;
+    }
+
+    // Advances to the next policy — this is what the button is wired to.
+    cycle() {
+        const i = this.cycleOrder.indexOf(this.mode);
+        return this.setMode(this.cycleOrder[(i + 1) % this.cycleOrder.length]);
+    }
+
+    // Best candidate under the current policy, or null when off / none alive.
+    pick(candidates = []) {
+        const score = SCORES[this.mode];
+        if (!score) return null;
+
+        const from = this.tank.position;
+        let best = null;
+        let bestScore = -Infinity;
+        let bestDist = Infinity;
+
+        for (const candidate of candidates) {
+            if (!candidate || !candidate.alive || candidate === this.tank) continue;
+            const dist = Math.hypot(candidate.position.x - from.x, candidate.position.y - from.y);
+            const value = score(candidate, dist);
+            // Break ties by distance, then keep the current target so the gun
+            // does not flick between two identical candidates.
+            const better = value > bestScore
+                || (value === bestScore && dist < bestDist)
+                || (value === bestScore && dist === bestDist && candidate === this.target);
+            if (better) {
+                best = candidate;
+                bestScore = value;
+                bestDist = dist;
+            }
+        }
+        return best;
+    }
+
+    // Picks a target and swings the turret onto it. Returns the target (or null),
+    // so the caller can draw a reticle on it. Does not fire.
+    update(dt, candidates = []) {
+        if (!this.enabled) {
+            this.target = null;
+            return null;
+        }
+        this.target = this.pick(candidates);
+        if (this.target) this.tank.aimAt(this.target.position, dt);
+        return this.target;
+    }
+}
+
+// ===== components/controls/index.js =====
+// Barrel for the controls layer.
+
+// ===== components/render/shaders.js =====
+// The shader programs, compiled once per WebGL context and shared.
+//
+// Raptor started with a single program — position + per-vertex colour — because
+// every shape was a flat polygon. Textures need a second one, so the cache is
+// keyed by (context, kind) instead of by context alone. Adding a third (a glow,
+// a mask) is now a matter of adding an entry to PROGRAMS.
+//
+// Both programs take the same two matrices and a per-vertex colour, which is
+// what lets a sprite be *tinted*: the fragment shader multiplies the texel by
+// that colour, so white leaves the image alone, a colour tints it and alpha
+// fades it. One uniform less to think about, and no separate "tinted sprite".
+
+const COLOR_VS = `
+    attribute vec4 aVertexPosition;
+    attribute vec4 aVertexColor;
+
+    uniform mat4 uModelViewMatrix;
+    uniform mat4 uProjectionMatrix;
+
+    varying lowp vec4 vColor;
+
+    void main() {
+        gl_Position = uProjectionMatrix * uModelViewMatrix * aVertexPosition;
+        vColor = aVertexColor;
+    }
+`;
+
+const COLOR_FS = `
+    varying lowp vec4 vColor;
+
+    void main() {
+        gl_FragColor = vColor;
+    }
+`;
+
+const TEXTURE_VS = `
+    attribute vec4 aVertexPosition;
+    attribute vec4 aVertexColor;
+    attribute vec2 aTextureCoord;
+
+    uniform mat4 uModelViewMatrix;
+    uniform mat4 uProjectionMatrix;
+
+    varying lowp vec4 vTint;
+    varying highp vec2 vTextureCoord;
+
+    void main() {
+        gl_Position = uProjectionMatrix * uModelViewMatrix * aVertexPosition;
+        vTint = aVertexColor;
+        vTextureCoord = aTextureCoord;
+    }
+`;
+
+// The texel is multiplied by the tint, so a white tint is a no-op. Fully
+// transparent fragments are discarded rather than blended: without a depth
+// buffer to sort by, a transparent border would otherwise still write and
+// darken whatever is behind it at the edges.
+const TEXTURE_FS = `
+    precision mediump float;
+
+    varying lowp vec4 vTint;
+    varying highp vec2 vTextureCoord;
+
+    uniform sampler2D uSampler;
+
+    void main() {
+        vec4 texel = texture2D(uSampler, vTextureCoord);
+        if (texel.a < 0.01) discard;
+        gl_FragColor = texel * vTint;
+    }
+`;
+
+const PROGRAM_COLOR = "color";
+const PROGRAM_TEXTURE = "texture";
+
+const PROGRAMS = {
+    [PROGRAM_COLOR]: {
+        vertex: COLOR_VS,
+        fragment: COLOR_FS,
+        attributes: { vertexPosition: "aVertexPosition", vertexColor: "aVertexColor" },
+        uniforms: { projectionMatrix: "uProjectionMatrix", modelViewMatrix: "uModelViewMatrix" },
+    },
+    [PROGRAM_TEXTURE]: {
+        vertex: TEXTURE_VS,
+        fragment: TEXTURE_FS,
+        attributes: {
+            vertexPosition: "aVertexPosition",
+            vertexColor: "aVertexColor",
+            textureCoord: "aTextureCoord",
+        },
+        uniforms: {
+            projectionMatrix: "uProjectionMatrix",
+            modelViewMatrix: "uModelViewMatrix",
+            sampler: "uSampler",
+        },
+    },
+};
+
+function compile(gl, type, source, kind) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+        const log = gl.getShaderInfoLog(shader);
+        gl.deleteShader(shader);
+        // Throwing beats the old alert(): a framework has no business opening a
+        // modal, and a stack trace says which shape asked for the program.
+        throw new Error(`Raptor: no compila el shader "${kind}": ${log}`);
+    }
+    return shader;
+}
+
+function build(gl, kind) {
+    const spec = PROGRAMS[kind];
+    if (!spec) throw new Error(`Raptor: programa de shader desconocido "${kind}"`);
+
+    const program = gl.createProgram();
+    gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, spec.vertex, kind));
+    gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, spec.fragment, kind));
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        throw new Error(`Raptor: no enlaza el programa "${kind}": ${gl.getProgramInfoLog(program)}`);
+    }
+
+    const attribLocations = {};
+    for (const [name, glslName] of Object.entries(spec.attributes)) {
+        attribLocations[name] = gl.getAttribLocation(program, glslName);
+    }
+    const uniformLocations = {};
+    for (const [name, glslName] of Object.entries(spec.uniforms)) {
+        uniformLocations[name] = gl.getUniformLocation(program, glslName);
+    }
+    return { kind, program, attribLocations, uniformLocations };
+}
+
+// Keyed by context so several canvases stay independent, then by kind.
+const cache = new WeakMap();
+
+function getProgramInfo(gl, kind = PROGRAM_COLOR) {
+    let byKind = cache.get(gl);
+    if (!byKind) { byKind = new Map(); cache.set(gl, byKind); }
+    if (!byKind.has(kind)) byKind.set(kind, build(gl, kind));
+    return byKind.get(kind);
+}
+
+// ===== components/shapes/shape.js =====
+// Base class for every 2D shape the engine can draw.
+//
+// Shapes share the draw pipeline — the same matrices, the same transform, the
+// same loop — and differ in three things a subclass can override:
+//
+//   getVertices()   the local-space geometry
+//   drawMode        TRIANGLES, TRIANGLE_STRIP, TRIANGLE_FAN…
+//   program         which shader to use (see components/render/shaders.js)
+//
+// Anything needing extra vertex data (a sprite's texture coordinates) adds it
+// in `initBuffers` and binds it in `bindAttributes`, without touching the
+// matrix maths. See components/shapes/sprite.js for the one that does.
+
+
+// Used when draw() is called without a camera: pan 0, zoom 1 (world == screen).
+const IDENTITY_CAMERA = { x: 0, y: 0, zoom: 1 };
+
+class Shape {
+    constructor(context) {
+        this.context = context;
+
+        // Transform, in world space. Position/scale are 2D; depth is how far the
+        // shape sits from the perspective camera along -Z.
+        this.position = { x: 0, y: 0 };
+        this.rotation = 0; // degrees, counter-clockwise
+        this.scale = { x: 1, y: 1 };
+        this.depth = -DEFAULT_DEPTH;
+
+        this.color = { red: 1, green: 1, blue: 1, alpha: 1 };
+
+        // Subclasses override this (e.g. TRIANGLE_STRIP, TRIANGLE_FAN, TRIANGLES).
+        this.drawMode = context.TRIANGLES;
+
+        // How the physics layer should treat this shape: "polygon" (convex
+        // outline from getColliderVertices) or "circle" (uses this.radius).
+        this.colliderShape = "polygon";
+
+        // Which shader program to draw with. Subclasses override it; the
+        // default is flat per-vertex colour.
+        this.program = PROGRAM_COLOR;
+
+        // Draw order. Lower layers are drawn first, so higher ones land on top;
+        // within a layer, insertion order decides. Without this the only way to
+        // put a background behind a player is to add it first and never change
+        // your mind.
+        this.layer = 0;
+
+        this.programInfo = null;
+        this.buffers = null;
+        this.vCount = 0;
+
+        // Radius of the shape's own geometry, in local units. Filled in by
+        // initBuffers, and used by the engine to skip shapes that cannot be on
+        // screen. Null means "no idea" — such a shape is always drawn.
+        this._localRadius = null;
+    }
+
+    // A circle around the shape that is guaranteed to contain it, in world
+    // units. Conservative on purpose: culling something that *is* visible shows
+    // up as things popping in at the edge of the screen, which is far worse
+    // than drawing a few extra quads.
+    get cullRadius() {
+        if (this._localRadius === null) return null;
+        return this._localRadius * Math.max(Math.abs(this.scale.x), Math.abs(this.scale.y));
+    }
+
+    // Must be implemented by subclasses. Returns a flat array of local-space
+    // vertex positions: [x0, y0, x1, y1, ...].
+    getVertices() {
+        throw new Error(`${this.constructor.name} must implement getVertices()`);
+    }
+
+    // Convex outline used for collision, as an ordered list of local-space
+    // points [{x, y}, ...] (no fan center, no duplicated closing vertex).
+    // Polygon shapes override this; circle shapes set colliderShape = "circle".
+    getColliderVertices() {
+        throw new Error(`${this.constructor.name} must implement getColliderVertices()`);
+    }
+
+    // Uploads geometry to the GPU. Call once, after configuring the shape.
+    init() {
+        this.programInfo = getProgramInfo(this.context, this.program);
+        this.initBuffers();
+        return this;
+    }
+
+    initBuffers() {
+        const gl = this.context;
+
+        const vertices = this.getVertices();
+        this.vCount = vertices.length / 2;
+
+        // The furthest vertex from the origin. Computed here because the
+        // geometry is already in hand — asking for it again later would mean
+        // rebuilding it.
+        let furthest = 0;
+        for (let i = 0; i < vertices.length; i += 2) {
+            const distance = vertices[i] * vertices[i] + vertices[i + 1] * vertices[i + 1];
+            if (distance > furthest) furthest = distance;
+        }
+        this._localRadius = Math.sqrt(furthest);
+
+        const positionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+
+        const colorBuffer = gl.createBuffer();
+
+        this.buffers = { position: positionBuffer, color: colorBuffer };
+
+        this.uploadColors();
+    }
+
+    // (Re)fills the per-vertex color buffer with the current color. Safe to call
+    // after init() to recolor a shape without rebuilding its geometry.
+    uploadColors() {
+        const gl = this.context;
+        const { red, green, blue, alpha } = this.color;
+
+        const colors = [];
+        for (let i = 0; i < this.vCount; i++) {
+            colors.push(red, green, blue, alpha);
+        }
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.color);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+    }
+
+    // `camera` is an optional { x, y, zoom }; omitted (or the identity default)
+    // means "no camera", i.e. world space maps straight to the screen as before.
+    draw(camera = IDENTITY_CAMERA) {
+        const gl = this.context;
+
+        // View transform: pan by the camera center, then zoom about it. Depth is
+        // constant, so scaling the world coordinates scales the screen linearly.
+        const zoom = camera.zoom ?? 1;
+
+        // Both matrices come from shared, reused storage — see the note in
+        // components/render/projection.js on why that is safe and why it
+        // matters at a thousand-odd shapes a frame.
+        const projectionMatrix = projectionFor(gl.canvas);
+        const modelViewMatrix = modelViewFor({
+            x: (this.position.x - (camera.x ?? 0)) * zoom,
+            y: (this.position.y - (camera.y ?? 0)) * zoom,
+            depth: this.depth,
+            rotationDegrees: this.rotation,
+            scaleX: this.scale.x * zoom,
+            scaleY: this.scale.y * zoom,
+        });
+
+        const { uniformLocations, program } = this.programInfo;
+
+        gl.useProgram(program);
+        gl.uniformMatrix4fv(uniformLocations.projectionMatrix, false, projectionMatrix);
+        gl.uniformMatrix4fv(uniformLocations.modelViewMatrix, false, modelViewMatrix);
+
+        const enabled = this.bindAttributes(gl);
+        gl.drawArrays(this.drawMode, 0, this.vCount);
+
+        // Attribute arrays are global state, not part of the program: leaving
+        // one enabled makes the *next* shape read a buffer its shader never
+        // asked for. Now that there is more than one program, they have to be
+        // turned off again.
+        for (const location of enabled) gl.disableVertexAttribArray(location);
+    }
+
+    // Binds this shape's vertex data and returns the attribute locations it
+    // switched on, so draw() can switch them back off.
+    bindAttributes(gl) {
+        const { attribLocations } = this.programInfo;
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.position);
+        gl.vertexAttribPointer(attribLocations.vertexPosition, 2, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(attribLocations.vertexPosition);
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers.color);
+        gl.vertexAttribPointer(attribLocations.vertexColor, 4, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(attribLocations.vertexColor);
+
+        return [attribLocations.vertexPosition, attribLocations.vertexColor];
+    }
+
+    // --- Fluent configuration helpers (chainable) ---
+
+    setColor({ red, green, blue, alpha } = {}) {
+        this.color = {
+            red: red ?? 0.0,
+            green: green ?? 0.0,
+            blue: blue ?? 0.0,
+            alpha: alpha ?? 1.0,
+        };
+        if (this.buffers) {
+            this.uploadColors();
+        }
+        return this;
+    }
+
+    setPosition({ x, y } = {}) {
+        this.position = { x: x ?? this.position.x, y: y ?? this.position.y };
+        return this;
+    }
+
+    setScale({ x, y } = {}) {
+        this.scale = { x: x ?? 1.0, y: y ?? 1.0 };
+        return this;
+    }
+
+    setRotation(degrees) {
+        this.rotation = degrees;
+        return this;
+    }
+
+    setDepth(depth) {
+        this.depth = depth;
+        return this;
+    }
+
+    // Draw order. The engine re-sorts when this changes, so it is safe to call
+    // at any time — not just before the shape is added.
+    setLayer(layer) {
+        if (layer !== this.layer) {
+            this.layer = layer;
+            if (this._onLayerChange) this._onLayerChange(this);
+        }
+        return this;
+    }
+}
+
+// ===== components/shapes/rectangle.js =====
+// An axis-aligned rectangle centered on its origin.
+class Rectangle extends Shape {
+    constructor(context, { width = 1, height = 1 } = {}) {
+        super(context);
+        this.width = width;
+        this.height = height;
+        this.drawMode = context.TRIANGLE_STRIP;
+    }
+
+    getVertices() {
+        const hw = this.width / 2;
+        const hh = this.height / 2;
+
+        // Order matters for TRIANGLE_STRIP: two triangles sharing an edge.
+        return [
+             hw,  hh,
+            -hw,  hh,
+             hw, -hh,
+            -hw, -hh,
+        ];
+    }
+
+    getColliderVertices() {
+        const hw = this.width / 2;
+        const hh = this.height / 2;
+        // Counter-clockwise outline.
+        return [
+            { x: -hw, y: -hh },
+            { x:  hw, y: -hh },
+            { x:  hw, y:  hh },
+            { x: -hw, y:  hh },
+        ];
+    }
+}
+
+// ===== components/shapes/square.js =====
+// A square is just a rectangle with equal sides.
+class Square extends Rectangle {
+    constructor(context, { size = 1 } = {}) {
+        super(context, { width: size, height: size });
+    }
+}
+
+// ===== components/shapes/triangle.js =====
+// An isosceles triangle centered on its origin, apex pointing up.
+class Triangle extends Shape {
+    constructor(context, { width = 1, height = 1 } = {}) {
+        super(context);
+        this.width = width;
+        this.height = height;
+        this.drawMode = context.TRIANGLES;
+    }
+
+    getVertices() {
+        const hw = this.width / 2;
+        const hh = this.height / 2;
+
+        return [
+              0,  hh, // apex
+            -hw, -hh, // bottom-left
+             hw, -hh, // bottom-right
+        ];
+    }
+
+    getColliderVertices() {
+        const hw = this.width / 2;
+        const hh = this.height / 2;
+        // Counter-clockwise outline.
+        return [
+            { x: -hw, y: -hh },
+            { x:  hw, y: -hh },
+            { x:   0, y:  hh },
+        ];
+    }
+}
+
+// ===== components/shapes/polygon.js =====
+// A filled convex polygon defined by an explicit list of points, e.g.
+//   new Polygon(gl, { points: [ {x:0,y:0.6}, {x:0.6,y:0}, {x:-0.6,y:0} ] })
+//
+// Rendered as a TRIANGLE_FAN, which correctly fills any convex polygon. For
+// concave polygons a real triangulation (ear clipping) would be needed.
+class Polygon extends Shape {
+    constructor(context, { points = [] } = {}) {
+        super(context);
+        this.points = points;
+        this.drawMode = context.TRIANGLE_FAN;
+    }
+
+    getVertices() {
+        const vertices = [];
+        for (const p of this.points) {
+            vertices.push(p.x, p.y);
+        }
+        return vertices;
+    }
+
+    getColliderVertices() {
+        return this.points.map((p) => ({ x: p.x, y: p.y }));
+    }
+}
+
+// A regular N-sided polygon (equilateral triangle, pentagon, hexagon, ...).
+// Built as a TRIANGLE_FAN around a center vertex so any side count fills solidly.
+class RegularPolygon extends Shape {
+    constructor(context, { sides = 6, radius = 0.5 } = {}) {
+        super(context);
+        this.sides = Math.max(3, sides);
+        this.radius = radius;
+        this.drawMode = context.TRIANGLE_FAN;
+    }
+
+    getVertices() {
+        const vertices = [0, 0]; // center of the fan
+
+        // Start at the top (-90°) and go around once, repeating the first rim
+        // point at the end to close the shape.
+        for (let i = 0; i <= this.sides; i++) {
+            const angle = (i / this.sides) * Math.PI * 2 - Math.PI / 2;
+            vertices.push(Math.cos(angle) * this.radius, Math.sin(angle) * this.radius);
+        }
+
+        return vertices;
+    }
+
+    getColliderVertices() {
+        const points = [];
+        // The rim points only (no center, no duplicated closing vertex).
+        for (let i = 0; i < this.sides; i++) {
+            const angle = (i / this.sides) * Math.PI * 2 - Math.PI / 2;
+            points.push({ x: Math.cos(angle) * this.radius, y: Math.sin(angle) * this.radius });
+        }
+        return points;
+    }
+}
+
+// ===== components/shapes/circle.js =====
+// A circle is a regular polygon with enough sides to look round. Increase
+// `segments` for a smoother edge on large circles.
+class Circle extends RegularPolygon {
+    constructor(context, { radius = 0.5, segments = 48 } = {}) {
+        super(context, { sides: segments, radius });
+        // Treated as a true circle by the physics layer (uses this.radius),
+        // not as a 48-gon.
+        this.colliderShape = "circle";
+    }
+}
+
+// ===== components/weapons/armor.js =====
+// Per-face armor for a target shape. Each collider edge (in getColliderVertices
+// order) has a nominal armor thickness in mm and a readable face name. The armor
+// travels with the shape's rotation, so angling the hull changes which value a
+// shell meets — exactly what drives the penetration model.
+
+class Armor {
+    // faces: array aligned to the shape's collider edges, each { armor, name }.
+    constructor(shape, faces, { hp = 100 } = {}) {
+        this.shape = shape;
+        this.faces = faces;
+        this.maxHp = hp;
+        this.hp = hp;
+        this.alive = true;
+    }
+
+    faceForEdge(index) {
+        return this.faces[index];
+    }
+
+    takeDamage(amount) {
+        this.hp = Math.max(0, this.hp - amount);
+        if (this.hp === 0) this.alive = false;
+        return this.hp;
+    }
+
+    // Builds per-face armor for any convex hull by looking at where each face
+    // actually points in the shape's local space: faces within `frontArc` of
+    // local +Y (forward) are frontal, those as far from it are the rear, and the
+    // rest are sides. Works for a rectangle, a wedge, a hexagon — anything with
+    // a counter-clockwise collider outline, which is what the raycast assumes.
+    static forHull(shape, { front, side, rear, hp = 100, frontArc = 75 } = {}) {
+        const points = shape.getColliderVertices();
+        const faces = points.map((p, i) => {
+            const q = points[(i + 1) % points.length];
+            const dx = q.x - p.x;
+            const dy = q.y - p.y;
+            const len = Math.hypot(dx, dy) || 1;
+            // Outward normal of a CCW edge is (dy, -dx); we only need its Y to
+            // know how far the face is turned away from "forward".
+            const ny = -dx / len;
+            const angle = (Math.acos(Math.max(-1, Math.min(1, ny))) * 180) / Math.PI;
+            if (angle <= frontArc) return { armor: front, name: "Frontal" };
+            if (angle >= 180 - frontArc) return { armor: rear, name: "Trasera" };
+            return { armor: side, name: "Lateral" };
+        });
+        return new Armor(shape, faces, { hp });
+    }
+
+    // Convenience for a rectangular hull. `frontEdge` is the collider edge that
+    // faces the enemy; its opposite becomes the rear, the other two the sides.
+    static rectangle(shape, { front, side, rear, frontEdge = 3, hp = 100 } = {}) {
+        const faces = [];
+        for (let i = 0; i < 4; i++) faces.push({ armor: side, name: "Lateral" });
+        faces[frontEdge % 4] = { armor: front, name: "Frontal" };
+        faces[(frontEdge + 2) % 4] = { armor: rear, name: "Trasera" };
+        return new Armor(shape, faces, { hp });
+    }
+}
+
+// ===== components/vehicles/tank.js =====
+// A tank built out of engine shapes: a hull that drives, plus a turret and a
+// barrel that rotate on top of it *independently* of the hull. That split is
+// the point — a real tank can keep its aim while the hull turns away.
+//
+// Angles follow the engine convention: degrees, counter-clockwise, and local
+// +Y is "forward", so 0° faces up the screen. The turret stores an absolute
+// world angle (not one relative to the hull), which is what you want for
+// aiming: the gun keeps pointing at a target while the hull manoeuvres.
+//
+// Designs (TANK_DESIGNS) vary the *shape* of the hull and turret — rectangle,
+// triangle, hexagon, wedge — along with the driving and traverse stats, so each
+// one handles differently. Feed `design.drive` straight into a TankController.
+
+
+
+
+
+
+// Every design: hull/turret shape factories, a collision radius, the barrel
+// geometry, driving stats (for TankController) and the turret traverse rate.
+const TANK_DESIGNS = {
+    medium: {
+        id: "medium",
+        name: "Medio",
+        hint: "Equilibrado. Casco rectangular.",
+        radius: 0.42,
+        hull: (gl) => new Rectangle(gl, { width: 0.55, height: 0.8 }),
+        turret: (gl) => new Circle(gl, { radius: 0.22 }),
+        barrel: { width: 0.1, length: 0.5, offset: 0.42 },
+        colors: {
+            hull: { red: 0.27, green: 0.5, blue: 0.32 },
+            turret: { red: 0.22, green: 0.42, blue: 0.28 },
+            barrel: { red: 0.16, green: 0.3, blue: 0.2 },
+        },
+        drive: { accel: 5, maxSpeed: 3, turnSpeed: 140, friction: 5 },
+        traverse: 120,
+        hp: 100,
+        gearbox: { ratios: [0.3, 0.52, 0.75, 1.0], reverseRatio: 0.4, shiftTime: 0.25 },
+        armor: { front: 65, side: 38, rear: 28 },
+        weapon: { damage: 25, reload: 1.1, muzzleSpeed: 11, penetration: 95 },
+        ammo: "AP",
+    },
+
+    light: {
+        id: "light",
+        name: "Ligero",
+        hint: "Rápido y ágil. Casco triangular.",
+        radius: 0.34,
+        hull: (gl) => new Triangle(gl, { width: 0.6, height: 0.85 }),
+        turret: (gl) => new RegularPolygon(gl, { sides: 5, radius: 0.17 }),
+        barrel: { width: 0.08, length: 0.42, offset: 0.36 },
+        colors: {
+            hull: { red: 0.85, green: 0.66, blue: 0.24 },
+            turret: { red: 0.7, green: 0.53, blue: 0.18 },
+            barrel: { red: 0.5, green: 0.38, blue: 0.14 },
+        },
+        drive: { accel: 7.5, maxSpeed: 4.4, turnSpeed: 200, friction: 6 },
+        traverse: 180,
+        hp: 65,
+        gearbox: { ratios: [0.26, 0.45, 0.63, 0.82, 1.0], reverseRatio: 0.45, shiftTime: 0.16 },
+        armor: { front: 30, side: 18, rear: 14 },
+        weapon: { damage: 13, reload: 0.55, muzzleSpeed: 13, penetration: 55 },
+        ammo: "APCR",
+    },
+
+    heavy: {
+        id: "heavy",
+        name: "Pesado",
+        hint: "Lento y macizo. Casco hexagonal.",
+        radius: 0.52,
+        hull: (gl) => new RegularPolygon(gl, { sides: 6, radius: 0.56 }),
+        turret: (gl) => new Circle(gl, { radius: 0.3 }),
+        barrel: { width: 0.13, length: 0.62, offset: 0.54 },
+        colors: {
+            hull: { red: 0.42, green: 0.3, blue: 0.34 },
+            turret: { red: 0.34, green: 0.24, blue: 0.28 },
+            barrel: { red: 0.24, green: 0.17, blue: 0.2 },
+        },
+        drive: { accel: 3, maxSpeed: 1.9, turnSpeed: 80, friction: 4 },
+        traverse: 60,
+        hp: 170,
+        gearbox: { ratios: [0.36, 0.68, 1.0], reverseRatio: 0.32, shiftTime: 0.5 },
+        armor: { front: 105, side: 62, rear: 45 },
+        weapon: { damage: 42, reload: 2.2, muzzleSpeed: 9, penetration: 145 },
+        ammo: "AP",
+    },
+
+    hunter: {
+        id: "hunter",
+        name: "Cazacarros",
+        hint: "Nariz en cuña, torreta lenta.",
+        radius: 0.44,
+        // A convex wedge: pointed nose, wide tail. Wound counter-clockwise so the
+        // ballistics layer derives outward face normals (it assumes CCW).
+        hull: (gl) => new Polygon(gl, {
+            points: [
+                { x: -0.36, y: 0.06 },
+                { x: -0.3, y: -0.46 },
+                { x: 0.3, y: -0.46 },
+                { x: 0.36, y: 0.06 },
+                { x: 0, y: 0.52 },
+            ],
+        }),
+        turret: (gl) => new Square(gl, { size: 0.34 }),
+        barrel: { width: 0.11, length: 0.7, offset: 0.5 },
+        colors: {
+            hull: { red: 0.29, green: 0.38, blue: 0.5 },
+            turret: { red: 0.23, green: 0.31, blue: 0.42 },
+            barrel: { red: 0.16, green: 0.22, blue: 0.31 },
+        },
+        drive: { accel: 5.5, maxSpeed: 3.4, turnSpeed: 105, friction: 5 },
+        traverse: 45,
+        hp: 90,
+        gearbox: { ratios: [0.28, 0.5, 0.74, 1.0], reverseRatio: 0.4, shiftTime: 0.32 },
+        armor: { front: 85, side: 42, rear: 30 },
+        weapon: { damage: 36, reload: 1.7, muzzleSpeed: 14, penetration: 125 },
+        ammo: "APCR",
+    },
+};
+
+const DEFAULT_DESIGN = TANK_DESIGNS.medium;
+
+// Shortest signed difference between two angles, in degrees, within (-180, 180].
+function angleDelta(from, to) {
+    return (((to - from + 180) % 360) + 360) % 360 - 180;
+}
+
+// Health bar geometry, in world units. The bar floats above the hull and never
+// rotates with it, so it stays readable however the tank is facing.
+const BAR_HEIGHT = 0.11;
+const BAR_GAP = 0.3;
+const BAR_BACK_COLOR = { red: 0.1, green: 0.11, blue: 0.13 };
+// Fill color by remaining health: healthy, hurt, critical.
+const BAR_FILL_COLORS = [
+    { at: 0.5, color: { red: 0.26, green: 0.75, blue: 0.41 } },
+    { at: 0.2, color: { red: 0.85, green: 0.69, blue: 0.23 } },
+    { at: 0, color: { red: 0.85, green: 0.29, blue: 0.24 } },
+];
+
+class Tank {
+    constructor(gl, { design = DEFAULT_DESIGN, x = 0, y = 0, rotation = 0, turretAngle = null, colors = design.colors } = {}) {
+        this.design = design;
+
+        this.hull = design.hull(gl).setColor(colors.hull)
+            .setPosition({ x, y }).setRotation(rotation).init();
+        this.barrel = new Rectangle(gl, { width: design.barrel.width, height: design.barrel.length })
+            .setColor(colors.barrel).init();
+        this.turret = design.turret(gl).setColor(colors.turret).init();
+
+        // Absolute world angle of the gun; starts aligned with the hull.
+        this.turretAngle = turretAngle ?? rotation;
+
+        // Health. `maxHp` comes from the design; the bar reflects the ratio.
+        this.maxHp = design.hp ?? 100;
+        this.hp = this.maxHp;
+        this.alive = true;
+
+        // Per-face armor derived from the hull's own outline, so angling the
+        // hull changes which plate a shell meets. See Armor.forHull.
+        this.armor = design.armor ? Armor.forHull(this.hull, design.armor) : null;
+
+        // Health bar: a dark backing plate with a colored fill on top. The fill
+        // is scaled horizontally (and nudged left) so it empties from the right.
+        this.barWidth = Math.max(0.62, design.radius * 1.9);
+        this.barBack = new Rectangle(gl, { width: this.barWidth + 0.04, height: BAR_HEIGHT + 0.04 })
+            .setColor(BAR_BACK_COLOR).init();
+        this.barFill = new Rectangle(gl, { width: this.barWidth, height: BAR_HEIGHT })
+            .setColor(BAR_FILL_COLORS[0].color).init();
+        this._barBucket = 0; // index into BAR_FILL_COLORS, to avoid re-uploading
+
+        // Draw order: hull, barrel, turret, then the bar on top of everything.
+        this.parts = [this.hull, this.barrel, this.turret, this.barBack, this.barFill];
+        this.sync();
+    }
+
+    get hpRatio() {
+        return this.maxHp > 0 ? Math.max(0, this.hp) / this.maxHp : 0;
+    }
+
+    // Applies damage. Returns true while the tank is still alive.
+    takeDamage(amount) {
+        if (!this.alive) return false;
+        this.hp -= amount;
+        if (this.hp <= 0) {
+            this.hp = 0;
+            this.alive = false;
+        }
+        return this.alive;
+    }
+
+    // How dangerous this design is, regardless of current damage: durability
+    // times sustained damage output. Used by auto-aim to rank threats.
+    get power() {
+        const w = this.design.weapon;
+        return w ? (this.maxHp * w.damage) / w.reload : this.maxHp;
+    }
+
+    // The hull carries the tank's transform — drive it with a TankController.
+    get position() { return this.hull.position; }
+    get rotation() { return this.hull.rotation; }
+    get radius() { return this.design.radius; }
+
+    // Unit vector the gun points along.
+    get turretForward() {
+        const a = (this.turretAngle * Math.PI) / 180;
+        return { x: -Math.sin(a), y: Math.cos(a) };
+    }
+
+    // Where a shell would leave the gun, for wiring up the weapons module.
+    get muzzle() {
+        const f = this.turretForward;
+        const d = this.design.barrel.offset + this.design.barrel.length / 2;
+        return { x: this.position.x + f.x * d, y: this.position.y + f.y * d };
+    }
+
+    addTo(game) {
+        for (const part of this.parts) game.add(part);
+        return this;
+    }
+
+    removeFrom(game) {
+        for (const part of this.parts) game.remove(part);
+        return this;
+    }
+
+    // Rotates the gun toward an absolute angle, capped by the traverse rate.
+    turnTurretTo(angle, dt) {
+        const diff = angleDelta(this.turretAngle, angle);
+        const max = this.design.traverse * dt;
+        this.turretAngle += Math.abs(diff) <= max ? diff : Math.sign(diff) * max;
+        return this;
+    }
+
+    // Nominal armor of the hull face a shell came through (by collider edge).
+    faceForEdge(index) {
+        return this.armor ? this.armor.faceForEdge(index) : null;
+    }
+
+    // How far off the gun is from a world point, in degrees (0 = dead on).
+    // Lets callers decide whether it is worth pulling the trigger yet.
+    aimErrorTo(point) {
+        const dx = point.x - this.position.x;
+        const dy = point.y - this.position.y;
+        if (dx === 0 && dy === 0) return 0;
+        const bearing = (Math.atan2(-dx, dy) * 180) / Math.PI;
+        return Math.abs(angleDelta(this.turretAngle, bearing));
+    }
+
+    // Aims the gun at a world point (the mouse, a target, ...).
+    aimAt(point, dt) {
+        const dx = point.x - this.position.x;
+        const dy = point.y - this.position.y;
+        if (dx === 0 && dy === 0) return this;
+        // Inverse of turretForward: the angle whose (-sin, cos) points at (dx, dy).
+        return this.turnTurretTo((Math.atan2(-dx, dy) * 180) / Math.PI, dt);
+    }
+
+    // Manual traverse: dir > 0 turns the gun left (CCW), dir < 0 right.
+    traverse(dir, dt) {
+        this.turretAngle += dir * this.design.traverse * dt;
+        return this;
+    }
+
+    // Places the turret and barrel on the hull, following the gun's own angle.
+    // Call once per frame, after the hull has moved.
+    sync() {
+        const p = this.position;
+        const f = this.turretForward;
+        this.turret.setPosition({ x: p.x, y: p.y }).setRotation(this.turretAngle);
+        this.barrel
+            .setPosition({ x: p.x + f.x * this.design.barrel.offset, y: p.y + f.y * this.design.barrel.offset })
+            .setRotation(this.turretAngle);
+
+        // Health bar, level above the hull whatever way the tank points.
+        const ratio = this.hpRatio;
+        const barY = p.y + this.design.radius + BAR_GAP;
+        this.barBack.setPosition({ x: p.x, y: barY });
+        this.barFill
+            .setScale({ x: ratio, y: 1 })
+            .setPosition({ x: p.x - (this.barWidth * (1 - ratio)) / 2, y: barY });
+
+        // Recolor only when crossing a threshold — setColor re-uploads a buffer.
+        const bucket = BAR_FILL_COLORS.findIndex((b) => ratio > b.at);
+        const next = bucket === -1 ? BAR_FILL_COLORS.length - 1 : bucket;
+        if (next !== this._barBucket) {
+            this._barBucket = next;
+            this.barFill.setColor(BAR_FILL_COLORS[next].color);
+        }
+        return this;
+    }
+}
+
+// ===== components/vehicles/engine.js =====
+// A combustion engine: revs in, torque out, power derived.
+//
+// Torque is not flat — it climbs off idle, peaks somewhere in the mid range and
+// falls away toward the redline. That shape is the whole reason gears exist, so
+// the curve here is the thing worth getting right:
+//
+//   torque(rpm) = peakTorque · (1 − k · offset²)
+//
+// with a different k below and above the peak, chosen so the curve passes
+// exactly through the idle and redline values you specify. Smooth, monotonic on
+// each side, and tunable with numbers a person can reason about.
+//
+// Power is not an independent setting — it *falls out* of torque and revs:
+//
+//   P [W] = T [N·m] · ω [rad/s],   ω = rpm · 2π / 60
+//
+// which is why peak power always sits at higher revs than peak torque: torque is
+// sagging, but ω is climbing faster. `peakPower` finds that point by sampling.
+
+const RPM_TO_RAD = (2 * Math.PI) / 60;
+const W_PER_HP = 735.5; // metric horsepower (CV)
+
+class Engine {
+    constructor({
+        idleRpm = 800,
+        redlineRpm = 6800,
+        peakTorque = 340,        // N·m
+        peakTorqueRpm = 3400,
+        torqueAtIdle = 0.55,     // fraction of peak torque down at idle
+        torqueAtRedline = 0.74,  // ... and up at the limiter
+    } = {}) {
+        this.idleRpm = idleRpm;
+        this.redlineRpm = redlineRpm;
+        this.peakTorque = peakTorque;
+        this.peakTorqueRpm = peakTorqueRpm;
+        this.torqueAtIdle = torqueAtIdle;
+        this.torqueAtRedline = torqueAtRedline;
+    }
+
+    // Torque in N·m at the crank.
+    torqueAt(rpm) {
+        const r = Math.max(0, Math.min(this.redlineRpm, rpm));
+        if (r <= this.peakTorqueRpm) {
+            const span = this.peakTorqueRpm - this.idleRpm || 1;
+            const off = Math.max(0, (this.peakTorqueRpm - r) / span); // 1 at idle, 0 at peak
+            return this.peakTorque * (1 - (1 - this.torqueAtIdle) * off * off);
+        }
+        const span = this.redlineRpm - this.peakTorqueRpm || 1;
+        const off = (r - this.peakTorqueRpm) / span;                   // 0 at peak, 1 at redline
+        return this.peakTorque * (1 - (1 - this.torqueAtRedline) * off * off);
+    }
+
+    // Power in watts — torque times angular velocity, nothing more.
+    powerAt(rpm) {
+        return this.torqueAt(rpm) * rpm * RPM_TO_RAD;
+    }
+
+    powerHpAt(rpm) {
+        return this.powerAt(rpm) / W_PER_HP;
+    }
+
+    // Where the engine makes the most power, found by sampling the curve.
+    get peakPower() {
+        if (this._peak) return this._peak;
+        let best = { rpm: this.idleRpm, watts: 0 };
+        for (let rpm = this.idleRpm; rpm <= this.redlineRpm; rpm += 10) {
+            const watts = this.powerAt(rpm);
+            if (watts > best.watts) best = { rpm, watts };
+        }
+        this._peak = { rpm: best.rpm, watts: best.watts, hp: best.watts / W_PER_HP };
+        return this._peak;
+    }
+}
+
+// ===== components/vehicles/index.js =====
+// Barrel for the vehicles layer.
+
 // ===== components/weapons/ballistics.js =====
 // Ballistics: where bullets meet armor.
 //
@@ -3048,68 +4910,405 @@ class Weapon {
     }
 }
 
-// ===== components/weapons/armor.js =====
-// Per-face armor for a target shape. Each collider edge (in getColliderVertices
-// order) has a nominal armor thickness in mm and a readable face name. The armor
-// travels with the shape's rotation, so angling the hull changes which value a
-// shell meets — exactly what drives the penetration model.
+// ===== components/weapons/index.js =====
+// Barrel for the weapons / ballistics layer.
 
-class Armor {
-    // faces: array aligned to the shape's collider edges, each { armor, name }.
-    constructor(shape, faces, { hp = 100 } = {}) {
+// ===== components/physics/body.js =====
+// A physics body attached to a shape. The shape remains the source of truth for
+// the transform (position/rotation/scale); the body adds the dynamics on top:
+// type, velocity, mass and collision filtering.
+//
+// Body types:
+//   - "static":  never moves, infinite mass. Walls, ground.
+//   - "dynamic": integrated every step and pushed by collisions (rigid body).
+//
+// Collision filtering (see World.shouldCollide):
+//   - groupIndex: bodies sharing the same non-zero group always collide (>0) or
+//     never collide (<0), overriding category/mask. 0 means "use category/mask".
+//   - category/mask: bitmasks; A and B collide only if
+//     (A.mask & B.category) && (B.mask & A.category).
+
+const STATIC = "static";
+const DYNAMIC = "dynamic";
+
+class Body {
+    constructor(shape, {
+        type = DYNAMIC,
+        mass = 1,
+        restitution = 0.4,
+        velocity = { x: 0, y: 0 },
+        groupIndex = 0,
+        category = 0x0001,
+        mask = 0xffff,
+    } = {}) {
         this.shape = shape;
-        this.faces = faces;
-        this.maxHp = hp;
-        this.hp = hp;
-        this.alive = true;
+        this.type = type;
+        this.velocity = { x: velocity.x, y: velocity.y };
+        this.restitution = restitution;
+        this.groupIndex = groupIndex;
+        this.category = category;
+        this.mask = mask;
+        this._mass = mass;
+        this._recomputeMass();
     }
 
-    faceForEdge(index) {
-        return this.faces[index];
+    get isDynamic() {
+        return this.type === DYNAMIC;
     }
 
-    takeDamage(amount) {
-        this.hp = Math.max(0, this.hp - amount);
-        if (this.hp === 0) this.alive = false;
-        return this.hp;
+    // Convenience access to the shape transform.
+    get position() {
+        return this.shape.position;
     }
 
-    // Builds per-face armor for any convex hull by looking at where each face
-    // actually points in the shape's local space: faces within `frontArc` of
-    // local +Y (forward) are frontal, those as far from it are the rear, and the
-    // rest are sides. Works for a rectangle, a wedge, a hexagon — anything with
-    // a counter-clockwise collider outline, which is what the raycast assumes.
-    static forHull(shape, { front, side, rear, hp = 100, frontArc = 75 } = {}) {
-        const points = shape.getColliderVertices();
-        const faces = points.map((p, i) => {
-            const q = points[(i + 1) % points.length];
-            const dx = q.x - p.x;
-            const dy = q.y - p.y;
-            const len = Math.hypot(dx, dy) || 1;
-            // Outward normal of a CCW edge is (dy, -dx); we only need its Y to
-            // know how far the face is turned away from "forward".
-            const ny = -dx / len;
-            const angle = (Math.acos(Math.max(-1, Math.min(1, ny))) * 180) / Math.PI;
-            if (angle <= frontArc) return { armor: front, name: "Frontal" };
-            if (angle >= 180 - frontArc) return { armor: rear, name: "Trasera" };
-            return { armor: side, name: "Lateral" };
-        });
-        return new Armor(shape, faces, { hp });
+    _recomputeMass() {
+        this.invMass = this.type === DYNAMIC && this._mass > 0 ? 1 / this._mass : 0;
     }
 
-    // Convenience for a rectangular hull. `frontEdge` is the collider edge that
-    // faces the enemy; its opposite becomes the rear, the other two the sides.
-    static rectangle(shape, { front, side, rear, frontEdge = 3, hp = 100 } = {}) {
-        const faces = [];
-        for (let i = 0; i < 4; i++) faces.push({ armor: side, name: "Lateral" });
-        faces[frontEdge % 4] = { armor: front, name: "Frontal" };
-        faces[(frontEdge + 2) % 4] = { armor: rear, name: "Trasera" };
-        return new Armor(shape, faces, { hp });
+    setType(type) {
+        this.type = type;
+        if (type === STATIC) {
+            this.velocity.x = 0;
+            this.velocity.y = 0;
+        }
+        this._recomputeMass();
+        return this;
+    }
+
+    setMass(mass) {
+        this._mass = mass;
+        this._recomputeMass();
+        return this;
+    }
+
+    setVelocity(x, y) {
+        this.velocity.x = x;
+        this.velocity.y = y;
+        return this;
     }
 }
 
-// ===== components/weapons/index.js =====
-// Barrel for the weapons / ballistics layer.
+// ===== components/physics/collision.js =====
+// Convex collision detection for the shapes the engine ships with.
+//
+// collide(bodyA, bodyB) returns null when they are apart, or a manifold
+// { normal, penetration } when they overlap. `normal` is a unit vector pointing
+// from A toward B, and `penetration` is how deep the overlap is along it.
+//
+// Physics happens in the flat 2D world plane the shapes live in (their x/y
+// before the perspective projection), so colliders are built from each shape's
+// local collider outline transformed by position/rotation/scale.
+
+function transformPoint(p, shape) {
+    const angle = (shape.rotation * Math.PI) / 180;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    const x = p.x * shape.scale.x;
+    const y = p.y * shape.scale.y;
+    return {
+        x: shape.position.x + x * cos - y * sin,
+        y: shape.position.y + x * sin + y * cos,
+    };
+}
+
+function worldPolygon(shape) {
+    return shape.getColliderVertices().map((p) => transformPoint(p, shape));
+}
+
+function worldCircle(shape) {
+    // Uniform scale is assumed for circles; scale.x drives the radius.
+    return { center: { x: shape.position.x, y: shape.position.y }, radius: shape.radius * shape.scale.x };
+}
+
+// Largest distance from the shape's origin to its outline, in world units.
+function boundingRadius(shape) {
+    if (shape.colliderShape === "circle") {
+        return shape.radius * Math.max(shape.scale.x, shape.scale.y);
+    }
+    let max = 0;
+    for (const p of shape.getColliderVertices()) {
+        max = Math.max(max, Math.hypot(p.x * shape.scale.x, p.y * shape.scale.y));
+    }
+    return max;
+}
+
+function centroid(poly) {
+    let x = 0;
+    let y = 0;
+    for (const p of poly) {
+        x += p.x;
+        y += p.y;
+    }
+    return { x: x / poly.length, y: y / poly.length };
+}
+
+function projectOntoAxis(poly, axis) {
+    let min = Infinity;
+    let max = -Infinity;
+    for (const p of poly) {
+        const dot = p.x * axis.x + p.y * axis.y;
+        min = Math.min(min, dot);
+        max = Math.max(max, dot);
+    }
+    return [min, max];
+}
+
+// Separating Axis Theorem for two convex polygons. Returns the minimum
+// translation vector as { normal (A->B), penetration } or null if separated.
+function satPolygons(a, b) {
+    let minOverlap = Infinity;
+    let smallestAxis = null;
+
+    for (const poly of [a, b]) {
+        for (let i = 0; i < poly.length; i++) {
+            const p1 = poly[i];
+            const p2 = poly[(i + 1) % poly.length];
+            const edge = { x: p2.x - p1.x, y: p2.y - p1.y };
+            const len = Math.hypot(edge.x, edge.y) || 1;
+            const axis = { x: -edge.y / len, y: edge.x / len };
+
+            const [minA, maxA] = projectOntoAxis(a, axis);
+            const [minB, maxB] = projectOntoAxis(b, axis);
+
+            if (maxA < minB || maxB < minA) {
+                return null; // found a separating axis
+            }
+
+            const overlap = Math.min(maxA, maxB) - Math.max(minA, minB);
+            if (overlap < minOverlap) {
+                minOverlap = overlap;
+                smallestAxis = axis;
+            }
+        }
+    }
+
+    // Orient the normal from A toward B.
+    const ca = centroid(a);
+    const cb = centroid(b);
+    if ((cb.x - ca.x) * smallestAxis.x + (cb.y - ca.y) * smallestAxis.y < 0) {
+        smallestAxis = { x: -smallestAxis.x, y: -smallestAxis.y };
+    }
+
+    return { normal: smallestAxis, penetration: minOverlap };
+}
+
+function circleCircle(ca, cb) {
+    const dx = cb.center.x - ca.center.x;
+    const dy = cb.center.y - ca.center.y;
+    const dist = Math.hypot(dx, dy);
+    const sum = ca.radius + cb.radius;
+    if (dist >= sum) return null;
+    const normal = dist > 1e-6 ? { x: dx / dist, y: dy / dist } : { x: 1, y: 0 };
+    return { normal, penetration: sum - dist };
+}
+
+function closestPointOnSegment(p, a, b) {
+    const abx = b.x - a.x;
+    const aby = b.y - a.y;
+    const lenSq = abx * abx + aby * aby || 1;
+    let t = ((p.x - a.x) * abx + (p.y - a.y) * aby) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    return { x: a.x + abx * t, y: a.y + aby * t };
+}
+
+function pointInPolygon(p, poly) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const a = poly[i];
+        const b = poly[j];
+        if ((a.y > p.y) !== (b.y > p.y) && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) {
+            inside = !inside;
+        }
+    }
+    return inside;
+}
+
+// Returns manifold with normal pointing from the polygon toward the circle.
+function circlePolygon(circle, poly) {
+    let closest = null;
+    let minDistSq = Infinity;
+    for (let i = 0; i < poly.length; i++) {
+        const cp = closestPointOnSegment(circle.center, poly[i], poly[(i + 1) % poly.length]);
+        const dsq = (cp.x - circle.center.x) ** 2 + (cp.y - circle.center.y) ** 2;
+        if (dsq < minDistSq) {
+            minDistSq = dsq;
+            closest = cp;
+        }
+    }
+
+    const inside = pointInPolygon(circle.center, poly);
+    const dist = Math.sqrt(minDistSq);
+    if (!inside && dist >= circle.radius) return null;
+
+    let normal;
+    if (dist > 1e-6) {
+        normal = { x: (circle.center.x - closest.x) / dist, y: (circle.center.y - closest.y) / dist };
+    } else {
+        normal = { x: 0, y: 1 };
+    }
+    if (inside) {
+        return { normal, penetration: circle.radius + dist };
+    }
+    return { normal, penetration: circle.radius - dist };
+}
+
+function collide(bodyA, bodyB) {
+    const sa = bodyA.shape;
+    const sb = bodyB.shape;
+    const aCircle = sa.colliderShape === "circle";
+    const bCircle = sb.colliderShape === "circle";
+
+    if (aCircle && bCircle) {
+        return circleCircle(worldCircle(sa), worldCircle(sb));
+    }
+    if (!aCircle && !bCircle) {
+        return satPolygons(worldPolygon(sa), worldPolygon(sb));
+    }
+
+    // One circle, one polygon.
+    const circleShape = aCircle ? sa : sb;
+    const polyShape = aCircle ? sb : sa;
+    const res = circlePolygon(worldCircle(circleShape), worldPolygon(polyShape));
+    if (!res) return null;
+
+    // res.normal points polygon -> circle. Reorient to A -> B.
+    const normal = aCircle ? { x: -res.normal.x, y: -res.normal.y } : res.normal;
+    return { normal, penetration: res.penetration };
+}
+
+// ===== components/physics/world.js =====
+// The physics world: holds the bodies, integrates them and resolves collisions.
+// Call step(dt) once per frame (register it as an engine updater).
+//
+// Scope (Fase A): linear rigid-body dynamics. Bodies translate and bounce along
+// the collision normal; angular response (spin from off-center hits) is not
+// simulated yet.
+
+
+// Positional correction keeps overlapping bodies from sinking into each other.
+const CORRECTION_PERCENT = 0.8;
+const CORRECTION_SLOP = 0.001;
+const SOLVER_ITERATIONS = 2;
+
+class World {
+    constructor({ gravity = { x: 0, y: 0 }, bounds = null, linearDamping = 0 } = {}) {
+        this.bodies = [];
+        this.gravity = gravity;
+        this.bounds = bounds; // { minX, maxX, minY, maxY } or null
+        this.linearDamping = linearDamping;
+    }
+
+    add(body) {
+        this.bodies.push(body);
+        return body;
+    }
+
+    remove(body) {
+        const i = this.bodies.indexOf(body);
+        if (i !== -1) this.bodies.splice(i, 1);
+        return this;
+    }
+
+    // Whether two bodies are allowed to collide, per group/category/mask rules.
+    static shouldCollide(a, b) {
+        if (a.type === STATIC && b.type === STATIC) return false;
+        if (a.groupIndex !== 0 && a.groupIndex === b.groupIndex) {
+            return a.groupIndex > 0;
+        }
+        return (a.mask & b.category) !== 0 && (b.mask & a.category) !== 0;
+    }
+
+    step(dt) {
+        if (dt <= 0) return;
+        this.integrate(dt);
+
+        for (let iter = 0; iter < SOLVER_ITERATIONS; iter++) {
+            for (let i = 0; i < this.bodies.length; i++) {
+                for (let j = i + 1; j < this.bodies.length; j++) {
+                    const a = this.bodies[i];
+                    const b = this.bodies[j];
+                    if (!World.shouldCollide(a, b)) continue;
+
+                    const manifold = collide(a, b);
+                    if (manifold && manifold.penetration > 0) {
+                        this.resolve(a, b, manifold);
+                    }
+                }
+            }
+        }
+
+        if (this.bounds) this.applyBounds();
+    }
+
+    integrate(dt) {
+        const damp = Math.max(0, 1 - this.linearDamping * dt);
+        for (const body of this.bodies) {
+            if (!body.isDynamic) continue;
+            body.velocity.x += this.gravity.x * dt;
+            body.velocity.y += this.gravity.y * dt;
+            body.velocity.x *= damp;
+            body.velocity.y *= damp;
+            body.shape.position.x += body.velocity.x * dt;
+            body.shape.position.y += body.velocity.y * dt;
+        }
+    }
+
+    resolve(a, b, { normal, penetration }) {
+        const invSum = a.invMass + b.invMass;
+        if (invSum === 0) return;
+
+        // Positional correction so bodies stop overlapping.
+        const correction = (Math.max(penetration - CORRECTION_SLOP, 0) / invSum) * CORRECTION_PERCENT;
+        a.shape.position.x -= normal.x * correction * a.invMass;
+        a.shape.position.y -= normal.y * correction * a.invMass;
+        b.shape.position.x += normal.x * correction * b.invMass;
+        b.shape.position.y += normal.y * correction * b.invMass;
+
+        // Impulse along the normal (relative velocity is B - A).
+        const rvx = b.velocity.x - a.velocity.x;
+        const rvy = b.velocity.y - a.velocity.y;
+        const velAlongNormal = rvx * normal.x + rvy * normal.y;
+        if (velAlongNormal > 0) return; // already separating
+
+        const e = Math.min(a.restitution, b.restitution);
+        const jImpulse = (-(1 + e) * velAlongNormal) / invSum;
+        const ix = jImpulse * normal.x;
+        const iy = jImpulse * normal.y;
+
+        a.velocity.x -= ix * a.invMass;
+        a.velocity.y -= iy * a.invMass;
+        b.velocity.x += ix * b.invMass;
+        b.velocity.y += iy * b.invMass;
+    }
+
+    applyBounds() {
+        const { minX, maxX, minY, maxY } = this.bounds;
+        for (const body of this.bodies) {
+            if (!body.isDynamic) continue;
+            const r = boundingRadius(body.shape);
+            const pos = body.shape.position;
+
+            if (pos.x - r < minX) {
+                pos.x = minX + r;
+                if (body.velocity.x < 0) body.velocity.x = -body.velocity.x * body.restitution;
+            } else if (pos.x + r > maxX) {
+                pos.x = maxX - r;
+                if (body.velocity.x > 0) body.velocity.x = -body.velocity.x * body.restitution;
+            }
+
+            if (pos.y - r < minY) {
+                pos.y = minY + r;
+                if (body.velocity.y < 0) body.velocity.y = -body.velocity.y * body.restitution;
+            } else if (pos.y + r > maxY) {
+                pos.y = maxY - r;
+                if (body.velocity.y > 0) body.velocity.y = -body.velocity.y * body.restitution;
+            }
+        }
+    }
+}
+
+// ===== components/physics/index.js =====
+// Barrel for the physics layer.
 
 // ===== components/math/random.js =====
 // A seeded random number generator.
@@ -3149,393 +5348,1442 @@ function randomRange(random, min, max) {
 }
 
 // ===== demos3d/drive3d.js =====
-// Tank battle in three dimensions.
+// Tank battle in three dimensions — the 2D battle, rendered from behind the
+// hull.
 //
-// The hull turns on its tracks and the turret turns on the hull — two rotations
-// that compose, which is the thing a top-down 2D version can show but never
-// quite sell. Here you see the barrel swing independently of where the tank is
-// pointing, from behind it.
+// This demo is deliberately not a second implementation. `controls/driveDemo.js`
+// and this file run the *same simulation*: the same TANK_DESIGNS, the same
+// TankController and Gearbox, the same TankAI finite state machine, the same
+// AutoAim policies, the same Weapon and the same penetration model against the
+// same per-face armour. The map is generated from the same seed, so it is the
+// same arena down to where each block sits.
 //
-// The ballistics are the 2D weapons layer again, unchanged: shots are resolved
-// in the horizontal plane, where an armour plate's angle actually lives.
+// What changes is the view, and one number:
+//
+//     simulation      view
+//     ──────────────  ──────────────
+//     x               x
+//     y               z          (the ground is XZ in three dimensions)
+//     rotation θ      yaw −θ     (2D turns counter-clockwise, +Y forward;
+//                                 a yaw turns the other way about +Y)
+//
+// That is the whole bridge, and it is the two functions below.
+//
+// A consequence worth spelling out: every tank still carries its 2D shapes —
+// hull, turret, barrel. They are never added to the engine and never drawn.
+// They are the *bodies*: SAT collision runs on the hull outline, the shell
+// raycast finds which edge it crossed, and Armor.forHull turns those same edges
+// into front/side/rear plates. The 3D hull you see is that very outline pushed
+// up into a prism, which is why the tank destroyer's wedge nose bounces shells
+// in three dimensions for exactly the reason it does in two.
 
 
 
 
 
 
-const ARENA = 46;
-const DRIVE_SPEED = 7.5;
-const TURN_SPEED = 75;         // grados por segundo
-const TRAVERSE_SPEED = 95;
-const SHELL_SPEED = 40;
-const RELOAD = 1.1;
-const ENEMIES = 5;
+
+
+
+// --- The bridge between the two worlds -----------------------------------
+
+// A simulation point (x, y) is a ground point (x, z).
+const scenePoint = (p) => ({ x: p.x, z: p.y });
+// A simulation heading is the yaw that points the same way.
+const yawOf = (rotation) => -rotation;
+
+// --- The arena (identical to the 2D battle, same seed) -------------------
+
+const MAP = { minX: -28.5, maxX: 28.5, minY: -20.5, maxY: 20.5 }; // 57 × 41
+const WALL = 0.4;
+const WALL_HEIGHT = 1.1;
+const OBSTACLES = 78;
+const MAP_SEED = 20260805;
+
+const TANK_BOUNDS = { minX: MAP.minX, maxX: MAP.maxX, minY: MAP.minY, maxY: MAP.maxY };
+
+// Heights, in the simulation's own units — a medium hull is 0.55 × 0.8, so
+// everything here is small numbers. Nothing is scaled up: keeping one set of
+// units is what lets the two demos share a map file's worth of constants.
+const TRACK_H = 0.16;
+const HULL_H = 0.26;
+const TURRET_H = 0.2;
+const HULL_Y = TRACK_H + HULL_H / 2;
+const TURRET_Y = TRACK_H + HULL_H + TURRET_H / 2;
+const BAR_Y = TURRET_Y + 0.3;       // where the DOM health tag hangs
+const SHELL_Y = TURRET_Y;
+
+// Chase camera: far enough back that the view covers about as much ground as
+// the 2D camera did, so the fight reads at the same scale.
+const CAM_BACK = 4.5;
+const CAM_HEIGHT = 2.2;
+const CAM_AHEAD = 1.6;
+const CAM_SMOOTH = 7;
+
+const GARAGE = [TANK_DESIGNS.medium, TANK_DESIGNS.light, TANK_DESIGNS.heavy, TANK_DESIGNS.hunter];
+
+const ENEMY_COLORS = {
+    hull: { red: 0.62, green: 0.25, blue: 0.22 },
+    turret: { red: 0.5, green: 0.19, blue: 0.18 },
+    barrel: { red: 0.33, green: 0.13, blue: 0.12 },
+};
+const ALLY_COLORS = {
+    hull: { red: 0.24, green: 0.45, blue: 0.62 },
+    turret: { red: 0.19, green: 0.36, blue: 0.5 },
+    barrel: { red: 0.13, green: 0.25, blue: 0.35 },
+};
+const WRECK_COLOR = { red: 0.17, green: 0.17, blue: 0.19 };
+const TRACK_COLOR = { red: 0.13, green: 0.13, blue: 0.15 };
+
+// King of the hill: hold the middle.
+const ZONE = { x: 0, y: 0, radius: 4.5 };
+const CAPTURE_SECONDS = 30;
+const CONTEST_DECAY = 0.25;
+// The objective is drawn as a rim with a faint wash inside it. A solid
+// translucent disc was the obvious first try and it was wrong: standing in the
+// circle put a coloured sheet over the whole foreground, and you could no
+// longer read the ground or the tanks on it. A ring says the same thing —
+// where the edge is, and whose it is — without painting over the fight.
+const ZONE_COLORS = {
+    neutral: { red: 0.62, green: 0.66, blue: 0.72 },
+    ally: { red: 0.30, green: 0.62, blue: 0.92 },
+    foe: { red: 0.85, green: 0.32, blue: 0.26 },
+    contested: { red: 0.92, green: 0.78, blue: 0.28 },
+};
+const ZONE_FILL_ALPHA = 0.13;
+const ZONE_RIM_ALPHA = 0.92;
+
+// Both squadrons deploy facing each other, the objective between them.
+const SQUAD = ["light", "medium", "hunter", "heavy", "medium"];
+const DEPLOY_X = 14;
+const deployment = (side) => SQUAD.map((design, i) => ({
+    design,
+    x: side * DEPLOY_X,
+    y: (i - (SQUAD.length - 1) / 2) * 4.2,
+    rotation: side < 0 ? -90 : 90,
+}));
+const ALLY_SPAWNS = deployment(-1);
+const FOE_SPAWNS = deployment(1);
+const PLAYER_SPAWN = { x: -DEPLOY_X - 2.5, y: 0, rotation: -90 };
+
+const AMMO = [PROJECTILES.AP, PROJECTILES.APCR, PROJECTILES.HEAT, PROJECTILES.HE];
+const IMPACT = {
+    penetration: { label: "PENETRA", color: { red: 0.2, green: 0.9, blue: 0.35 } },
+    splash: { label: "ESQUIRLAS", color: { red: 0.95, green: 0.55, blue: 0.2 } },
+    ricochet: { label: "REBOTE", color: { red: 0.95, green: 0.85, blue: 0.2 } },
+    block: { label: "NO PENETRA", color: { red: 0.9, green: 0.25, blue: 0.2 } },
+};
+
+// Auto-fire holds off until the gun is this close to the locked target.
+const AUTO_FIRE_ARC = 4; // degrees
+
+// Draw layers: the ground first, the translucent objective over it, solids on
+// top. Blending needs what is behind it to already be in the buffer.
+const LAYER_GROUND = 0;
+const LAYER_ZONE = 1;
+const LAYER_SOLID = 2;
 
 const STYLES = `
+    #panel { width: 290px; }
+    .tbtn.fire { background: rgba(122, 47, 47, .6); border-color: rgba(230, 140, 140, .45); }
+    .tbtn.fire:active { background: rgba(170, 60, 60, .8); }
+    .tbtn.aim { background: rgba(30, 74, 92, .6); border-color: rgba(120, 210, 240, .45); font-size: 20px; }
+    .tbtn.aim.on { background: rgba(60, 150, 190, .8); border-color: #7fe0ff; }
+    .tbtn.autofire { background: rgba(92, 48, 30, .6); border-color: rgba(240, 170, 120, .45);
+                     font-size: 12px; font-weight: 700; letter-spacing: .04em; }
+    .tbtn.autofire.on { background: rgba(190, 95, 45, .85); border-color: #ffbe86; }
+
+    /* Over the canvas: a slim HUD, a health tag per tank, edge arrows for the
+       squadron, and the end-of-battle banner. */
     .hud { position: absolute; top: 12px; left: 12px; right: 12px; z-index: 2;
-           display: flex; gap: 12px; pointer-events: none; }
+           display: flex; gap: 10px; pointer-events: none; }
     .hud .chip { padding: 7px 12px; border-radius: 10px; background: rgba(10,14,20,.62);
                  border: 1px solid rgba(255,255,255,.14); font-weight: 700; font-size: 16px;
                  font-variant-numeric: tabular-nums; }
     .hud .chip small { font-size: 10px; font-weight: 500; color: #9aa0a6; display: block; }
     .hud .spacer { flex: 1; }
+    .hud .chip.low { color: #ffb4a4; border-color: rgba(216,74,58,.6); }
+
     .tag { position: absolute; transform: translate(-50%, -100%); pointer-events: none;
-           font-size: 11px; font-weight: 700; text-align: center; z-index: 2; }
-    .tag .bar { width: 46px; height: 5px; border-radius: 3px; background: rgba(0,0,0,.55);
-                overflow: hidden; border: 1px solid rgba(255,255,255,.2); }
-    .tag .bar > i { display: block; height: 100%; background: #d84a3a; }
-    .banner { position: absolute; inset: 0; z-index: 3; display: none; flex-direction: column;
-              align-items: center; justify-content: center; gap: 14px;
-              background: rgba(8,12,18,.75); font-size: 26px; font-weight: 800; }
+           z-index: 2; display: none; }
+    .tag .bar { width: 42px; height: 5px; border-radius: 3px; background: rgba(0,0,0,.55);
+                overflow: hidden; border: 1px solid rgba(255,255,255,.22); }
+    .tag .bar > i { display: block; height: 100%; width: 100%; background: #43c06a; }
+
+    .mark { position: absolute; z-index: 1; pointer-events: none; display: none; opacity: .85;
+            width: 0; height: 0; border-left: 7px solid transparent; border-right: 7px solid transparent;
+            border-bottom: 12px solid #5aa9ee; filter: drop-shadow(0 0 3px rgba(0,0,0,.6)); }
+
+    #banner { position: absolute; inset: 0; display: none; z-index: 3;
+        flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+        background: rgba(10, 13, 18, .72); text-align: center; padding: 20px; }
+    #banner.show { display: flex; }
+    #banner b { font-size: 26px; letter-spacing: .02em; }
+    #banner button { width: auto; padding: 10px 18px; }
+
+    h1 { font-size: 17px; margin: 0 0 4px; }
+    h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #9aa0a6; margin: 0 0 10px; }
+    .card { background: #26292e; border: 1px solid #33373d; border-radius: 8px; padding: 12px; }
+    .keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; justify-items: center; }
+    .keys kbd {
+        display: inline-flex; align-items: center; justify-content: center;
+        min-width: 34px; padding: 7px 0; font-family: inherit; font-size: 13px;
+        background: #2f343a; border: 1px solid #3a3f45; border-bottom-width: 2px; border-radius: 6px; color: #e6e6e6;
+    }
+    .keys kbd.on { background: #2b3a4a; border-color: #4a7fb5; color: #cfe4fb; }
+    .keys .sp { visibility: hidden; }
+    .hint { font-size: 12px; color: #7d838a; margin-top: 10px; text-align: center; }
+    .kv { display: flex; justify-content: space-between; font-size: 13px; margin: 5px 0; }
+    .kv .k { color: #9aa0a6; }
+    .kv .v { font-variant-numeric: tabular-nums; }
+    .bar { height: 12px; background: #1b1d21; border-radius: 6px; overflow: hidden; border: 1px solid #3a3f45; margin-top: 4px; }
+    .bar > i { display: block; height: 100%; width: 0; background: #43c06a; transition: width .1s linear; }
+    .bar.slim { height: 7px; border-radius: 4px; margin-top: 3px; }
+    .mini { display: block; width: 100%; height: auto; border-radius: 6px; background: #0a0d12; border: 1px solid #3a3f45; }
+    button { cursor: pointer; border: 1px solid #3a3f45; background: #2f343a; color: #e6e6e6;
+             border-radius: 6px; padding: 9px 10px; font-size: 13px; width: 100%; }
+    button:hover { background: #3a4047; }
+
+    .garage { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    button.tankbtn { text-align: left; line-height: 1.3; padding: 8px 9px; }
+    button.tankbtn.active { border-color: #4a7fb5; background: #2b3a4a; box-shadow: inset 0 0 0 1px #4a7fb5; }
+    button.tankbtn b { display: block; font-size: 13px; }
+    button.tankbtn small { color: #9aa0a6; font-size: 11px; }
+
+    .ammo { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    button.shell { text-align: left; line-height: 1.3; padding: 8px 9px; }
+    button.shell.active { border-color: #4a7fb5; background: #2b3a4a; box-shadow: inset 0 0 0 1px #4a7fb5; }
+    button.shell b { display: block; font-size: 13px; }
+    button.shell small { color: #9aa0a6; font-size: 11px; }
+    #impact { font-size: 15px; font-weight: 700; letter-spacing: .03em; margin-top: 12px; }
+
+    .aimrow { display: flex; align-items: center; gap: 10px; }
+    .aimrow .dot { width: 10px; height: 10px; border-radius: 50%; background: #4a4f57; flex: none; }
+    .aimrow .dot.on { background: #73d9ff; box-shadow: 0 0 8px #73d9ff; }
+    .aimrow b { font-size: 14px; }
+    .target { font-size: 12.5px; color: #9aa0a6; margin-top: 8px; }
+    .target b { color: #cfe4fb; }
+
+    .gearbox { display: flex; align-items: center; gap: 12px; }
+    .gearbox .gear {
+        width: 52px; height: 52px; flex: none; border-radius: 8px;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 25px; font-weight: 700; font-variant-numeric: tabular-nums;
+        background: #1b1d21; border: 1px solid #3a3f45; color: #e6e6e6;
+    }
+    .gearbox .gear.shifting { color: #7d838a; border-color: #4a7fb5; }
+    .gearbox .right { flex: 1; min-width: 0; }
+    .tach { height: 10px; background: #1b1d21; border-radius: 5px; overflow: hidden; border: 1px solid #3a3f45; }
+    .tach > i { display: block; height: 100%; width: 0; background: #6aa9e0; }
+    .gearbox .lbl { display: flex; justify-content: space-between; font-size: 11.5px; color: #9aa0a6; margin-bottom: 4px; }
+    .shiftrow { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+    .shiftrow button:disabled { opacity: .4; cursor: default; }
+
+    .cap { margin: 10px 0; }
+    .cap .top { display: flex; justify-content: space-between; font-size: 12.5px; margin-bottom: 3px; }
+    .cap .top .t { color: #9aa0a6; }
+    .cap .top .s { font-variant-numeric: tabular-nums; }
+    .zonestate { text-align: center; font-size: 13px; font-weight: 700; margin-top: 10px; letter-spacing: .03em; }
+
+    .foe { margin: 9px 0; }
+    .foe:first-child { margin-top: 0; }
+    .foe .top { display: flex; justify-content: space-between; font-size: 12.5px; }
+    .foe .st { color: #9aa0a6; font-variant-numeric: tabular-nums; }
+    .foe.down .top { opacity: .45; }
+    .foe .st.attack { color: #e8776a; }
+    .foe .st.chase { color: #e8c24a; }
+    .foe .st.retreat { color: #6aa9e0; }
+    .foe .st.advance { color: #7d9bb5; }
+    .foe .dist { color: #7d838a; font-size: 11px; }
+
+    @media (max-width: 720px) {
+        #panel { width: 100%; }
+    }
 `;
+
+// Segment a→b against an AABB (slab method), for line of sight and for shells
+// meeting the scenery. Straight out of the 2D battle: the colliders are the
+// same boxes, because the blocks you see in 3D stand on the same footprints.
+function segmentHitsBox(a, b, box) {
+    const d = [b.x - a.x, b.y - a.y];
+    const from = [a.x, a.y];
+    const min = [box.minX, box.minY];
+    const max = [box.maxX, box.maxY];
+    let t0 = 0, t1 = 1;
+    for (let i = 0; i < 2; i++) {
+        if (Math.abs(d[i]) < 1e-9) {
+            if (from[i] < min[i] || from[i] > max[i]) return false;
+            continue;
+        }
+        let ta = (min[i] - from[i]) / d[i];
+        let tb = (max[i] - from[i]) / d[i];
+        if (ta > tb) [ta, tb] = [tb, ta];
+        t0 = Math.max(t0, ta);
+        t1 = Math.min(t1, tb);
+        if (t0 > t1) return false;
+    }
+    return true;
+}
 
 App.boot({ title: "Batalla de tanques 3D", styles: STYLES }, (app) => {
     const gl = app.gl;
-    const { keyboard, touch } = app;
-    const camera = app.use3D({ clearColor: { red: 0.42, green: 0.5, blue: 0.6 } });
-    camera.fov = 60;
-    camera.far = 400;
+    const { stage, keyboard, touch } = app;
+    const canvas = app.canvas;
 
-    app.add(new Mesh(gl, planeGeometry({ width: 400, depth: 400 }))
-        .setColor({ red: 0.35, green: 0.38, blue: 0.3 }).init());
+    const camera = app.use3D({ clearColor: { red: 0.44, green: 0.52, blue: 0.62 } });
+    camera.fov = 55;
+    camera.far = 200;
 
-    // Walls, so the arena has an edge you can see.
-    for (const [x, z, w, d] of [[0, -ARENA, ARENA * 2, 2], [0, ARENA, ARENA * 2, 2],
-                                [-ARENA, 0, 2, ARENA * 2], [ARENA, 0, 2, ARENA * 2]]) {
-        app.add(new Mesh(gl, boxGeometry({ width: w, height: 3, depth: d }))
-            .setPosition({ x, y: 1.5, z }).setColor({ red: 0.42, green: 0.38, blue: 0.31 }).init());
-    }
+    // --- Scenery -----------------------------------------------------------
+    // `colliders` are the axis-aligned boxes shells and sight lines test
+    // against; `solids` keeps the 2D shapes so hulls collide by their real
+    // outline (SAT). Both are the 2D demo's, unchanged — the meshes are the
+    // only thing this file adds.
+    const colliders = [];
+    const solids = [];
+    const addBox = (cx, cy, hw, hh) => colliders.push({ minX: cx - hw, maxX: cx + hw, minY: cy - hh, maxY: cy + hh });
+    const addSolid = (shape) => solids.push({ shape, r: boundingRadius(shape), x: shape.position.x, y: shape.position.y });
 
-    // Scattered cover: something to hide behind and to shoot at.
-    const random = createRandom(20260806);
+    const mapW = MAP.maxX - MAP.minX;
+    const mapH = MAP.maxY - MAP.minY;
+
+    app.add(new Mesh(gl, planeGeometry({ width: mapW + 40, depth: mapH + 40 }))
+        .setColor({ red: 0.33, green: 0.36, blue: 0.29 }).setLayer(LAYER_GROUND).init());
+
+    // The objective, painted on the ground: a faint wash and a rim around it.
+    // The torus already lies in XZ, so it needs no rotation to be a ring on the
+    // floor.
+    const zoneFill = app.add(new Mesh(gl, cylinderGeometry({
+        radiusTop: ZONE.radius, radiusBottom: ZONE.radius, height: 0.02, segments: 56,
+    })).setPosition({ x: ZONE.x, y: 0.012, z: ZONE.y }).setLayer(LAYER_ZONE).init());
+    const zoneRim = app.add(new Mesh(gl, torusGeometry({
+        radius: ZONE.radius, tube: 0.07, segments: 72, sides: 6,
+    })).setPosition({ x: ZONE.x, y: 0.07, z: ZONE.y }).setLayer(LAYER_ZONE).init());
+
+    // A rectangular body for the physics layer, with no drawing attached. SAT
+    // and boundingRadius only ever read these five fields, and the scenery is
+    // drawn as a mesh, so building a real Shape here would upload a GL buffer
+    // nothing ever renders.
+    const rectangleBody = (w, h, x, y) => ({
+        position: { x, y },
+        rotation: 0,
+        scale: { x: 1, y: 1 },
+        colliderShape: "polygon",
+        getColliderVertices: () => [
+            { x: -w / 2, y: -h / 2 }, { x: w / 2, y: -h / 2 },
+            { x: w / 2, y: h / 2 }, { x: -w / 2, y: h / 2 },
+        ],
+    });
+
+    const wallColor = { red: 0.42, green: 0.38, blue: 0.31 };
+    const wall = (w, h, x, y) => {
+        // The collider is the flat rectangle the 2D battle uses; the box just
+        // gives it height.
+        app.add(new Mesh(gl, boxGeometry({ width: w, height: WALL_HEIGHT, depth: h }))
+            .setPosition({ x, y: WALL_HEIGHT / 2, z: y }).setColor(wallColor)
+            .setLayer(LAYER_SOLID).init());
+        addBox(x, y, w / 2, h / 2);
+        addSolid(rectangleBody(w, h, x, y));
+    };
+
+    wall(mapW + WALL, WALL, 0, MAP.maxY);
+    wall(mapW + WALL, WALL, 0, MAP.minY);
+    wall(WALL, mapH + WALL, MAP.minX, 0);
+    wall(WALL, mapH + WALL, MAP.maxX, 0);
+
+    // Cover, scattered from the same seed as the 2D map — the same 78 blocks in
+    // the same places. Their height is the only thing invented here; the
+    // footprint a shell or a hull meets is the 2D square.
+    const rng = createRandom(MAP_SEED);
+    const palette = [
+        { red: 0.30, green: 0.33, blue: 0.40 }, { red: 0.33, green: 0.30, blue: 0.38 },
+        { red: 0.30, green: 0.36, blue: 0.40 }, { red: 0.34, green: 0.32, blue: 0.30 },
+        { red: 0.28, green: 0.34, blue: 0.30 }, { red: 0.35, green: 0.33, blue: 0.30 },
+    ];
     const blocks = [];
-    for (let i = 0; i < 26; i++) {
-        const w = randomRange(random, 2, 5), d = randomRange(random, 2, 5), h = randomRange(random, 1.5, 3.5);
-        const x = randomRange(random, -ARENA + 6, ARENA - 6);
-        const z = randomRange(random, -ARENA + 6, ARENA - 6);
-        if (Math.hypot(x, z) < 9) continue;      // deja libre el punto de partida
-        blocks.push({ x, z, w, d });
-        app.add(new Mesh(gl, boxGeometry({ width: w, height: h, depth: d }))
-            .setPosition({ x, y: h / 2, z }).setColor({ red: 0.46, green: 0.44, blue: 0.4 }).init());
+    for (let tries = 0; tries < OBSTACLES * 30 && blocks.length < OBSTACLES; tries++) {
+        const size = 0.5 + rng() * 1.4;
+        const x = MAP.minX + 1.6 + rng() * (mapW - 3.2);
+        const y = MAP.minY + 1.6 + rng() * (mapH - 3.2);
+        if (Math.hypot(x, y) < 3.5) continue;
+        const clear = blocks.every((b) => Math.hypot(b.x - x, b.y - y) > (b.s + size) / 2 + 1.6);
+        if (!clear) continue;
+        blocks.push({ x, y, s: size, c: palette[blocks.length % palette.length] });
+    }
+    for (const b of blocks) {
+        const height = b.s * 0.85;
+        app.add(new Mesh(gl, boxGeometry({ width: b.s, height, depth: b.s }))
+            .setPosition({ x: b.x, y: height / 2, z: b.y }).setColor(b.c)
+            .setLayer(LAYER_SOLID).init());
+        addBox(b.x, b.y, b.s / 2, b.s / 2);
+        addSolid(rectangleBody(b.s, b.s, b.x, b.y));
     }
 
-    // --- Building a tank ---------------------------------------------------
-    // A tank is four meshes that have to move together: the turret rides the
-    // hull, and the barrel rides the turret. Rather than a scene graph, each
-    // part is placed from the hull's transform every frame — fewer moving
-    // pieces for four parts, and it makes the composition explicit.
-    function makeTank(color, isPlayer) {
-        const hull = app.add(new Mesh(gl, boxGeometry({ width: 2.4, height: 0.9, depth: 3.8 }))
-            .setColor(color).setShininess(20).init());
-        const tracks = [-1, 1].map((side) => app.add(new Mesh(gl, boxGeometry({ width: 0.55, height: 0.7, depth: 4 }))
-            .setColor({ red: 0.13, green: 0.13, blue: 0.15 }).init()));
-        const turret = app.add(new Mesh(gl, cylinderGeometry({ radiusTop: 0.85, radiusBottom: 1, height: 0.7, segments: 18 }))
-            .setColor({ red: color.red * 0.85, green: color.green * 0.85, blue: color.blue * 0.85 }).init());
-        const barrel = app.add(new Mesh(gl, cylinderGeometry({ radiusTop: 0.1, radiusBottom: 0.13, height: 2.8, segments: 12 }))
-            .setColor({ red: 0.3, green: 0.31, blue: 0.34 }).setShininess(40).init());
+    const isBlocked = (from, to) => colliders.some((box) => segmentHitsBox(from, to, box));
 
-        return {
-            hull, turret, barrel, tracks, isPlayer,
-            x: 0, z: 0, heading: 0, turretAngle: 0,
-            hp: 100, alive: true, reload: 0, color,
-            tag: null, ai: null,
-        };
-    }
-
-    // Places every part from the tank's state. Called once per frame per tank.
-    function placeTank(tank) {
-        const rad = tank.heading * DEG_TO_RAD;
-        const sin = Math.sin(rad), cos = Math.cos(rad);
-        tank.hull.setPosition({ x: tank.x, y: 0.85, z: tank.z }).setRotation({ y: tank.heading });
-        tank.tracks.forEach((track, i) => {
-            const side = i === 0 ? -1.35 : 1.35;
-            track.setPosition({ x: tank.x + cos * side, y: 0.4, z: tank.z - sin * side })
-                .setRotation({ y: tank.heading });
-        });
-        tank.turret.setPosition({ x: tank.x, y: 1.6, z: tank.z }).setRotation({ y: tank.turretAngle });
-        // The barrel sticks out of the turret along the turret's own facing —
-        // this is where the two rotations actually compose.
-        const trad = tank.turretAngle * DEG_TO_RAD;
-        tank.barrel
-            .setPosition({ x: tank.x + Math.sin(trad) * 1.6, y: 1.65, z: tank.z + Math.cos(trad) * 1.6 })
-            .setRotation({ y: tank.turretAngle, x: 90 });
-    }
-
-    const player = makeTank({ red: 0.28, green: 0.6, blue: 0.38 }, true);
-    const enemies = [];
-    const shells = [];
-    const marks = [];
+    // --- Battle state ------------------------------------------------------
+    let design = GARAGE[0];
+    let player = null;
+    let allies = [];
+    let enemies = [];
+    let allyHold = 0;
+    let foeHold = 0;
+    let zoneState = "neutral";
+    let shells = [];
     let over = false;
     let kills = 0;
+
+    let aimPixel = null;              // where the pointer is, in client pixels
+    let manualTraverse = 0;
+    let gearMode = GEARBOX_MODE.AUTO;
+    let aimMode = AIM_MODE.OFF;
+    let autoAim = null;
+    let lockedOn = null;
+    let autoFire = false;
     let ammo = PROJECTILES.AP;
+    let lastImpact = null;            // what the panel is showing, for tests
+    const marks = [];                 // fading impact bursts
 
-    function spawnEnemies() {
-        for (const enemy of enemies) removeTank(enemy);
-        enemies.length = 0;
-        for (let i = 0; i < ENEMIES; i++) {
-            const enemy = makeTank({ red: 0.72, green: 0.3, blue: 0.26 }, false);
-            const angle = (i / ENEMIES) * Math.PI * 2;
-            enemy.x = Math.cos(angle) * (ARENA - 12);
-            enemy.z = Math.sin(angle) * (ARENA - 12);
-            enemy.heading = -angle * RAD_TO_DEG;
-            enemy.tag = makeTag();
-            enemies.push(enemy);
+    // Declared with the state they read, not next to the code that uses them:
+    // startBattle() runs during setup and would otherwise hit their temporal
+    // dead zone.
+    const allUnits = () => [player, ...allies, ...enemies];
+    const myTeam = () => [player, ...allies];
+
+    // Reticle: four cubes framing whatever auto-aim has locked, floating at
+    // turret height so they read against the ground.
+    const RETICLE_COLOR = { red: 0.45, green: 0.85, blue: 1 };
+    const reticle = Array.from({ length: 4 }, () => new Mesh(gl, boxGeometry({ width: 0.11, height: 0.11, depth: 0.11 }))
+        .setColor(RETICLE_COLOR).setLayer(LAYER_SOLID).init());
+
+    // --- The view for one tank ---------------------------------------------
+
+    // The geometry to give a 2D shape, using the distinction the physics layer
+    // already makes: a "circle" collider becomes a cylinder, a polygon outline
+    // becomes that outline extruded. Nothing here invents a silhouette.
+    function solidFor(shape, height) {
+        if (shape.colliderShape === "circle") {
+            return cylinderGeometry({ radiusTop: shape.radius, radiusBottom: shape.radius, height, segments: 20 });
         }
+        return prismGeometry({ points: shape.getColliderVertices().map(scenePoint), height });
     }
 
-    function removeTank(tank) {
-        for (const part of [tank.hull, tank.turret, tank.barrel, ...tank.tracks]) app.remove(part);
-        tank.tag?.node.remove();
+    function buildView(tank, colors) {
+        const d = tank.design;
+        const hull = app.add(new Mesh(gl, solidFor(tank.hull, HULL_H))
+            .setColor(colors.hull).setShininess(18).setLayer(LAYER_SOLID).init());
+        const turret = app.add(new Mesh(gl, solidFor(tank.turret, TURRET_H))
+            .setColor(colors.turret).setShininess(22).setLayer(LAYER_SOLID).init());
+        const barrel = app.add(new Mesh(gl, cylinderGeometry({
+            radiusTop: d.barrel.width * 0.45, radiusBottom: d.barrel.width * 0.6,
+            height: d.barrel.length, segments: 10,
+        })).setColor(colors.barrel).setShininess(40).setLayer(LAYER_SOLID).init());
+        // Tracks are the one part with no 2D counterpart: in a top-down view
+        // they were never visible, so there was nothing to share.
+        const tracks = [-1, 1].map(() => app.add(new Mesh(gl, boxGeometry({
+            width: d.radius * 0.36, height: TRACK_H, depth: d.radius * 1.9,
+        })).setColor(TRACK_COLOR).setLayer(LAYER_SOLID).init()));
+        return { hull, turret, barrel, tracks, parts: [hull, turret, barrel, ...tracks] };
     }
 
-    function makeTag() {
+    // Copies the simulation's transform onto the meshes. Called once per tank
+    // per frame, after the 2D bodies have moved.
+    function placeView(unit) {
+        const { tank, view } = unit;
+        const p = tank.position;
+        const yaw = yawOf(tank.rotation);
+        const turretYaw = yawOf(tank.turretAngle);
+
+        view.hull.setPosition({ x: p.x, y: HULL_Y, z: p.y }).setRotation({ y: yaw });
+
+        const rad = yaw * DEG_TO_RAD;
+        const sideX = Math.cos(rad), sideZ = -Math.sin(rad);   // the hull's right
+        const offset = tank.design.radius * 0.72;
+        view.tracks.forEach((track, i) => {
+            const s = i === 0 ? -offset : offset;
+            track.setPosition({ x: p.x + sideX * s, y: TRACK_H / 2, z: p.y + sideZ * s })
+                .setRotation({ y: yaw });
+        });
+
+        if (!tank.alive) return;
+        view.turret.setPosition({ x: p.x, y: TURRET_Y, z: p.y }).setRotation({ y: turretYaw });
+        // The barrel points along the turret, which is the whole reason the two
+        // rotations are worth seeing in three dimensions.
+        const f = tank.turretForward;                    // 2D unit vector
+        const reach = tank.design.barrel.offset;
+        view.barrel
+            .setPosition({ x: p.x + f.x * reach, y: TURRET_Y, z: p.y + f.y * reach })
+            // Lying down (x: 90) and then swung round to the gun's bearing.
+            .setRotation({ y: turretYaw, x: 90 });
+    }
+
+    // --- On-screen controls -------------------------------------------------
+    const btn = {
+        up: touch.button("up", "▲", "round"), down: touch.button("down", "▼", "round"),
+        left: touch.button("left", "◀", "round"), right: touch.button("right", "▶", "round"),
+        fire: touch.button("fire", "🔥", "round fire"),
+        aim: touch.button("aim", "🎯", "round aim"), auto: touch.button("auto", "AUTO", "round autofire"),
+    };
+    touch.pad("left", [btn.left, btn.right]);
+    touch.pad("right", [[btn.aim, btn.auto], btn.fire, [btn.up, btn.down]]);
+    touch.tap(btn.fire, () => firePlayer());
+    touch.tap(btn.aim, () => cycleAim());
+    touch.tap(btn.auto, () => toggleAutoFire());
+
+    // --- Overlay ------------------------------------------------------------
+    const hpChip = el("span", { textContent: "100" });
+    const hpChipBox = el("div", { className: "chip" }, [el("small", { textContent: "INTEGRIDAD" }), hpChip]);
+    const killChip = el("span", { textContent: `0/${SQUAD.length}` });
+    const zoneChip = el("span", { textContent: "0.0 s" });
+    app.addOverlay(el("div", { className: "hud" }, [
+        hpChipBox,
+        el("div", { className: "chip" }, [el("small", { textContent: "BAJAS" }), killChip]),
+        el("div", { className: "spacer" }),
+        el("div", { className: "chip" }, [el("small", { textContent: "ZONA" }), zoneChip]),
+    ]));
+
+    const bannerText = el("b");
+    const banner = el("div", { id: "banner" }, [
+        bannerText,
+        el("button", { textContent: "Nueva batalla", onclick: () => startBattle() }),
+    ]);
+    stage.append(banner);
+
+    // Health tags and squad arrows live in the overlay for the whole session;
+    // only their visibility changes, so a restart never churns the DOM.
+    const makeTag = () => {
         const fill = el("i");
         const node = el("div", { className: "tag" }, [el("div", { className: "bar" }, [fill])]);
         app.addOverlay(node);
         return { node, fill };
-    }
+    };
+    const squadMarks = ALLY_SPAWNS.map(() => {
+        const node = el("div", { className: "mark" });
+        app.addOverlay(node);
+        return node;
+    });
 
-    // --- HUD ----------------------------------------------------------------
-    const hpLabel = el("span", { textContent: "100" });
-    const killLabel = el("span", { textContent: `0/${ENEMIES}` });
-    const ammoLabel = el("span", { textContent: ammo.name });
-    app.addOverlay(el("div", { className: "hud" }, [
-        el("div", { className: "chip" }, [el("small", { textContent: "BLINDAJE" }), hpLabel]),
-        el("div", { className: "chip" }, [el("small", { textContent: "BAJAS" }), killLabel]),
-        el("div", { className: "spacer" }),
-        el("div", { className: "chip" }, [el("small", { textContent: "MUNICIÓN" }), ammoLabel]),
-    ]));
-    const bannerText = el("b");
-    const banner = el("div", { className: "banner" }, [bannerText, button("Nueva batalla", () => restart())]);
-    app.addOverlay(banner);
+    // --- Panel --------------------------------------------------------------
+    const keyEls = {};
+    const mkKey = (id, label) => (keyEls[id] = el("kbd", { textContent: label }));
+    const spacer = () => el("kbd", { className: "sp", textContent: "·" });
+    const keypad = el("div", { className: "keys" }, [
+        spacer(), mkKey("up", "W"), spacer(),
+        mkKey("left", "A"), mkKey("down", "S"), mkKey("right", "D"),
+    ]);
 
-    const kPos = kv("Posición"), kHeading = kv("Rumbo"), kTurret = kv("Torreta"), kLast = kv("Último impacto");
-    app.addPanel(
-        card("Controles", [
-            hint("W/S avanzan · A/D giran el casco · Q/E giran la torreta · espacio dispara · 1-4 cambian munición"),
-        ]),
-        card("Tu tanque", [kPos.row, kHeading.row, kTurret.row, kLast.row]),
-        card("Qué mirar", [
-            hint("El casco y la torreta giran por separado: puedes retroceder apuntando al frente. Eso es lo que la vista cenital de la versión 2D nunca terminaba de mostrar."),
+    const garageBtns = GARAGE.map((d) =>
+        el("button", { className: "tankbtn", onclick: () => setDesign(d) }, [
+            el("b", { textContent: d.name }),
+            el("small", { textContent: `${d.hp} HP · ${d.weapon.damage} daño` }),
         ]),
     );
 
-    // --- Controls ------------------------------------------------------------
-    touch.pedal(touch.button("up", "▲", "round"), "w");
-    touch.pedal(touch.button("down", "▼", "round"), "s");
-    touch.pedal(touch.button("left", "◀", "round"), "a");
-    touch.pedal(touch.button("right", "▶", "round"), "d");
-    touch.tap(touch.button("fire", "🔥", "round"), () => fire(player));
-    touch.pad("left", [touch.get("left"), touch.get("right")]);
-    touch.pad("right", [touch.get("fire"), [touch.get("up"), touch.get("down")]]);
+    const hpFill = el("i");
+    const hpBar = el("div", { className: "bar" }, [hpFill]);
+    const kHp = kv("Integridad"), kSpeed = kv("Velocidad"), kTurret = kv("Torreta"), kAmmo = kv("Cañón");
 
-    keyboard.on([" ", "Space"], () => fire(player));
-    [PROJECTILES.AP, PROJECTILES.APCR, PROJECTILES.HEAT, PROJECTILES.HE].forEach((type, i) => {
-        keyboard.on(String(i + 1), () => { ammo = type; ammoLabel.textContent = type.name; });
-    });
+    const gearBox = el("div", { className: "gear", textContent: "1" });
+    const tachFill = el("i");
+    const tachLabel = el("span");
+    const modeBtn = el("button", { onclick: () => setGearMode() });
+    const upBtn = el("button", { textContent: "Subir ▲ (X)", onclick: () => shift(1) });
+    const downBtn = el("button", { textContent: "Bajar ▼ (Z)", onclick: () => shift(-1) });
+    const gearWidget = el("div", {}, [
+        el("div", { className: "gearbox" }, [
+            gearBox,
+            el("div", { className: "right" }, [
+                el("div", { className: "lbl" }, [el("span", { textContent: "Revoluciones" }), tachLabel]),
+                el("div", { className: "tach" }, [tachFill]),
+                el("div", { style: "margin-top:8px" }, [modeBtn]),
+            ]),
+        ]),
+        el("div", { className: "shiftrow" }, [downBtn, upBtn]),
+    ]);
 
-    restart();
+    const capBar = (color) => {
+        const fill = el("i");
+        fill.style.background = color;
+        const secs = el("span", { className: "s", textContent: "0 s" });
+        return { fill, secs, node: (label) => el("div", { className: "cap" }, [
+            el("div", { className: "top" }, [el("span", { className: "t", textContent: label }), secs]),
+            el("div", { className: "bar" }, [fill]),
+        ]) };
+    };
+    const allyCap = capBar("#4a9fe0");
+    const foeCap = capBar("#d84a3a");
+    const zoneStateLine = el("div", { className: "zonestate", textContent: "Zona neutral" });
+
+    const allyRoster = el("div");
+    const roster = el("div");
+    const kFoes = kv("En pie (tuyos / enemigos)");
+
+    const MINI_W = 252;
+    const MINI_H = Math.round(MINI_W * (mapH / mapW));
+    const mini = el("canvas", { width: MINI_W, height: MINI_H, className: "mini" });
+    const miniCtx = mini.getContext("2d");
+
+    const aimDot = el("span", { className: "dot" });
+    const aimName = el("b", { textContent: "Desactivado" });
+    const aimBtn = el("button", { textContent: "Cambiar modo (T)", onclick: () => cycleAim() });
+    const aimTarget = el("div", { className: "target", textContent: "Sin objetivo" });
+    const autoFireDot = el("span", { className: "dot" });
+    const autoFireName = el("b", { textContent: "Fuego manual" });
+    const autoFireBtn = el("button", { textContent: "Fuego automático (F)", onclick: () => toggleAutoFire() });
+    const aimWidget = el("div", {}, [
+        el("div", { className: "aimrow" }, [aimDot, aimName]),
+        aimTarget,
+        el("div", { style: "margin-top:10px" }, [aimBtn]),
+        el("div", { className: "aimrow", style: "margin-top:14px" }, [autoFireDot, autoFireName]),
+        el("div", { style: "margin-top:8px" }, [autoFireBtn]),
+    ]);
+
+    const ammoBtns = AMMO.map((type) =>
+        el("button", { className: "shell", onclick: () => setAmmo(type) }, [
+            el("b", { textContent: type.name }),
+            el("small", { textContent: "" }),
+        ]),
+    );
+    const impactLine = el("div", { id: "impact", textContent: "—" });
+    const kFace = kv("Cara"), kAngle = kv("Ángulo"), kEff = kv("Blindaje efectivo"), kPen = kv("Penetración");
+
+    app.addPanel(
+        card("Objetivo · zona central", [
+            allyCap.node("Tu escuadrón"), foeCap.node("Enemigo"), zoneStateLine,
+            hint(`Controla la zona ${CAPTURE_SECONDS} s para ganar · si están los dos bandos, el reloj se para`),
+        ]),
+        card("Tu tanque", [
+            el("div", { className: "garage" }, garageBtns),
+            el("div", { className: "row" }, [hpBar]),
+            kHp.row, kSpeed.row, kTurret.row, kAmmo.row,
+            hint("Teclas 1-4 cambian de tanque (reinicia la batalla) · el casco 3D es su contorno de colisión extruido"),
+        ]),
+        card("Munición y blindaje", [
+            el("div", { className: "ammo" }, ammoBtns),
+            impactLine, kFace.row, kAngle.row, kEff.row, kPen.row,
+            hint("C cambia de proyectil · el blindaje efectivo crece con el ángulo"),
+        ]),
+        card("Auto-apuntado", [aimWidget, hint("T (o 🎯) cicla el objetivo · F (o AUTO) mantiene el gatillo")]),
+        card("Caja de cambios", [gearWidget, hint("G alterna automática/manual · Z y X cambian de marcha")]),
+        card("Tu escuadrón", [allyRoster]),
+        card("Enemigos (máquina de estados)", [roster, kFoes.row]),
+        card("Controles", [
+            keypad,
+            hint("W/S avanzan · A/D giran el casco · ratón o dedo apuntan la torreta (Q/E a mano) · clic o Espacio disparan"),
+        ]),
+        card("Minimapa", [mini, hint("Verde: tú · rojo: enemigos · cuña azul: hacia dónde mira la cámara")]),
+        card(null, [button("Nueva batalla", () => startBattle())]),
+    );
+
+    startBattle();
 
     window.raptorDrive3D = {
-        app, camera, player, enemies, shells,
-        get over() { return over; },
-        get kills() { return kills; },
+        app, camera, TANK_DESIGNS, setDesign, startBattle,
+        restart: startBattle,
+        get autoAim() { return autoAim; },
+        get autoFire() { return autoFire; },
+        get blocks() { return blocks; },
+        get colliders() { return colliders; },
+        ammoId: () => ammo.id,
         get ammo() { return ammo; },
-        fire, restart,
-        get state() { return { x: player.x, z: player.z, heading: player.heading, turret: player.turretAngle, hp: player.hp }; },
+        setAmmo, cycleAmmo, firePlayer, fire,
+        toggleAutoFire, cycleAim,
+        get lockedOn() { return lockedOn; },
+        get lastImpact() { return lastImpact; },
+        get player() { return player; },
+        get enemies() { return enemies; },
+        get allies() { return allies; },
+        get kills() { return kills; },
+        get hold() { return { ally: allyHold, foe: foeHold, state: zoneState }; },
+        setHold: (a, f) => { allyHold = a; foeHold = f; },
+        ZONE, CAPTURE_SECONDS,
+        get shells() { return shells; },
+        get over() { return over; },
+        get tank() { return player.tank; },
+        get driver() { return player.driver; },
+        get state() {
+            return {
+                x: player.tank.position.x, y: player.tank.position.y,
+                heading: player.tank.rotation, turret: player.tank.turretAngle, hp: player.tank.hp,
+            };
+        },
     };
 
-    app.onUpdate((dt) => {
-        if (!over) {
-            drivePlayer(dt);
-            for (const enemy of enemies) if (enemy.alive) driveEnemy(enemy, dt);
-        }
-        updateShells(dt);
-        updateMarks(dt);
+    app.onUpdate(update);
 
-        placeTank(player);
-        for (const enemy of enemies) if (enemy.alive) placeTank(enemy);
-        updateTags();
-
-        // Chase camera: behind the hull, looking a little ahead of it.
-        const rad = player.heading * DEG_TO_RAD;
-        camera.lookFrom(
-            { x: player.x - Math.sin(rad) * 11, y: 6.5, z: player.z - Math.cos(rad) * 11 },
-            { x: player.x + Math.sin(rad) * 4, y: 1.5, z: player.z + Math.cos(rad) * 4 },
-        );
-
-        hpLabel.textContent = String(Math.round(player.hp));
-        killLabel.textContent = `${kills}/${ENEMIES}`;
-        kPos.set(`${player.x.toFixed(1)}, ${player.z.toFixed(1)}`);
-        kHeading.set(`${Math.round(wrapDegrees(player.heading))}°`);
-        kTurret.set(`${Math.round(wrapDegrees(player.turretAngle - player.heading))}° respecto al casco`);
+    // --- Input --------------------------------------------------------------
+    // The mouse aims by pointing at the ground: the pixel becomes a ray, the ray
+    // meets the plane the turret sits on, and that point is where the gun goes.
+    const onAim = (e) => { aimPixel = { x: e.clientX, y: e.clientY }; };
+    canvas.addEventListener("pointermove", onAim);
+    canvas.addEventListener("pointerdown", (e) => {
+        onAim(e);
+        if (e.pointerType === "mouse") firePlayer();
     });
 
-    // --- Behaviour ------------------------------------------------------------
+    keyboard
+        .on([" ", "Space"], () => firePlayer())
+        .on("t", () => cycleAim())
+        .on("f", () => toggleAutoFire())
+        .on("c", () => cycleAmmo())
+        .on("g", () => setGearMode())
+        .on("x", () => shift(1))
+        .on("z", () => shift(-1));
+    for (let i = 0; i < GARAGE.length; i++) keyboard.on(String(i + 1), () => setDesign(GARAGE[i]));
 
-    function drivePlayer(dt) {
-        const drive = keyboard.axis(["s", "ArrowDown"], ["w", "ArrowUp"]);
-        const turn = keyboard.axis(["d", "ArrowRight"], ["a", "ArrowLeft"]);
-        player.heading += turn * TURN_SPEED * dt;
-        player.turretAngle += keyboard.axis("e", "q") * TRAVERSE_SPEED * dt;
-        if (drive) moveTank(player, drive * DRIVE_SPEED * dt);
-        player.reload = Math.max(0, player.reload - dt);
+    // Turns a pointer position into a simulation point on the turret's plane.
+    function aimWorldPoint() {
+        if (!aimPixel) return null;
+        const rect = canvas.getBoundingClientRect();
+        const ground = camera.groundPoint(aimPixel.x - rect.left, aimPixel.y - rect.top, canvas, TURRET_Y);
+        return ground ? { x: ground.x, y: ground.z } : null;
     }
 
-    function driveEnemy(enemy, dt) {
-        const dx = player.x - enemy.x, dz = player.z - enemy.z;
-        const distance = Math.hypot(dx, dz);
-        const bearing = Math.atan2(dx, dz) * RAD_TO_DEG;
+    // --- Setup --------------------------------------------------------------
 
-        // Turret tracks the player; the hull turns more slowly, so an enemy can
-        // be shooting at you while still swinging round to face you.
-        enemy.turretAngle += clamp(wrapDegrees(bearing - enemy.turretAngle), -TRAVERSE_SPEED * dt, TRAVERSE_SPEED * dt);
-        enemy.heading += clamp(wrapDegrees(bearing - enemy.heading), -TURN_SPEED * 0.6 * dt, TURN_SPEED * 0.6 * dt);
-        if (distance > 16) moveTank(enemy, DRIVE_SPEED * 0.55 * dt);
-
-        enemy.reload = Math.max(0, enemy.reload - dt);
-        if (distance < 34 && Math.abs(wrapDegrees(bearing - enemy.turretAngle)) < 6) fire(enemy);
+    function setAmmo(type) {
+        ammo = type;
+        refreshAmmo();
     }
 
-    function moveTank(tank, distance) {
-        const rad = tank.heading * DEG_TO_RAD;
-        const nx = tank.x + Math.sin(rad) * distance;
-        const nz = tank.z + Math.cos(rad) * distance;
-        // One axis at a time, the same reason as the 2D forest: it slides along
-        // a wall instead of sticking to it.
-        if (!blocked(nx, tank.z)) tank.x = nx;
-        if (!blocked(tank.x, nz)) tank.z = nz;
+    function cycleAmmo() {
+        setAmmo(AMMO[(AMMO.indexOf(ammo) + 1) % AMMO.length]);
     }
 
-    function blocked(x, z) {
-        if (Math.abs(x) > ARENA - 2.5 || Math.abs(z) > ARENA - 2.5) return true;
-        for (const block of blocks) {
-            if (Math.abs(x - block.x) < block.w / 2 + 1.5 && Math.abs(z - block.z) < block.d / 2 + 1.5) return true;
-        }
-        return false;
-    }
-
-    function fire(tank) {
-        if (!tank.alive || tank.reload > 0 || over) return false;
-        tank.reload = RELOAD;
-        const rad = tank.turretAngle * DEG_TO_RAD;
-        const mesh = app.add(new Mesh(gl, sphereGeometry({ radius: 0.16, segments: 8, rings: 6 }))
-            .setPosition({ x: tank.x + Math.sin(rad) * 3, y: 1.65, z: tank.z + Math.cos(rad) * 3 })
-            .setColor({ red: 1, green: 0.85, blue: 0.4 }).init());
-        shells.push({
-            mesh, from: tank, life: 2.2,
-            dx: Math.sin(rad), dz: Math.cos(rad),
-            type: tank.isPlayer ? ammo : PROJECTILES.AP,
+    function refreshAmmo() {
+        const gun = player ? player.tank.design.weapon : null;
+        AMMO.forEach((type, i) => {
+            ammoBtns[i].classList.toggle("active", type === ammo);
+            ammoBtns[i].querySelector("small").textContent = gun
+                ? `${Math.round(gun.penetration * type.penMultiplier)} mm · ${Math.round(gun.damage * type.damageMultiplier)} daño`
+                : "";
         });
+    }
+
+    function showImpact(key, unit, face, shot, penetration) {
+        const info = IMPACT[key];
+        lastImpact = {
+            result: key, target: unit.tank.design.id, face: face.name, armor: face.armor,
+            angle: shot.angle, effectiveArmor: shot.effectiveArmor,
+            penetration, damage: shot.damage, type: shot.type.id,
+        };
+        impactLine.textContent = `${info.label} · ${shot.type.name}`;
+        impactLine.style.color = `rgb(${[info.color.red, info.color.green, info.color.blue].map((c) => Math.round(c * 255)).join(",")})`;
+        kFace.v.textContent = `${face.name} de ${unit.tank.design.name} (${face.armor} mm)`;
+        kAngle.v.textContent = `${shot.angle.toFixed(0)}°`;
+        kEff.v.textContent = Number.isFinite(shot.effectiveArmor) ? `${shot.effectiveArmor.toFixed(0)} mm` : "∞";
+        kPen.v.textContent = `${Math.round(penetration)} mm`;
+    }
+
+    function cycleAim() {
+        if (!autoAim) return;
+        autoAim.cycle();
+        aimMode = autoAim.mode;
+        refreshAimUi();
+    }
+
+    function toggleAutoFire(on = !autoFire) {
+        autoFire = on;
+        refreshAimUi();
+    }
+
+    function refreshAimUi() {
+        const on = autoAim && autoAim.enabled;
+        aimName.textContent = autoAim ? autoAim.label : "Desactivado";
+        aimDot.classList.toggle("on", !!on);
+        btn.aim.classList.toggle("on", !!on);
+
+        autoFireName.textContent = autoFire ? "Fuego automático" : "Fuego manual";
+        autoFireDot.classList.toggle("on", autoFire);
+        autoFireBtn.textContent = autoFire ? "Desactivar auto (F)" : "Fuego automático (F)";
+        btn.auto.classList.toggle("on", autoFire);
+    }
+
+    // Only spend a shell when it can actually land.
+    function autoFireTick() {
+        if (!autoFire || !player.weapon.ready) return;
+        const target = autoAim.target;
+        if (target) {
+            if (player.tank.aimErrorTo(target.position) > AUTO_FIRE_ARC) return;
+            if (isBlocked(player.tank.muzzle, target.position)) return;
+        }
+        fire(player);
+    }
+
+    function setGearMode(mode = null) {
+        gearMode = mode ?? (gearMode === GEARBOX_MODE.AUTO ? GEARBOX_MODE.MANUAL : GEARBOX_MODE.AUTO);
+        if (player) player.gearbox.setMode(gearMode);
+        const auto = gearMode === GEARBOX_MODE.AUTO;
+        modeBtn.textContent = auto ? "Automática ⇄ pasar a manual" : "Manual ⇄ pasar a automática";
+        upBtn.disabled = downBtn.disabled = auto;
+    }
+
+    function shift(dir) {
+        if (!player || gearMode !== GEARBOX_MODE.MANUAL) return;
+        if (dir > 0) player.gearbox.shiftUp();
+        else player.gearbox.shiftDown();
+    }
+
+    // Builds a unit: the 2D body (never drawn), its 3D view, a controller, a
+    // gun and — for everyone but the player — the FSM.
+    function spawn({ design: d, x, y, rotation = 0, enemy = false, isPlayer = false, slot = 0 }) {
+        const colors = isPlayer ? d.colors : enemy ? ENEMY_COLORS : ALLY_COLORS;
+        const tank = new Tank(gl, { design: d, x, y, rotation, colors });
+
+        const gearbox = new Gearbox({ ...d.gearbox, mode: enemy ? GEARBOX_MODE.AUTO : gearMode });
+        const driver = new TankController(tank.hull, { ...d.drive, bounds: TANK_BOUNDS, gearbox });
+        const weapon = new Weapon({ ...d.weapon });
+        const unit = {
+            tank, driver, weapon, gearbox, ai: null, enemy, isPlayer,
+            bodyRadius: boundingRadius(tank.hull),
+            view: buildView(tank, colors),
+            tag: isPlayer ? null : makeTag(),
+        };
+
+        if (isPlayer) {
+            driver.bindKeys(window);
+            driver.bindTouch({ forward: btn.up, back: btn.down, left: btn.left, right: btn.right });
+        } else {
+            const angle = (slot / SQUAD.length) * Math.PI * 2 + (enemy ? 0 : Math.PI);
+            unit.ai = new TankAI(tank, driver, {
+                bounds: TANK_BOUNDS,
+                isBlocked,
+                objective: {
+                    x: ZONE.x + Math.cos(angle) * ZONE.radius * 0.55,
+                    y: ZONE.y + Math.sin(angle) * ZONE.radius * 0.55,
+                },
+            });
+        }
+        return unit;
+    }
+
+    function nearestFoe(unit) {
+        const pool = unit.enemy ? myTeam() : enemies;
+        let best = null;
+        let bestDist = Infinity;
+        for (const other of pool) {
+            if (!other.tank.alive) continue;
+            const d = Math.hypot(other.tank.position.x - unit.tank.position.x, other.tank.position.y - unit.tank.position.y);
+            if (d < bestDist) { bestDist = d; best = other; }
+        }
+        return best ? best.tank : null;
+    }
+
+    function clearBattle() {
+        for (const u of allUnits()) {
+            if (!u) continue;
+            for (const part of u.view.parts) app.remove(part);
+            u.driver.unbind();
+            u.tag?.node.remove();
+        }
+        for (const s of shells) app.remove(s.mesh);
+        shells = [];
+        for (const tick of reticle) app.remove(tick);
+        lockedOn = null;
+        for (const m of marks) app.remove(m.mesh);
+        marks.length = 0;
+        for (const mark of squadMarks) mark.style.display = "none";
+        allies = [];
+        enemies = [];
+        player = null;
+    }
+
+    function startBattle() {
+        clearBattle();
+        over = false;
+        kills = 0;
+        banner.classList.remove("show");
+
+        allyHold = 0;
+        foeHold = 0;
+        zoneState = null;              // force the repaint below
+        setZoneState("neutral");
+
+        player = spawn({ design, ...PLAYER_SPAWN, isPlayer: true });
+        allies = ALLY_SPAWNS.map((s, i) =>
+            spawn({ design: TANK_DESIGNS[s.design], x: s.x, y: s.y, rotation: s.rotation, slot: i }));
+        enemies = FOE_SPAWNS.map((s, i) =>
+            spawn({ design: TANK_DESIGNS[s.design], x: s.x, y: s.y, rotation: s.rotation, enemy: true, slot: i }));
+
+        autoAim = new AutoAim(player.tank, { mode: aimMode });
+        lockedOn = null;
+        for (const tick of reticle) app.remove(tick);
+
+        // Put the camera behind the player before the first frame, so the
+        // battle does not open with the lens flying across the map.
+        const rad = yawOf(player.tank.rotation) * DEG_TO_RAD;
+        camera.lookFrom(
+            { x: player.tank.position.x - Math.sin(rad) * CAM_BACK, y: CAM_HEIGHT, z: player.tank.position.y - Math.cos(rad) * CAM_BACK },
+            { x: player.tank.position.x, y: 0.4, z: player.tank.position.y },
+        );
+
+        setGearMode(gearMode);
+        refreshAimUi();
+        refreshAmmo();
+        lastImpact = null;
+        impactLine.textContent = "—";
+        impactLine.style.color = "";
+        kFace.v.textContent = kAngle.v.textContent = kEff.v.textContent = kPen.v.textContent = "—";
+        buildRoster();
+        for (let i = 0; i < GARAGE.length; i++) garageBtns[i].classList.toggle("active", GARAGE[i] === design);
+
+        for (const unit of allUnits()) placeView(unit);
+    }
+
+    function setDesign(next) {
+        design = next;
+        startBattle();
+    }
+
+    function buildRoster() {
+        for (const [container, units] of [[allyRoster, allies], [roster, enemies]]) {
+            container.replaceChildren();
+            for (const unit of units) {
+                const st = el("span", { className: "st" });
+                const fill = el("i");
+                const dist = el("small", { className: "dist" });
+                const row = el("div", { className: "foe" }, [
+                    el("div", { className: "top" }, [
+                        el("span", {}, [document.createTextNode(unit.tank.design.name), dist]),
+                        st,
+                    ]),
+                    el("div", { className: "bar slim" }, [fill]),
+                ]);
+                unit.hud = { row, st, fill, dist };
+                container.append(row);
+            }
+        }
+    }
+
+    // --- Combat --------------------------------------------------------------
+
+    function fire(unit) {
+        if (over || !unit.tank.alive || !unit.weapon.ready) return false;
+        const muzzle = unit.tank.muzzle;
+        const dir = unit.tank.turretForward;
+        const shell = unit.enemy ? (PROJECTILES[unit.tank.design.ammo] ?? PROJECTILES.AP) : ammo;
+        const bullet = unit.weapon.fire(muzzle.x, muzzle.y, dir.x, dir.y, unit, shell);
+        if (!bullet) return false;
+        const mesh = app.add(new Mesh(gl, sphereGeometry({ radius: 0.055, segments: 8, rings: 6 }))
+            .setColor(unit.enemy ? { red: 1, green: 0.55, blue: 0.35 } : { red: 1, green: 0.85, blue: 0.3 })
+            .setPosition({ x: muzzle.x, y: SHELL_Y, z: muzzle.y })
+            .setLayer(LAYER_SOLID).init());
+        shells.push({ bullet, mesh });
         return true;
+    }
+
+    function firePlayer() {
+        return player ? fire(player) : false;
+    }
+
+    // A destroyed tank keeps its hull as a wreck; the turret, barrel and health
+    // tag go.
+    function destroy(unit) {
+        app.remove(unit.view.turret);
+        app.remove(unit.view.barrel);
+        unit.view.hull.setColor(WRECK_COLOR);
+        if (unit.tag) unit.tag.node.style.display = "none";
+        unit.driver.setInput({ forward: 0, turn: 0 });
+        unit.driver.speed = 0;
+        if (unit.enemy) kills++;
+    }
+
+    function resolveImpact(shell, unit, hit) {
+        const b = shell.bullet;
+        const face = unit.tank.faceForEdge(hit.edgeIndex);
+        const shot = resolveShot({
+            type: b.type,
+            penetration: b.penetration,
+            damage: b.damage,
+            direction: b.direction,
+            normal: hit.normal,
+            armor: face.armor,
+        });
+
+        const key = shot.result === "block" && shot.damage > 0 ? "splash" : shot.result;
+        spawnMark(hit.point, key);
+        if (b.owner === player) showImpact(key, unit, face, shot, b.penetration);
+
+        if (shot.damage > 0) {
+            unit.tank.takeDamage(shot.damage);
+            if (!unit.tank.alive) destroy(unit);
+        }
+
+        if (shot.result === "ricochet") {
+            // Skips off and keeps flying, slower and with less punch left.
+            b.velocity = reflect(b.velocity, hit.normal);
+            b.velocity.x *= 0.7;
+            b.velocity.y *= 0.7;
+            b.penetration *= 0.8;
+            b.position = { x: hit.point.x + hit.normal.x * 0.06, y: hit.point.y + hit.normal.y * 0.06 };
+            b.prev = { x: b.position.x, y: b.position.y };
+            return;
+        }
+        b.alive = false;
     }
 
     function updateShells(dt) {
         for (const shell of shells.slice()) {
-            shell.life -= dt;
-            shell.mesh.setPosition({
-                x: shell.mesh.position.x + shell.dx * SHELL_SPEED * dt,
-                z: shell.mesh.position.z + shell.dz * SHELL_SPEED * dt,
-            });
-            const { x, z } = shell.mesh.position;
+            const b = shell.bullet;
+            b.update(dt);
 
-            const targets = shell.from.isPlayer ? enemies : [player];
-            let done = shell.life <= 0 || Math.abs(x) > ARENA || Math.abs(z) > ARENA || blocked(x, z);
-
-            for (const target of targets) {
-                if (!target.alive || Math.hypot(target.x - x, target.z - z) > 2.2) continue;
-                hit(target, shell);
-                done = true;
-                break;
+            let best = null;
+            for (const unit of allUnits()) {
+                if (!unit.tank.alive || unit === b.owner) continue;
+                if (unit.enemy === b.owner.enemy) continue;   // no friendly fire
+                const hit = raycastShape(b.prev, b.position, unit.tank.hull);
+                if (hit && (!best || hit.t < best.hit.t)) best = { unit, hit };
             }
-            if (done) { app.remove(shell.mesh); shells.splice(shells.indexOf(shell), 1); }
-        }
-    }
+            if (best) resolveImpact(shell, best.unit, best.hit);
 
-    function hit(target, shell) {
-        // The plate that got hit is the one facing the shell, and its normal is
-        // the hull's facing — so the impact angle falls straight out of the two
-        // headings. Then the 2D weapons model does the rest.
-        const rad = target.heading * DEG_TO_RAD;
-        const shot = resolveShot({
-            type: shell.type,
-            penetration: 150 * shell.type.penMultiplier,
-            damage: 26 * shell.type.damageMultiplier,
-            direction: { x: shell.dx, y: shell.dz },
-            normal: { x: -Math.sin(rad), y: -Math.cos(rad) },
-            armor: 95,
-        });
+            if (b.alive && !best && colliders.some((box) => segmentHitsBox(b.prev, b.position, box))) {
+                spawnMark(b.position, "block");
+                b.alive = false;
+            }
 
-        if (shot.damage > 0) {
-            target.hp -= shot.damage;
-            if (target.hp <= 0) {
-                target.alive = false;
-                for (const part of [target.hull, target.turret, target.barrel, ...target.tracks]) app.remove(part);
-                target.tag?.node.remove();
-                if (!target.isPlayer) kills++;
+            if (!b.alive) {
+                app.remove(shell.mesh);
+                shells.splice(shells.indexOf(shell), 1);
+            } else {
+                shell.mesh.setPosition({ x: b.position.x, y: SHELL_Y, z: b.position.y });
             }
         }
 
-        if (shell.from.isPlayer) {
-            kLast.set(`${shot.result === "penetration" ? "PENETRA" : shot.result === "ricochet" ? "REBOTE" : "NO PENETRA"} · ${shot.angle.toFixed(0)}° · ${Math.round(shot.effectiveArmor)} mm`);
-        }
-
-        const color = shot.result === "penetration" ? { red: 0.25, green: 0.9, blue: 0.4 }
-            : shot.result === "ricochet" ? { red: 0.95, green: 0.85, blue: 0.25 }
-            : { red: 0.9, green: 0.3, blue: 0.25 };
-        const mark = app.add(new Mesh(gl, sphereGeometry({ radius: 0.7, segments: 10, rings: 8 }))
-            .setPosition({ x: shell.mesh.position.x, y: 1.6, z: shell.mesh.position.z })
-            .setColor({ ...color, alpha: 1 }).init());
-        marks.push({ mesh: mark, life: 0.4, total: 0.4 });
-
-        if (!player.alive) finish(false);
-        else if (kills >= ENEMIES) finish(true);
-    }
-
-    function updateMarks(dt) {
         for (const mark of marks.slice()) {
             mark.life -= dt;
-            mark.mesh.setScale(0.4 + (1 - mark.life / mark.total));
+            mark.mesh.setScale(0.5 + (1 - mark.life / mark.total));
             mark.mesh.color.alpha = Math.max(0, mark.life / mark.total);
-            if (mark.life <= 0) { app.remove(mark.mesh); marks.splice(marks.indexOf(mark), 1); }
+            if (mark.life <= 0) {
+                app.remove(mark.mesh);
+                marks.splice(marks.indexOf(mark), 1);
+            }
         }
     }
 
-    // Health bars are DOM, positioned by projecting each tank to screen pixels.
-    // Drawing text in WebGL is a project of its own; this is three lines.
+    function spawnMark(point, key) {
+        const mesh = app.add(new Mesh(gl, sphereGeometry({ radius: 0.16, segments: 10, rings: 8 }))
+            .setPosition({ x: point.x, y: SHELL_Y, z: point.y })
+            .setColor({ ...IMPACT[key].color, alpha: 1 })
+            .setLayer(LAYER_SOLID).init());
+        marks.push({ mesh, life: 0.45, total: 0.45 });
+    }
+
+    // --- Physics-lite: hulls out of the scenery and out of each other --------
+
+    function push(shape, manifold, sign, share = 1) {
+        shape.setPosition({
+            x: shape.position.x + sign * manifold.normal.x * manifold.penetration * share,
+            y: shape.position.y + sign * manifold.normal.y * manifold.penetration * share,
+        });
+    }
+
+    function resolveWorld(unit) {
+        const hull = unit.tank.hull;
+        const reach = unit.bodyRadius;
+        let pushed = 0;
+        for (let pass = 0; pass < 2; pass++) {
+            for (const solid of solids) {
+                if (Math.hypot(solid.x - hull.position.x, solid.y - hull.position.y) > reach + solid.r) continue;
+                const hit = collide({ shape: hull }, { shape: solid.shape });
+                if (!hit) continue;
+                push(hull, hit, -1);
+                pushed += hit.penetration;
+            }
+        }
+        if (pushed > 0.02) unit.driver.speed *= 0.35;
+    }
+
+    function separate(units) {
+        for (let i = 0; i < units.length; i++) {
+            for (let j = i + 1; j < units.length; j++) {
+                const a = units[i], b = units[j];
+                const dx = b.tank.position.x - a.tank.position.x;
+                const dy = b.tank.position.y - a.tank.position.y;
+                if (Math.hypot(dx, dy) > a.bodyRadius + b.bodyRadius) continue;
+                const hit = collide({ shape: a.tank.hull }, { shape: b.tank.hull });
+                if (!hit) continue;
+                push(a.tank.hull, hit, -1, 0.5);
+                push(b.tank.hull, hit, 1, 0.5);
+                a.driver.speed *= 0.5;
+                b.driver.speed *= 0.5;
+            }
+        }
+    }
+
+    function setLock(target) {
+        if (target !== lockedOn) {
+            if (target && !lockedOn) for (const tick of reticle) app.add(tick);
+            else if (!target && lockedOn) for (const tick of reticle) app.remove(tick);
+            lockedOn = target;
+        }
+        if (!lockedOn) return;
+        const r = lockedOn.radius + 0.3;
+        const p = lockedOn.position;
+        const corners = [[-1, 1], [1, 1], [-1, -1], [1, -1]];
+        reticle.forEach((tick, i) => tick.setPosition({
+            x: p.x + corners[i][0] * r, y: TURRET_Y + 0.12, z: p.y + corners[i][1] * r,
+        }));
+    }
+
+    // --- Overlay placement ---------------------------------------------------
+
+    // Health tags: project each tank to pixels and hang the bar there. Anything
+    // behind the camera, off the canvas or dead is simply hidden.
     function updateTags() {
-        for (const enemy of enemies) {
-            if (!enemy.alive || !enemy.tag) continue;
-            const screen = camera.project({ x: enemy.x, y: 3.2, z: enemy.z }, app.canvas);
-            if (!screen) { enemy.tag.node.style.display = "none"; continue; }
-            enemy.tag.node.style.display = "block";
-            enemy.tag.node.style.left = `${screen.x}px`;
-            enemy.tag.node.style.top = `${screen.y}px`;
-            enemy.tag.fill.style.width = `${Math.max(0, enemy.hp)}%`;
+        for (const unit of [...allies, ...enemies]) {
+            const tag = unit.tag;
+            if (!tag) continue;
+            if (!unit.tank.alive) { tag.node.style.display = "none"; continue; }
+            const screen = camera.project(
+                { x: unit.tank.position.x, y: BAR_Y, z: unit.tank.position.y }, canvas);
+            const onCanvas = screen
+                && screen.x >= 0 && screen.x <= canvas.clientWidth
+                && screen.y >= 0 && screen.y <= canvas.clientHeight;
+            if (!onCanvas) { tag.node.style.display = "none"; continue; }
+            tag.node.style.display = "block";
+            tag.node.style.left = `${screen.x}px`;
+            tag.node.style.top = `${screen.y}px`;
+            const ratio = unit.tank.hpRatio;
+            tag.fill.style.width = `${ratio * 100}%`;
+            tag.fill.style.background = ratio > 0.5 ? "#43c06a" : ratio > 0.2 ? "#d8b13a" : "#d84a3a";
         }
     }
 
-    function finish(won) {
+    // Squad arrows. On a map this size your allies are usually somewhere else,
+    // so each living one that is not on screen gets an arrow pinned to the edge
+    // of the view, pointing at them.
+    //
+    // The bearing comes from the world, not from the projection: a point behind
+    // the camera has no screen position at all, and mirroring one is the classic
+    // way to get an arrow that points at the wrong side of the screen.
+    function updateSquadMarks() {
+        const w = canvas.clientWidth;
+        const h = canvas.clientHeight;
+        const camYaw = Math.atan2(camera.target.x - camera.position.x, camera.target.z - camera.position.z);
+        const sinY = Math.sin(camYaw), cosY = Math.cos(camYaw);
+        const margin = 30;
+        // The on-screen pads own the bottom corners. An arrow that lands down
+        // there slides along to the middle of the strip rather than sitting
+        // under a thumb — the bottom centre is the one part of that edge free.
+        const padStrip = 210;
+
+        allies.forEach((mate, i) => {
+            const node = squadMarks[i];
+            if (!mate.tank.alive) { node.style.display = "none"; return; }
+
+            const screen = camera.project(
+                { x: mate.tank.position.x, y: TURRET_Y, z: mate.tank.position.y }, canvas);
+            if (screen && screen.x >= 0 && screen.x <= w && screen.y >= 0 && screen.y <= h) {
+                node.style.display = "none";
+                return;
+            }
+
+            // Bearing relative to where the camera looks: 0 straight ahead,
+            // positive to the right.
+            const dx = mate.tank.position.x - camera.position.x;
+            const dz = mate.tank.position.y - camera.position.z;
+            const ahead = dx * sinY + dz * cosY;
+            const right = dx * cosY - dz * sinY;
+            const bearing = Math.atan2(right, ahead);
+
+            // Slide out from the centre along that bearing until it meets the
+            // edge of the canvas box.
+            const dirX = Math.sin(bearing);
+            const dirY = -Math.cos(bearing);
+            const halfW = w / 2 - margin;
+            const halfH = h / 2 - margin;
+            const scale = Math.min(
+                halfW / Math.max(Math.abs(dirX), 1e-6),
+                halfH / Math.max(Math.abs(dirY), 1e-6),
+            );
+            let left = w / 2 + dirX * scale;
+            let top = h / 2 + dirY * scale;
+            if (top > h - padStrip) {
+                top = Math.min(top, h - margin);
+                left = clamp(left, w * 0.34, w * 0.66);
+            }
+            node.style.display = "block";
+            node.style.left = `${left - 7}px`;
+            node.style.top = `${top - 6}px`;
+            node.style.transform = `rotate(${bearing * RAD_TO_DEG}deg)`;
+        });
+    }
+
+    // --- The objective --------------------------------------------------------
+
+    const inZone = (unit) =>
+        unit.tank.alive && Math.hypot(unit.tank.position.x - ZONE.x, unit.tank.position.y - ZONE.y) <= ZONE.radius;
+
+    const captureRate = (n) => Math.min(1.6, 1 + 0.2 * (n - 1));
+
+    function setZoneState(state) {
+        if (state === zoneState) return;   // recolouring re-uploads nothing, but it is still churn
+        zoneState = state;
+        const c = ZONE_COLORS[state];
+        zoneFill.setColor({ ...c, alpha: ZONE_FILL_ALPHA });
+        zoneRim.setColor({ ...c, alpha: ZONE_RIM_ALPHA });
+    }
+
+    function updateCapture(dt) {
+        const mine = myTeam().filter(inZone).length;
+        const theirs = enemies.filter(inZone).length;
+
+        if (mine > 0 && theirs > 0) {
+            setZoneState("contested");
+        } else if (mine > 0) {
+            setZoneState("ally");
+            allyHold = Math.min(CAPTURE_SECONDS, allyHold + dt * captureRate(mine));
+        } else if (theirs > 0) {
+            setZoneState("foe");
+            foeHold = Math.min(CAPTURE_SECONDS, foeHold + dt * captureRate(theirs));
+        } else {
+            setZoneState("neutral");
+            allyHold = Math.max(0, allyHold - dt * CONTEST_DECAY);
+            foeHold = Math.max(0, foeHold - dt * CONTEST_DECAY);
+        }
+    }
+
+    // --- Minimap ---------------------------------------------------------------
+
+    const miniX = (x) => ((x - MAP.minX) / mapW) * MINI_W;
+    const miniY = (y) => ((MAP.maxY - y) / mapH) * MINI_H;
+
+    function miniTank(unit, color) {
+        const t = unit.tank;
+        const x = miniX(t.position.x), y = miniY(t.position.y);
+        if (!t.alive) {
+            miniCtx.fillStyle = "#4a4a52";
+            miniCtx.fillRect(x - 2, y - 2, 4, 4);
+            return;
+        }
+        if (t === lockedOn) {
+            miniCtx.strokeStyle = "#73d9ff";
+            miniCtx.lineWidth = 1.5;
+            miniCtx.beginPath();
+            miniCtx.arc(x, y, 6, 0, Math.PI * 2);
+            miniCtx.stroke();
+        }
+        const g = t.turretForward;
+        miniCtx.strokeStyle = color;
+        miniCtx.lineWidth = 2;
+        miniCtx.beginPath();
+        miniCtx.moveTo(x, y);
+        miniCtx.lineTo(x + g.x * 11, y - g.y * 11);
+        miniCtx.stroke();
+        miniCtx.fillStyle = color;
+        miniCtx.beginPath();
+        miniCtx.arc(x, y, 3.5, 0, Math.PI * 2);
+        miniCtx.fill();
+    }
+
+    function drawMinimap() {
+        const ctx = miniCtx;
+        ctx.clearRect(0, 0, MINI_W, MINI_H);
+
+        ctx.fillStyle = "#4c515f";
+        for (const b of blocks) {
+            const w = (b.s / mapW) * MINI_W;
+            const h = (b.s / mapH) * MINI_H;
+            ctx.fillRect(miniX(b.x) - w / 2, miniY(b.y) - h / 2, w, h);
+        }
+
+        const zr = (ZONE.radius / mapW) * MINI_W;
+        ctx.fillStyle = { neutral: "rgba(150,155,165,.16)", ally: "rgba(74,159,224,.24)",
+                          foe: "rgba(216,74,58,.24)", contested: "rgba(232,194,74,.26)" }[zoneState];
+        ctx.beginPath();
+        ctx.arc(miniX(ZONE.x), miniY(ZONE.y), zr, 0, Math.PI * 2);
+        ctx.fill();
+
+        // A 3D camera has a frustum, not a rectangle, so the minimap draws the
+        // wedge it can actually see instead of the 2D version's viewport box.
+        const camYaw = Math.atan2(camera.target.x - camera.position.x, camera.target.z - camera.position.z);
+        const half = camera.fov * DEG_TO_RAD * 0.5 * 1.3; // widened by the aspect
+        const reach = 16;
+        const cx = miniX(camera.position.x), cy = miniY(camera.position.z);
+        ctx.fillStyle = "rgba(106,169,224,.16)";
+        ctx.strokeStyle = "rgba(106,169,224,.75)";
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        for (const edge of [-half, half]) {
+            const a = camYaw + edge;
+            ctx.lineTo(
+                miniX(camera.position.x + Math.sin(a) * reach),
+                miniY(camera.position.z + Math.cos(a) * reach),
+            );
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        for (const foe of enemies) miniTank(foe, "#e06a5f");
+        for (const mate of allies) miniTank(mate, "#4a9fe0");
+        miniTank(player, "#5fe08a");
+    }
+
+    // --- Frame -----------------------------------------------------------------
+
+    function finish(won, reason = "") {
         over = true;
-        bannerText.textContent = won ? "¡Arena despejada!" : "Tanque destruido";
-        bannerText.style.color = won ? "#7fe0a0" : "#f0a094";
-        banner.style.display = "flex";
+        bannerText.textContent = (won ? "¡Victoria!" : "Derrota") + (reason ? ` — ${reason}` : "");
+        bannerText.style.color = won ? "#5fe08a" : "#e06a5f";
+        banner.classList.add("show");
     }
 
-    function restart() {
-        over = false;
-        kills = 0;
-        banner.style.display = "none";
-        player.x = 0; player.z = 0; player.heading = 0; player.turretAngle = 0;
-        player.hp = 100; player.alive = true; player.reload = 0;
-        for (const part of [player.hull, player.turret, player.barrel, ...player.tracks]) {
-            if (!app.entities.includes(part)) app.add(part);
+    function update(dt) {
+        const alive = allUnits().filter((u) => u.tank.alive);
+
+        player.weapon.update(dt);
+        manualTraverse = keyboard.axis("e", "q");
+        if (player.tank.alive && !over) {
+            player.driver.update(dt);
+            // Aiming priority: hand traverse beats auto-aim, which beats the
+            // pointer — the same order as the flat version.
+            const locked = autoAim.update(manualTraverse !== 0 ? 0 : dt, enemies.map((e) => e.tank));
+            if (manualTraverse !== 0) {
+                player.tank.traverse(manualTraverse, dt);
+            } else if (!locked) {
+                const point = aimWorldPoint();
+                if (point) player.tank.aimAt(point, dt);
+            }
+            setLock(locked);
+            autoFireTick();
         }
-        for (const shell of shells.slice()) app.remove(shell.mesh);
-        shells.length = 0;
-        spawnEnemies();
-        kLast.set("—");
+
+        for (const unit of [...allies, ...enemies]) {
+            unit.weapon.update(dt);
+            if (!unit.tank.alive || over) continue;
+            unit.ai.update(dt, nearestFoe(unit));
+            unit.driver.update(dt);
+            if (unit.ai.wantsToFire) fire(unit);
+        }
+
+        for (const unit of alive) resolveWorld(unit);
+        separate(alive);
+        updateShells(dt);
+
+        for (const unit of allUnits()) {
+            unit.tank.sync();
+            placeView(unit);
+        }
+
+        // Chase camera: behind the hull, looking a little ahead of it. The
+        // target is eased rather than the position, so a pivot does not throw
+        // the lens around the map.
+        const rad = yawOf(player.tank.rotation) * DEG_TO_RAD;
+        const p = player.tank.position;
+        const wanted = {
+            x: p.x - Math.sin(rad) * CAM_BACK,
+            y: CAM_HEIGHT,
+            z: p.y - Math.cos(rad) * CAM_BACK,
+        };
+        const t = 1 - Math.exp(-CAM_SMOOTH * dt);
+        camera.position.x += (wanted.x - camera.position.x) * t;
+        camera.position.y += (wanted.y - camera.position.y) * t;
+        camera.position.z += (wanted.z - camera.position.z) * t;
+        camera.target = {
+            x: p.x + Math.sin(rad) * CAM_AHEAD,
+            y: 0.45,
+            z: p.y + Math.cos(rad) * CAM_AHEAD,
+        };
+
+        updateTags();
+        updateSquadMarks();
+
+        if (!over) updateCapture(dt);
+
+        if (!over) {
+            if (allyHold >= CAPTURE_SECONDS) finish(true, "Zona controlada 30 s");
+            else if (foeHold >= CAPTURE_SECONDS) finish(false, "El enemigo controló la zona");
+            else if (enemies.every((f) => !f.tank.alive)) finish(true, "Escuadrón enemigo destruido");
+            else if (!player.tank.alive) finish(false, "Tu tanque fue destruido");
+        }
+
+        drawHud();
+        drawMinimap();
+    }
+
+    function drawHud() {
+        const tank = player.tank;
+        const driver = player.driver;
+
+        const fwd = driver.input.forward > 0, back = driver.input.forward < 0;
+        const left = driver.input.turn > 0, right = driver.input.turn < 0;
+        keyEls.up.classList.toggle("on", fwd);
+        keyEls.down.classList.toggle("on", back);
+        keyEls.left.classList.toggle("on", left);
+        keyEls.right.classList.toggle("on", right);
+        btn.up.classList.toggle("on", fwd);
+        btn.down.classList.toggle("on", back);
+        btn.left.classList.toggle("on", left);
+        btn.right.classList.toggle("on", right);
+
+        const pct = tank.hpRatio * 100;
+        hpFill.style.width = `${pct}%`;
+        hpFill.style.background = pct > 50 ? "#43c06a" : pct > 20 ? "#d8b13a" : "#d84a3a";
+        hpChip.textContent = String(Math.ceil(tank.hp));
+        hpChipBox.classList.toggle("low", tank.hpRatio <= 0.3);
+        killChip.textContent = `${kills}/${enemies.length}`;
+        zoneChip.textContent = `${allyHold.toFixed(1)} s`;
+
+        const gb = player.gearbox;
+        gearBox.textContent = gb.label;
+        gearBox.classList.toggle("shifting", gb.shifting);
+        const revs = gb.rpm;
+        tachFill.style.width = `${revs * 100}%`;
+        tachFill.style.background = gb.shifting ? "#7d838a" : revs > 0.88 ? "#d84a3a" : revs > 0.7 ? "#d8b13a" : "#6aa9e0";
+        tachLabel.textContent = gb.shifting ? "cambiando…" : `${Math.round(revs * 100)}%`;
+
+        const deg = (a) => (((a % 360) + 360) % 360).toFixed(0);
+        kHp.v.textContent = `${Math.ceil(tank.hp)} / ${tank.maxHp} HP`;
+        kSpeed.v.textContent = `${driver.speed.toFixed(2)} u/s`;
+        // Relative to the hull, because that is the thing 3D shows and 2D did not.
+        kTurret.v.textContent = `${deg(tank.turretAngle)}° · ${clamp(
+            Math.round(((tank.turretAngle - tank.rotation + 540) % 360) - 180), -180, 180)}° respecto al casco`;
+        kAmmo.v.textContent = player.weapon.ready ? "Listo" : `Recargando ${(player.weapon.reloadProgress * 100).toFixed(0)}%`;
+
+        if (!autoAim.enabled) {
+            aimTarget.textContent = "Sin objetivo";
+        } else if (!lockedOn) {
+            aimTarget.textContent = "Buscando…";
+        } else {
+            const d = Math.hypot(lockedOn.position.x - tank.position.x, lockedOn.position.y - tank.position.y);
+            aimTarget.replaceChildren(
+                el("b", { textContent: lockedOn.design.name }),
+                document.createTextNode(` · ${Math.ceil(lockedOn.hp)} HP · a ${d.toFixed(1)} u`),
+            );
+        }
+
+        allyCap.fill.style.width = `${(allyHold / CAPTURE_SECONDS) * 100}%`;
+        foeCap.fill.style.width = `${(foeHold / CAPTURE_SECONDS) * 100}%`;
+        allyCap.secs.textContent = `${allyHold.toFixed(1)} s`;
+        foeCap.secs.textContent = `${foeHold.toFixed(1)} s`;
+        const zoneLabels = {
+            neutral: ["Zona neutral", "#9aa0a6"],
+            ally: ["Capturando", "#6aa9e0"],
+            foe: ["El enemigo captura", "#e06a5f"],
+            contested: ["En disputa", "#e8c24a"],
+        };
+        const [zoneText, zoneColor] = zoneLabels[zoneState];
+        zoneStateLine.textContent = zoneText;
+        zoneStateLine.style.color = zoneColor;
+
+        let standing = 0;
+        for (const unit of [...allies, ...enemies]) {
+            const t = unit.tank;
+            if (t.alive && unit.enemy) standing++;
+            const state = unit.ai.state;
+            unit.hud.st.textContent = AI_STATE_LABEL[state];
+            unit.hud.st.className = `st ${state}`;
+            unit.hud.row.classList.toggle("down", !t.alive);
+            unit.hud.fill.style.width = `${t.hpRatio * 100}%`;
+            unit.hud.fill.style.background = t.hpRatio > 0.5 ? "#43c06a" : t.hpRatio > 0.2 ? "#d8b13a" : "#d84a3a";
+            unit.hud.dist.textContent = t.alive
+                ? ` · a ${Math.hypot(t.position.x - tank.position.x, t.position.y - tank.position.y).toFixed(0)} u`
+                : "";
+        }
+        const mineStanding = myTeam().filter((u) => u.tank.alive).length;
+        kFoes.v.textContent = `${mineStanding} / ${standing}`;
     }
 });
     </script>
