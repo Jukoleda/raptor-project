@@ -1272,15 +1272,37 @@ voltea la normal hacia quien mira para que la cara de atrás no salga negra.
 camera.orbit({ yaw, pitch, distance });   // gira alrededor del objetivo
 camera.lookFrom(posicion, objetivo);      // colocada a mano
 camera.follow(punto, dt);                 // persecución
-camera.project(punto, canvas);            // mundo → píxeles, para colgar HUD
-camera.rayFromScreen(px, py, canvas);     // píxeles → rayo, la inversa de project
-camera.groundPoint(px, py, canvas, alto); // dónde corta ese rayo un plano horizontal
+camera.rayFromScreen(clientX, clientY, canvas);   // píxel → rayo (solo 3D)
 ```
 
-`project` responde «dónde está esto en pantalla»; `rayFromScreen` responde «qué
-acabo de señalar», que es la pregunta que hace un ratón. `groundPoint` es el
-caso que aparece siempre: un juego que se juega sobre un suelo quiere el punto
-del suelo bajo el cursor, y devuelve `null` cuando el rayo apunta al cielo.
+### Las dos cámaras hablan el mismo idioma
+
+`Camera` y `Camera3D` responden las dos mismas preguntas, con los mismos nombres
+y los mismos argumentos, así que una escena puede cambiar una por la otra sin
+reescribir cómo lee la entrada:
+
+```js
+camera.project(punto, canvas);                    // mundo → píxeles del canvas
+camera.screenToWorld(clientX, clientY, canvas);   // píxeles de cliente → mundo
+```
+
+La regla de los píxeles, y es la misma para las dos:
+
+- **los que entran son de cliente** — es lo que da un evento de puntero
+  (`e.clientX`), así que quien llama nunca tiene que restar un `getBoundingClientRect`;
+- **los que salen son del canvas** — es lo que necesita un overlay posicionado
+  con CSS.
+
+Vivía en dos convenciones distintas: la cámara 2D restaba el rect por dentro y
+la 3D esperaba píxeles ya relativos al canvas. Dos cámaras, dos idiomas para el
+mismo trabajo, y un desfase del margen entero que solo se nota apuntando. La
+conversión está ahora en un solo sitio, `components/render/screen.js`.
+
+Lo único que las separa lo impone la geometría: en 3D `screenToWorld` corta el
+rayo contra un plano horizontal (`{ height }`, por defecto el suelo) y devuelve
+`null` si el píxel apunta al cielo. La 2D nunca devuelve `null`, porque un mundo
+plano no tiene cielo al que apuntar. Al revés, `project` devuelve `null` en 3D
+para lo que queda detrás de la cámara y nunca en 2D.
 
 El cabeceo se recorta justo antes de la vertical: a exactamente 90° la dirección
 de vista queda paralela al vector «arriba», la matriz colapsa y el mundo gira un

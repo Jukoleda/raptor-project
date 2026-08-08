@@ -6,7 +6,7 @@
     <title>Raptor — Carga de assets</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/render/projection.js, components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/ui/loadingScreen.js, components/scenes/sceneManager.js, components/input/keyboard.js, components/input/touchpad.js, components/render/texture.js, components/assets/assets.js, components/math/angles.js, components/render3d/camera3d.js, components/app.js, components/ui/index.js, components/render/shaders.js, components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/shapes/sprite.js, components/shapes/index.js, components/render/spriteSheet.js, components/render/index.js, components/render3d/shaders3d.js, components/render3d/mesh.js, components/render3d/geometry.js, components/render3d/index.js, components/physics/body.js, components/physics/collision.js, components/physics/world.js, components/physics/index.js, components/input/index.js, components/audio/engineSound.js, components/audio/index.js, components/assets/index.js, components/scenes/scene.js, components/scenes/index.js, components/math/random.js, components/math/index.js, components/controls/tankController.js, components/controls/tankAI.js, components/controls/gearbox.js, components/controls/autoAim.js, components/controls/index.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/armor.js, components/weapons/index.js, components/vehicles/tank.js, components/vehicles/engine.js, components/vehicles/index.js, components/index.js, assets/assetsDemo.js + vendor/gl-matrix-min.js
+        Source: components/render/projection.js, components/render/screen.js, components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/ui/loadingScreen.js, components/scenes/sceneManager.js, components/input/keyboard.js, components/input/touchpad.js, components/render/texture.js, components/assets/assets.js, components/math/angles.js, components/render3d/camera3d.js, components/app.js, components/ui/index.js, components/render/shaders.js, components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/shapes/sprite.js, components/shapes/index.js, components/render/spriteSheet.js, components/render/index.js, components/render3d/shaders3d.js, components/render3d/mesh.js, components/render3d/geometry.js, components/render3d/index.js, components/physics/body.js, components/physics/collision.js, components/physics/world.js, components/physics/index.js, components/input/index.js, components/audio/engineSound.js, components/audio/index.js, components/assets/index.js, components/scenes/scene.js, components/scenes/index.js, components/math/random.js, components/math/index.js, components/controls/tankController.js, components/controls/tankAI.js, components/controls/gearbox.js, components/controls/autoAim.js, components/controls/index.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/armor.js, components/weapons/index.js, components/vehicles/tank.js, components/vehicles/engine.js, components/vehicles/index.js, components/index.js, assets/assetsDemo.js + vendor/gl-matrix-min.js
         Regenerate with: node tools/build.mjs
         This file is fully self-contained: open it directly in any browser.
     -->
@@ -129,6 +129,57 @@ function modelViewFor({ x, y, depth, rotationDegrees, scaleX, scaleY }) {
     return modelView;
 }
 
+// ===== components/render/screen.js =====
+// Pixels — and which kind of pixel.
+//
+// Two coordinate spaces meet at the edge of the canvas, and mixing them up is an
+// afternoon of "why is my aim off by half a screen":
+//
+//   client pixels   what a pointer event hands you (`e.clientX` / `e.clientY`),
+//                   measured from the top-left of the *viewport*
+//   canvas pixels   measured from the top-left of the *canvas box*, which is
+//                   what a CSS-positioned overlay needs for `left` / `top`
+//
+// The framework's rule, and it is the same for both cameras:
+//
+//   pixels going IN  are client pixels — that is what the DOM gives you, so a
+//                    call site never has to subtract a bounding rect
+//   pixels coming OUT are canvas pixels — that is what you position a label with
+//
+// So `camera.project()` and `camera.screenToWorld()` are inverses in *world*
+// space, not in pixel space; `toClientPixels` below bridges the gap when you
+// genuinely need to round-trip.
+//
+// Both functions live here rather than in either camera because there are two
+// cameras and only one right answer.
+
+// The rect, not clientWidth: a pointer event is in viewport coordinates, and
+// getBoundingClientRect is the only measurement that agrees with it (it accounts
+// for CSS transforms, which clientWidth does not).
+function clientToNdc(clientX, clientY, canvas) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+        x: ((clientX - rect.left) / (rect.width || 1)) * 2 - 1,   // [-1, 1]
+        y: 1 - ((clientY - rect.top) / (rect.height || 1)) * 2,   // [-1, 1], y grows up
+    };
+}
+
+// clientWidth, not the rect: an overlay is positioned inside the canvas's own
+// CSS box, so that is the box its pixels are measured against.
+function ndcToCanvasPixels(ndcX, ndcY, canvas) {
+    return {
+        x: (ndcX * 0.5 + 0.5) * (canvas.clientWidth || 1),
+        y: (1 - (ndcY * 0.5 + 0.5)) * (canvas.clientHeight || 1),
+    };
+}
+
+// Canvas pixels back to client pixels, for feeding a projected point into
+// something that expects pointer coordinates.
+function toClientPixels(x, y, canvas) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: x + rect.left, y: y + rect.top };
+}
+
 // ===== components/camera.js =====
 // A 2D camera: a movable window onto the world.
 //
@@ -140,6 +191,7 @@ function modelViewFor({ x, y, depth, rotationDegrees, scaleX, scaleY }) {
 //
 // `follow()` eases the center toward a target (the player) instead of snapping,
 // and optional `bounds` keep the center from revealing past the edges of a map.
+
 
 class Camera {
     constructor({ x = 0, y = 0, zoom = 1, smoothing = 8, bounds = null } = {}) {
@@ -179,12 +231,28 @@ class Camera {
     // Converts a pointer position (clientX/clientY, as given by mouse/touch
     // events) into world coordinates, accounting for the camera pan and zoom.
     // Use it to aim at, pick or place things where the user clicked/tapped.
+    //
+    // `Camera3D.screenToWorld` takes the same arguments and answers the same
+    // question, so a scene can swap one camera for the other without rewriting
+    // its input handling. The one difference geometry forces: in 3D a pixel can
+    // point at the sky and miss the ground, so that one may return null. This
+    // one never does — a flat world has no sky to point at.
     screenToWorld(clientX, clientY, canvas, opts) {
-        const rect = canvas.getBoundingClientRect();
         const { halfW, halfH } = this.viewExtents(canvas, opts);
-        const nx = ((clientX - rect.left) / rect.width) * 2 - 1;  // [-1, 1]
-        const ny = 1 - ((clientY - rect.top) / rect.height) * 2;   // y grows up
-        return { x: this.x + nx * halfW, y: this.y + ny * halfH };
+        const ndc = clientToNdc(clientX, clientY, canvas);
+        return { x: this.x + ndc.x * halfW, y: this.y + ndc.y * halfH };
+    }
+
+    // The other direction: a world point to canvas pixels, for hanging a DOM
+    // label over something. The counterpart of `Camera3D.project`, and named the
+    // same for the same reason `screenToWorld` is.
+    //
+    // Never null: everything in a flat world is in front of the camera. The 3D
+    // one returns null for points behind it, so code meant to work with either
+    // should still check.
+    project(point, canvas, opts) {
+        const { halfW, halfH } = this.viewExtents(canvas, opts);
+        return ndcToCanvasPixels((point.x - this.x) / halfW, (point.y - this.y) / halfH, canvas);
     }
 
     _clamp() {
@@ -1611,6 +1679,7 @@ const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 // what a third-person game wants.
 
 
+
 class Camera3D {
     constructor({
         position = { x: 0, y: 4, z: 8 },
@@ -1714,14 +1783,11 @@ class Camera3D {
     // the camera. `project` answers "where on screen is this thing"; this one
     // answers "what did I just click on", which is the question a mouse asks.
     //
-    // Pixels are relative to the canvas box (subtract getBoundingClientRect()
-    // from a pointer event), matching what `project` returns.
-    rayFromScreen(px, py, canvas) {
+    // Takes client pixels, straight from a pointer event — see
+    // components/render/screen.js for why that is the framework's rule.
+    rayFromScreen(clientX, clientY, canvas) {
         const { mat4, vec4 } = glMatrix;
-        const width = canvas.clientWidth || 1;
-        const height = canvas.clientHeight || 1;
-        const ndcX = (px / width) * 2 - 1;
-        const ndcY = 1 - (py / height) * 2;
+        const { x: ndcX, y: ndcY } = clientToNdc(clientX, clientY, canvas);
 
         const inverse = mat4.invert(
             mat4.create(),
@@ -1746,12 +1812,17 @@ class Camera3D {
         return { origin: near, direction: { x: dx / length, y: dy / length, z: dz / length } };
     }
 
-    // Where that ray meets a horizontal plane — the ground, in other words. This
-    // is how a pointer becomes a world position in a game played on a floor.
-    // Null when the ray runs parallel to the plane or only meets it behind the
-    // camera (pointing at the sky).
-    groundPoint(px, py, canvas, height = 0) {
-        const ray = this.rayFromScreen(px, py, canvas);
+    // Where that ray meets a horizontal plane — the ground, in other words. A
+    // game played on a floor wants the floor point under the cursor, and that is
+    // the same question `Camera.screenToWorld` answers in two dimensions, so it
+    // carries the same name and the same arguments. A scene can hand either
+    // camera a pointer event and get back "where in the world is this".
+    //
+    // Null when the ray runs parallel to the plane, or only meets it behind the
+    // camera — which is what pointing at the sky looks like. The 2D camera never
+    // returns null, so code written for both should check.
+    screenToWorld(clientX, clientY, canvas, { height = 0 } = {}) {
+        const ray = this.rayFromScreen(clientX, clientY, canvas);
         if (!ray || Math.abs(ray.direction.y) < 1e-6) return null;
         const t = (height - ray.origin.y) / ray.direction.y;
         if (t < 0) return null;
@@ -1770,13 +1841,10 @@ class Camera3D {
         const viewProjection = mat4.multiply(mat4.create(), this.projectionMatrix(canvas), this.viewMatrix());
         vec4.transformMat4(clip, clip, viewProjection);
         if (clip[3] <= 0) return null;
-        const ndcX = clip[0] / clip[3];
-        const ndcY = clip[1] / clip[3];
-        return {
-            x: (ndcX * 0.5 + 0.5) * canvas.clientWidth,
-            y: (1 - (ndcY * 0.5 + 0.5)) * canvas.clientHeight,
-            depth: clip[3],
-        };
+        const pixels = ndcToCanvasPixels(clip[0] / clip[3], clip[1] / clip[3], canvas);
+        // `depth` is the w of the clip-space point: distance along the view
+        // direction, handy for sorting labels or fading distant ones.
+        return { ...pixels, depth: clip[3] };
     }
 }
 

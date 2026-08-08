@@ -10,6 +10,7 @@
 // and optional `bounds` keep the center from revealing past the edges of a map.
 
 import { viewHalfExtents, aspectOf, DEFAULT_DEPTH } from "./render/projection.js";
+import { clientToNdc, ndcToCanvasPixels } from "./render/screen.js";
 
 export default class Camera {
     constructor({ x = 0, y = 0, zoom = 1, smoothing = 8, bounds = null } = {}) {
@@ -49,12 +50,28 @@ export default class Camera {
     // Converts a pointer position (clientX/clientY, as given by mouse/touch
     // events) into world coordinates, accounting for the camera pan and zoom.
     // Use it to aim at, pick or place things where the user clicked/tapped.
+    //
+    // `Camera3D.screenToWorld` takes the same arguments and answers the same
+    // question, so a scene can swap one camera for the other without rewriting
+    // its input handling. The one difference geometry forces: in 3D a pixel can
+    // point at the sky and miss the ground, so that one may return null. This
+    // one never does — a flat world has no sky to point at.
     screenToWorld(clientX, clientY, canvas, opts) {
-        const rect = canvas.getBoundingClientRect();
         const { halfW, halfH } = this.viewExtents(canvas, opts);
-        const nx = ((clientX - rect.left) / rect.width) * 2 - 1;  // [-1, 1]
-        const ny = 1 - ((clientY - rect.top) / rect.height) * 2;   // y grows up
-        return { x: this.x + nx * halfW, y: this.y + ny * halfH };
+        const ndc = clientToNdc(clientX, clientY, canvas);
+        return { x: this.x + ndc.x * halfW, y: this.y + ndc.y * halfH };
+    }
+
+    // The other direction: a world point to canvas pixels, for hanging a DOM
+    // label over something. The counterpart of `Camera3D.project`, and named the
+    // same for the same reason `screenToWorld` is.
+    //
+    // Never null: everything in a flat world is in front of the camera. The 3D
+    // one returns null for points behind it, so code meant to work with either
+    // should still check.
+    project(point, canvas, opts) {
+        const { halfW, halfH } = this.viewExtents(canvas, opts);
+        return ndcToCanvasPixels((point.x - this.x) / halfW, (point.y - this.y) / halfH, canvas);
     }
 
     _clamp() {
