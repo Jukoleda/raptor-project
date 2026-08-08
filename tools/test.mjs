@@ -991,6 +991,108 @@ suite("camara3d", async () => {
     await page.close();
 });
 
+// --- Las dos cámaras hablan el mismo idioma -------------------------------
+//
+// `Camera` y `Camera3D` responden las dos mismas preguntas —«dónde cae esto en
+// pantalla» y «qué hay bajo este píxel»— con los mismos nombres y los mismos
+// argumentos. Los píxeles que entran son de cliente (lo que da un evento de
+// puntero) y los que salen son del canvas (lo que necesita un overlay en CSS).
+// Esto no es una preferencia de estilo: el canvas está desplazado dentro de la
+// página, así que una implementación que no reste el rect se equivoca por el
+// margen entero, y es un fallo que solo se nota apuntando.
+suite("camaras", async () => {
+    for (const [file, handle, kind] of [["drive.html", "raptorDrive", "2D"], ["drive3d.html", "raptorDrive3D", "3D"]]) {
+        const { page } = await open(file);
+        await page.waitForFunction((h) => !!window[h], handle, { timeout: 15000 });
+
+        const shape = await page.evaluate((h) => {
+            const camera = window[h].camera;
+            return ["project", "screenToWorld"].every((m) => typeof camera[m] === "function");
+        }, handle);
+        ok(`${kind}: la cámara tiene project y screenToWorld`, shape);
+
+        const trip = await page.evaluate((h) => {
+            const api = window[h];
+            const app = api.app || api.game;
+            const canvas = app.canvas;
+            const camera = api.camera;
+            const rect = canvas.getBoundingClientRect();
+            const flat = typeof camera.zoom === "number";     // the 2D one
+
+            // A world point a little off centre, projected and then read back
+            // from the pixel it landed on. Everything in one synchronous block,
+            // so no frame moves the camera in between.
+            const point = flat
+                ? { x: camera.x + 1.2, y: camera.y - 0.7 }
+                : { x: camera.target.x + 1.5, y: 0, z: camera.target.z + 0.8 };
+            const pixels = camera.project(point, canvas);
+            // project() gives canvas pixels; screenToWorld() wants client ones.
+            const back = camera.screenToWorld(pixels.x + rect.left, pixels.y + rect.top, canvas);
+
+            // And the centre of the canvas, in client pixels, must land where
+            // the camera is aimed.
+            const centre = camera.screenToWorld(
+                rect.left + rect.width / 2, rect.top + rect.height / 2, canvas);
+
+            // In 3D the centre pixel does not land *on* the target: a chase
+            // camera looks a little above the ground, so the middle ray carries
+            // on past it and meets the floor further away. What must hold is
+            // that it lands along the direction the camera is looking.
+            let alignment = null;
+            if (!flat && centre) {
+                const f = camera.forward;
+                const fl = Math.hypot(f.x, f.z) || 1;
+                const dx = centre.x - camera.position.x;
+                const dz = centre.z - camera.position.z;
+                const dl = Math.hypot(dx, dz) || 1;
+                alignment = (f.x / fl) * (dx / dl) + (f.z / fl) * (dz / dl);   // 1 = dead ahead
+            }
+
+            return {
+                flat, point, pixels, back, centre, alignment,
+                offset: { left: rect.left, top: rect.top },
+                aim: flat ? { x: camera.x, y: camera.y } : { x: camera.target.x, z: camera.target.z },
+            };
+        }, handle);
+
+        // If the canvas sat at the viewport origin this would prove nothing.
+        ok(`${kind}: el canvas está desplazado, así que el rect importa`,
+            trip.offset.left > 0 && trip.offset.top > 0, JSON.stringify(trip.offset));
+
+        const near = (a, b, tol) => Math.abs(a - b) < tol;
+        ok(`${kind}: proyectar y volver devuelve el mismo punto`,
+            trip.flat
+                ? near(trip.back.x, trip.point.x, 0.01) && near(trip.back.y, trip.point.y, 0.01)
+                : near(trip.back.x, trip.point.x, 0.05) && near(trip.back.z, trip.point.z, 0.05),
+            JSON.stringify(trip));
+
+        ok(`${kind}: el centro del canvas es a dónde mira la cámara`,
+            trip.flat
+                ? near(trip.centre.x, trip.aim.x, 0.01) && near(trip.centre.y, trip.aim.y, 0.01)
+                : trip.centre !== null && near(trip.alignment, 1, 1e-6),
+            JSON.stringify(trip));
+
+        await page.close();
+    }
+
+    // The one difference geometry forces: in three dimensions a pixel can point
+    // at the sky and meet no ground at all. The flat camera has no sky.
+    const { page } = await open("drive3d.html");
+    await page.waitForFunction(() => !!window.raptorDrive3D, { timeout: 15000 });
+    const sky = await page.evaluate(() => {
+        const api = window.raptorDrive3D;
+        const canvas = api.app.canvas;
+        const rect = canvas.getBoundingClientRect();
+        return {
+            up: api.camera.screenToWorld(rect.left + rect.width / 2, rect.top + 2, canvas),
+            down: api.camera.screenToWorld(rect.left + rect.width / 2, rect.bottom - 2, canvas),
+        };
+    });
+    ok("3D: apuntar al cielo no devuelve punto, apuntar al suelo sí",
+        sky.up === null && sky.down !== null, JSON.stringify(sky));
+    await page.close();
+});
+
 suite("juegos3d", async () => {
     // The forest game: same generator, same collision, three scenes.
     const { page, errors } = await open("bosque3d.html");

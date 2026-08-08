@@ -14,6 +14,7 @@
 // what a third-person game wants.
 
 import { aspectOf } from "../render/projection.js";
+import { clientToNdc, ndcToCanvasPixels } from "../render/screen.js";
 import { DEG_TO_RAD, clamp } from "../math/angles.js";
 
 export default class Camera3D {
@@ -119,14 +120,11 @@ export default class Camera3D {
     // the camera. `project` answers "where on screen is this thing"; this one
     // answers "what did I just click on", which is the question a mouse asks.
     //
-    // Pixels are relative to the canvas box (subtract getBoundingClientRect()
-    // from a pointer event), matching what `project` returns.
-    rayFromScreen(px, py, canvas) {
+    // Takes client pixels, straight from a pointer event — see
+    // components/render/screen.js for why that is the framework's rule.
+    rayFromScreen(clientX, clientY, canvas) {
         const { mat4, vec4 } = glMatrix;
-        const width = canvas.clientWidth || 1;
-        const height = canvas.clientHeight || 1;
-        const ndcX = (px / width) * 2 - 1;
-        const ndcY = 1 - (py / height) * 2;
+        const { x: ndcX, y: ndcY } = clientToNdc(clientX, clientY, canvas);
 
         const inverse = mat4.invert(
             mat4.create(),
@@ -151,12 +149,17 @@ export default class Camera3D {
         return { origin: near, direction: { x: dx / length, y: dy / length, z: dz / length } };
     }
 
-    // Where that ray meets a horizontal plane — the ground, in other words. This
-    // is how a pointer becomes a world position in a game played on a floor.
-    // Null when the ray runs parallel to the plane or only meets it behind the
-    // camera (pointing at the sky).
-    groundPoint(px, py, canvas, height = 0) {
-        const ray = this.rayFromScreen(px, py, canvas);
+    // Where that ray meets a horizontal plane — the ground, in other words. A
+    // game played on a floor wants the floor point under the cursor, and that is
+    // the same question `Camera.screenToWorld` answers in two dimensions, so it
+    // carries the same name and the same arguments. A scene can hand either
+    // camera a pointer event and get back "where in the world is this".
+    //
+    // Null when the ray runs parallel to the plane, or only meets it behind the
+    // camera — which is what pointing at the sky looks like. The 2D camera never
+    // returns null, so code written for both should check.
+    screenToWorld(clientX, clientY, canvas, { height = 0 } = {}) {
+        const ray = this.rayFromScreen(clientX, clientY, canvas);
         if (!ray || Math.abs(ray.direction.y) < 1e-6) return null;
         const t = (height - ray.origin.y) / ray.direction.y;
         if (t < 0) return null;
@@ -175,12 +178,9 @@ export default class Camera3D {
         const viewProjection = mat4.multiply(mat4.create(), this.projectionMatrix(canvas), this.viewMatrix());
         vec4.transformMat4(clip, clip, viewProjection);
         if (clip[3] <= 0) return null;
-        const ndcX = clip[0] / clip[3];
-        const ndcY = clip[1] / clip[3];
-        return {
-            x: (ndcX * 0.5 + 0.5) * canvas.clientWidth,
-            y: (1 - (ndcY * 0.5 + 0.5)) * canvas.clientHeight,
-            depth: clip[3],
-        };
+        const pixels = ndcToCanvasPixels(clip[0] / clip[3], clip[1] / clip[3], canvas);
+        // `depth` is the w of the clip-space point: distance along the view
+        // direction, handy for sorting labels or fading distant ones.
+        return { ...pixels, depth: clip[3] };
     }
 }
