@@ -17,10 +17,13 @@ permissions:
   pages: write
   id-token: write
 
-# Un despliegue a la vez; cancela los que queden obsoletos por uno más nuevo.
+# Un despliegue a la vez. Los que queden en cola mientras uno está corriendo se
+# descartan salvo el último, pero NO se cancela el que ya está en marcha: un
+# despliegue a producción tiene que poder terminar. Con cancel-in-progress: true
+# dos merges seguidos se mataban entre sí y el sitio se quedaba sin publicar.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:

@@ -138,7 +138,7 @@ demos3d/                   # Las mismas ocho demos, en tres dimensiones
   dyno3d.js                # Banco de pruebas con cámara de persecución
   sprites3d.js             # Texturas sobre sólidos y billboards
   assets3d.js              # Carga de assets, y lo cargado en escena
-  drive3d.js               # Batalla: casco y torreta giran por separado
+  drive3d.js               # Batalla: la misma simulación 2D vista desde detrás del casco
   bosque3d.js              # El Bosque 3D (reusa game/forest.js)
 game/                      # El Bosque: un juego pequeño pero completo
   main.js                  # Arranque: crea el SceneManager y va al menú
@@ -1273,7 +1273,14 @@ camera.orbit({ yaw, pitch, distance });   // gira alrededor del objetivo
 camera.lookFrom(posicion, objetivo);      // colocada a mano
 camera.follow(punto, dt);                 // persecución
 camera.project(punto, canvas);            // mundo → píxeles, para colgar HUD
+camera.rayFromScreen(px, py, canvas);     // píxeles → rayo, la inversa de project
+camera.groundPoint(px, py, canvas, alto); // dónde corta ese rayo un plano horizontal
 ```
+
+`project` responde «dónde está esto en pantalla»; `rayFromScreen` responde «qué
+acabo de señalar», que es la pregunta que hace un ratón. `groundPoint` es el
+caso que aparece siempre: un juego que se juega sobre un suelo quiere el punto
+del suelo bajo el cursor, y devuelve `null` cuando el rayo apunta al cielo.
 
 El cabeceo se recorta justo antes de la vertical: a exactamente 90° la dirección
 de vista queda paralela al vector «arriba», la matriz colapsa y el mundo gira un
@@ -1289,6 +1296,26 @@ La parte interesante del port es lo que se pudo dejar quieto:
   simulación le da igual en cuántas dimensiones la dibujes. En estas escenas la
   geometría del impacto vive entera en el plano horizontal, así que las
   componentes XZ entran como el par (x, y) que el modelo espera.
+- **La batalla entera** — `drive3d` no es una segunda implementación de
+  `controls/driveDemo.js`: es la misma simulación vista desde detrás del casco.
+  Mismos `TANK_DESIGNS`, mismo `TankController`, mismo `Gearbox`, misma
+  `TankAI`, mismo `AutoAim`, mismo `Weapon` y mismo blindaje por cara. El mapa
+  se genera con la misma semilla, así que es el mismo campo bloque a bloque. El
+  puente entre los dos mundos son dos funciones:
+
+  | simulación   | vista                                        |
+  | ------------ | -------------------------------------------- |
+  | `x`          | `x`                                          |
+  | `y`          | `z` (en 3D el suelo es XZ)                   |
+  | rotación θ   | guiñada −θ (2D gira antihorario con +Y adelante) |
+
+  Cada tanque conserva sus formas 2D, que **no se dibujan nunca**: son los
+  *cuerpos*. El SAT corre sobre el contorno del casco, el rayo del proyectil
+  encuentra qué arista cruzó y `Armor.forHull` convierte esas mismas aristas en
+  placas frontal/lateral/trasera. El casco 3D es ese contorno extruido con
+  `prismGeometry`, y por eso el morro en cuña del cazacarros rebota proyectiles
+  en tres dimensiones exactamente por la razón por la que lo hace en dos: 30 mm
+  golpeados a 70° cuentan como 90.
 - **Tren motriz** — `dyno3d` usa el mismo `Engine` y el mismo `Gearbox` en modo
   mecánico. Una curva de par no cambia con un eje más.
 - **El mapa del bosque** — `bosque3d` importa `generateForest` y

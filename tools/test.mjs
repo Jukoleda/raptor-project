@@ -1036,19 +1036,195 @@ suite("juegos3d", async () => {
     ok("bosque3d: sin errores", errors.length === 0, errors.join(" | "));
     await page.close();
 
-    // The battle: the ballistics come from the 2D weapons layer.
+    // The battle: not a second implementation, the 2D one seen from behind the
+    // hull. Everything below is checking that claim rather than trusting it.
     const battle = await open("drive3d.html");
     await battle.page.waitForFunction(() => !!window.raptorDrive3D, { timeout: 15000 });
+
     const fought = await battle.page.evaluate(async () => {
         const api = window.raptorDrive3D;
-        api.player.turretAngle = 45;
+        api.player.tank.turretAngle = 45;
         const fired = api.fire(api.player);
         await new Promise((r) => setTimeout(r, 120));
-        return { fired, shells: api.shells.length, enemies: api.enemies.length, turret: api.player.turretAngle };
+        return {
+            fired, shells: api.shells.length,
+            enemies: api.enemies.length, allies: api.allies.length,
+            turret: api.player.tank.turretAngle, hull: api.player.tank.rotation,
+        };
     });
     ok("drive3d: dispara y la torreta gira aparte del casco",
-        fought.fired && fought.shells > 0 && fought.enemies === 5 && fought.turret === 45,
+        fought.fired && fought.shells > 0 && fought.turret === 45 && fought.turret !== fought.hull,
         JSON.stringify(fought));
+    ok("drive3d: hay dos escuadrones, no solo enemigos",
+        fought.enemies === 5 && fought.allies === 5, JSON.stringify(fought));
+
+    // The garage: four designs, and each one really is a different hull — the
+    // 3D mesh is the collision outline extruded, so a different silhouette is a
+    // different vertex count.
+    const garage = await battle.page.evaluate(() => {
+        const api = window.raptorDrive3D;
+        const seen = [];
+        for (const name of ["medium", "light", "heavy", "hunter"]) {
+            api.setDesign(api.TANK_DESIGNS[name]);
+            seen.push({
+                name,
+                design: api.player.tank.design.id,
+                hp: api.player.tank.maxHp,
+                corners: api.player.tank.hull.getColliderVertices().length,
+                faces: api.player.tank.hull.getColliderVertices().map((_, i) => api.player.tank.faceForEdge(i).name),
+            });
+        }
+        api.setDesign(api.TANK_DESIGNS.medium);
+        return seen;
+    });
+    ok("drive3d: el garaje cambia de tanque de verdad",
+        garage.every((g) => g.design === g.name)
+        && new Set(garage.map((g) => g.corners)).size > 1
+        && new Set(garage.map((g) => g.hp)).size > 1,
+        JSON.stringify(garage));
+    // Every hull has a nose and a back; how many plates sit between them is the
+    // design's business. The triangular light tank genuinely has no side plate —
+    // both of its flanks are inside the frontal arc — and that is the point of
+    // deriving armour from the outline instead of assuming four faces.
+    ok("drive3d: el blindaje sale del contorno de cada casco",
+        garage.every((g) => g.faces.length === g.corners
+            && g.faces.includes("Frontal") && g.faces.includes("Trasera"))
+        && garage.some((g) => g.faces.includes("Lateral"))
+        && garage.find((g) => g.name === "light").faces.length === 3,
+        JSON.stringify(garage.map((g) => [g.name, g.faces])));
+
+    // Ammo: the picker changes what actually leaves the barrel.
+    const ammo = await battle.page.evaluate(() => {
+        const before = window.raptorDrive3D.ammoId();
+        window.raptorDrive3D.cycleAmmo();
+        const after = window.raptorDrive3D.ammoId();
+        window.raptorDrive3D.setAmmo(window.raptorDrive3D.ammo);
+        return { before, after };
+    });
+    ok("drive3d: el selector de munición cambia el proyectil",
+        ammo.before === "AP" && ammo.after !== "AP", JSON.stringify(ammo));
+
+    // Auto-aim: cycling the policy locks a target and swings the gun onto it.
+    const aimed = await battle.page.evaluate(async () => {
+        const api = window.raptorDrive3D;
+        const off = api.autoAim.mode;
+        api.cycleAim();                              // OFF → NEAREST
+        const mode = api.autoAim.mode;
+        await new Promise((r) => setTimeout(r, 400));
+        const target = api.lockedOn;
+        const error = target ? api.player.tank.aimErrorTo(target.position) : null;
+        api.autoAim.setMode("off");
+        return { off, mode, locked: !!target, error };
+    });
+    ok("drive3d: el auto-apuntado engancha un objetivo y gira la torreta",
+        aimed.off === "off" && aimed.mode === "nearest" && aimed.locked && aimed.error < 90,
+        JSON.stringify(aimed));
+
+    // A shot that lands: the panel readout comes from the 2D penetration model
+    // against the plate the raycast actually crossed, not from a flat number.
+    // Fired nose to nose at two different hulls, three units apart.
+    const shootAt = async (index) => battle.page.evaluate(async (i) => {
+        const api = window.raptorDrive3D;
+        api.startBattle();
+        api.autoAim.setMode("off");
+        // Everyone out of the way but the one being shot at, so nothing else
+        // wanders into the shell's path.
+        for (const u of [...api.allies, ...api.enemies]) u.tank.hull.setPosition({ x: 26, y: 18 });
+        const foe = api.enemies[i];
+        foe.tank.hull.setPosition({ x: 0, y: 0 });
+        foe.tank.hull.rotation = 180;                 // nose toward the player
+        foe.tank.turretAngle = 180;
+        api.player.tank.hull.setPosition({ x: 0, y: -3 });
+        api.player.tank.hull.rotation = 0;
+        api.player.tank.turretAngle = 0;              // straight up +Y at the foe
+        api.fire(api.player);
+        await new Promise((r) => setTimeout(r, 700));
+        return { design: foe.tank.design.id, impact: api.lastImpact };
+    }, index);
+
+    const boxHull = await shootAt(1);   // "medium": a rectangular hull
+    ok("drive3d: un impacto llena el panel desde el modelo de penetración",
+        boxHull.impact
+        && ["Frontal", "Lateral", "Trasera"].includes(boxHull.impact.face)
+        && boxHull.impact.armor > 0 && boxHull.impact.penetration > 0
+        && boxHull.impact.angle >= 0 && boxHull.impact.angle <= 180,
+        JSON.stringify(boxHull));
+    ok("drive3d: de frente contra una placa recta el ángulo es casi cero",
+        boxHull.design === "medium" && boxHull.impact.face === "Frontal" && boxHull.impact.angle < 20,
+        JSON.stringify(boxHull));
+
+    // The same shot against the triangular light tank meets its nose at a
+    // steep slope: same plate name, far more effective armour. That is the
+    // whole reason armour is derived from the outline instead of assumed.
+    const wedgeHull = await shootAt(0);   // "light": a triangular hull
+    ok("drive3d: contra un morro en cuña la misma placa cuenta mucho más",
+        wedgeHull.design === "light"
+        && wedgeHull.impact.face === "Frontal"
+        && wedgeHull.impact.angle > boxHull.impact.angle + 30
+        && wedgeHull.impact.effectiveArmor > wedgeHull.impact.armor * 2,
+        JSON.stringify(wedgeHull));
+
+    // Auto-fire holds the trigger.
+    const auto = await battle.page.evaluate(() => {
+        window.raptorDrive3D.toggleAutoFire(true);
+        const on = window.raptorDrive3D.autoFire;
+        window.raptorDrive3D.toggleAutoFire(false);
+        return { on, off: window.raptorDrive3D.autoFire };
+    });
+    ok("drive3d: el fuego automático se puede activar y apagar",
+        auto.on === true && auto.off === false, JSON.stringify(auto));
+
+    // The objective: holding the circle *alone* banks time, and an enemy
+    // standing on it with you stops the clock.
+    const zone = await battle.page.evaluate(async () => {
+        const api = window.raptorDrive3D;
+        api.startBattle();
+        api.setHold(0, 0);
+        // Both squadrons drive for the middle, so park them in a corner first —
+        // otherwise whether the zone is held or contested is a race.
+        for (const u of [...api.allies, ...api.enemies]) u.tank.hull.setPosition({ x: 26, y: 18 });
+        api.player.tank.hull.setPosition({ x: api.ZONE.x, y: api.ZONE.y });
+        await new Promise((r) => setTimeout(r, 400));
+        const held = { ally: api.hold.ally, state: api.hold.state };
+
+        // Now put an enemy on it too: contested, and the clock stops.
+        api.enemies[0].tank.hull.setPosition({ x: api.ZONE.x, y: api.ZONE.y });
+        await new Promise((r) => setTimeout(r, 60));
+        const banked = api.hold.ally;
+        await new Promise((r) => setTimeout(r, 350));
+        return { held, contestedState: api.hold.state, banked, after: api.hold.ally };
+    });
+    ok("drive3d: mantener la zona acumula tiempo",
+        zone.held.ally > 0 && zone.held.state === "ally", JSON.stringify(zone));
+    ok("drive3d: con los dos bandos dentro el reloj se para",
+        zone.contestedState === "contested" && Math.abs(zone.after - zone.banked) < 0.02,
+        JSON.stringify(zone));
+
+    // The gearbox is the same one the dyno drives.
+    const gears = await battle.page.evaluate(() => {
+        const api = window.raptorDrive3D;
+        const gb = api.player.gearbox;
+        gb.setMode("manual");
+        const first = gb.label;
+        gb.shiftUp();
+        return { first, next: gb.label, mode: gb.mode };
+    });
+    ok("drive3d: la caja de cambios se puede llevar a mano",
+        gears.mode === "manual" && gears.first !== gears.next, JSON.stringify(gears));
+
+    // The FSM is running for both squadrons, not just the enemy.
+    const fsm = await battle.page.evaluate(() => {
+        const api = window.raptorDrive3D;
+        return {
+            allies: api.allies.map((u) => u.ai.state),
+            enemies: api.enemies.map((u) => u.ai.state),
+        };
+    });
+    ok("drive3d: aliados y enemigos corren la misma máquina de estados",
+        fsm.allies.length === 5 && fsm.enemies.length === 5
+        && fsm.allies.every((s) => typeof s === "string") && fsm.enemies.every((s) => typeof s === "string"),
+        JSON.stringify(fsm));
+
     ok("drive3d: sin errores", battle.errors.length === 0, battle.errors.join(" | "));
     await battle.page.close();
 });
