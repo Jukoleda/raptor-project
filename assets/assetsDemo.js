@@ -17,7 +17,7 @@
 import App from "../components/app.js";
 import { el, kv, card, button, hint } from "../components/ui/index.js";
 import { Sprite } from "../components/shapes/index.js";
-import { Assets, SpriteSheet, Animator } from "../components/index.js";
+import { Assets, SpriteSheet, Animator, Mixer } from "../components/index.js";
 
 const CELL = 32;
 const PPU = 32;
@@ -235,7 +235,7 @@ App.boot({
         get manifest() { return app.assets.manifest; },
         get failed() { return app.assets.failed.map((e) => ({ key: e.key, error: e.error.message })); },
         reload, playCoin, declare,
-        Assets,
+        Assets, Mixer,
     };
 
     app.onUpdate((dt) => {
@@ -299,18 +299,10 @@ App.boot({
     }
 
     // Playing needs a user gesture — decoding did not, which is why the buffer
-    // was already sitting there when the button was first clicked.
+    // was already sitting there when the button was first clicked. `app.audio`
+    // handles the gesture and the wiring; what is left is the intent.
     function playCoin() {
-        const context = app.assets.audioContext;
-        const buffer = app.assets.status("moneda") === "ready" ? app.assets.sound("moneda") : null;
-        if (!context || !buffer) return false;
-        if (context.state === "suspended") context.resume();
-        const source = context.createBufferSource();
-        source.buffer = buffer;
-        const gain = context.createGain();
-        gain.gain.value = 0.5;
-        source.connect(gain).connect(context.destination);
-        source.start();
-        return true;
+        if (app.assets.status("moneda") !== "ready") return false;
+        return !!app.audio.play(app.assets.sound("moneda"), { volume: 0.5 });
     }
 });

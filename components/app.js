@@ -15,7 +15,8 @@
 // scene never writes that plumbing again.
 //
 // What it owns: the canvas and its size, the render loop, the camera, the
-// entity list, the keyboard, the on-screen pad, the panel, fullscreen. What it
+// entity list, the keyboard, the on-screen pad, the panel, the audio mixer,
+// fullscreen. What it
 // does not own: your game. Everything is exposed (`app.engine`, `app.gl`,
 // `app.stage`) so you can drop to the layer below whenever the shell is in the
 // way.
@@ -28,6 +29,7 @@ import SceneManager, { SCENE_STYLES } from "./scenes/sceneManager.js";
 import Keyboard from "./input/keyboard.js";
 import TouchPad, { PAD_STYLES } from "./input/touchpad.js";
 import Assets from "./assets/assets.js";
+import Mixer from "./audio/mixer.js";
 import Camera3D from "./render3d/camera3d.js";
 
 export default class App {
@@ -42,6 +44,7 @@ export default class App {
         touch = true,          // create a TouchPad over the canvas
         autoResize = false,    // track the CSS box and resize the buffer to it
         assetPath = "",        // prefix for every relative asset URL
+        audioVolume = 1,       // master volume for app.audio, in 0..1
     } = {}) {
         injectStyles(
             (baseStyles ? BASE_STYLES + PAD_STYLES + FULLSCREEN_STYLES + LOADING_STYLES + SCENE_STYLES : "") + styles,
@@ -57,9 +60,14 @@ export default class App {
         this.engine.createWindow(this.stage, { width, height });
         this.keyboard = keyboard ? new Keyboard().attach(window) : null;
         this.touch = touch ? new TouchPad(this.stage, { keyboard: this.keyboard }) : null;
+        // Building a Mixer costs nothing — it creates no AudioContext until
+        // something actually plays — so every app gets one and a scene never
+        // writes Web Audio plumbing. Assets decodes into its context, so the
+        // page has one context and one master volume, not one per subsystem.
+        this.audio = new Mixer({ volume: audioVolume });
         // The registry exists from the start, so a scene can `put()` something
         // it generated even if it never loads a file.
-        this.assets = new Assets({ gl: this.gl, basePath: assetPath });
+        this.assets = new Assets({ gl: this.gl, basePath: assetPath, audio: this.audio });
         this.plugins = [];
 
         this._offFullscreen = onFullscreenChange((on) => this._emit("fullscreenchange", on));
@@ -284,6 +292,7 @@ export default class App {
         this._scenes?.destroy();
         this.keyboard?.detach();
         this.assets?.dispose();
+        this.audio?.dispose();
         this._resizeObserver?.disconnect();
         this._offFullscreen?.();
         this.root.remove();

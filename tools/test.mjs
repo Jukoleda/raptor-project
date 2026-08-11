@@ -226,6 +226,131 @@ suite("audio", async () => {
     await page.evaluate(() => window.raptorDyno.toggleSound());
     await page.waitForTimeout(300);
     ok("silenciar lo calla", (await pitch()).gain < revving.gain * 0.05);
+
+    // The engine no longer makes a context of its own: it shares the app's, so
+    // one master volume reaches it and every sound effect alike.
+    ok("el motor suena a través del mixer de la app",
+        await page.evaluate(() => {
+            const api = window.raptorDyno;
+            return api.sound.mixer === api.app.audio && api.sound.ctx === api.app.audio.context;
+        }));
+
+    // And the master volume really moves. This is the page to assert it on: the
+    // pointer gesture above started the context for real, which is the only
+    // state in which Chrome applies AudioParam automation.
+    const master = await page.evaluate(async () => {
+        const audio = window.raptorDyno.app.audio;
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        const before = audio.input.gain.value;
+        audio.setVolume(0.3);
+        await wait(200);
+        const quieter = audio.input.gain.value;
+        audio.setMuted(true);
+        await wait(200);
+        const silent = audio.input.gain.value;
+        audio.setMuted(false);
+        audio.setVolume(1);
+        await wait(200);
+        return { before, quieter, silent, restored: audio.input.gain.value };
+    });
+    ok("bajar el volumen maestro mueve la ganancia de verdad",
+        Math.abs(master.before - 1) < 0.01 && Math.abs(master.quieter - 0.3) < 0.02,
+        JSON.stringify(master));
+    ok("silenciar el mixer lo lleva a cero, y se recupera",
+        master.silent < 0.01 && Math.abs(master.restored - 1) < 0.01, JSON.stringify(master));
+    await page.close();
+});
+
+// --- El mixer: la pieza que faltaba en la capa de audio -------------------
+//
+// `Assets` ya cargaba un WAV y lo decodificaba. Reproducirlo eran doce líneas de
+// Web Audio que cada juego escribía por su cuenta — y dos lo hacían, idénticas,
+// en game/forestScene.js y assets/assetsDemo.js. Ninguna de las dos copias podía
+// bajar el volumen, silenciar, parar un sonido ya empezado ni dejar de crear
+// voces nuevas cuando ya había cien.
+suite("mixer", async () => {
+    const { page } = await open("assets.html", null, { expect: EXPECTED_404 });
+    await page.waitForFunction(() => !!window.raptorAssets, { timeout: 15000 });
+
+    // Building a Mixer must cost nothing: an AudioContext created before a user
+    // gesture starts suspended and the browser complains about it.
+    ok("un mixer recién construido no ha creado ningún contexto",
+        await page.evaluate(() => {
+            const Mixer = window.raptorAssets.Mixer;
+            const mixer = new Mixer();
+            const cold = mixer._context === null;
+            mixer.dispose();
+            return cold;
+        }));
+
+    const played = await page.evaluate(async () => {
+        const app = window.raptorAssets.app;
+        const buffer = app.assets.sound("moneda");
+        const before = app.audio.playing;
+        const voice = app.audio.play(buffer, { volume: 0.2 });
+        const during = app.audio.playing;
+        voice.stop();
+        await new Promise((r) => setTimeout(r, 80));   // onended has to land
+        return {
+            gotVoice: !!voice, before, during, after: app.audio.playing,
+            // One context for the page: the mixer's is the one Assets decoded into.
+            shared: app.assets.audioContext === app.audio.context,
+            duration: buffer.duration,
+        };
+    });
+    ok("reproducir un buffer devuelve una voz y la cuenta",
+        played.gotVoice && played.before === 0 && played.during === 1, JSON.stringify(played));
+    ok("pararla la quita de la cuenta", played.after === 0, JSON.stringify(played));
+    ok("Assets decodifica en el contexto del mixer, no en uno propio",
+        played.shared, JSON.stringify(played));
+
+    // The public state, which is what a settings screen reads back.
+    const state = await page.evaluate(() => {
+        const audio = window.raptorAssets.app.audio;
+        audio.setVolume(0.4);
+        const afterVolume = audio.volume;
+        audio.setVolume(5);                       // fuera de rango
+        const clamped = audio.volume;
+        audio.setMuted(true);
+        const muted = audio.muted;
+        audio.toggleMuted();
+        const toggled = audio.muted;
+        audio.setVolume(1);
+        return { afterVolume, clamped, muted, toggled };
+    });
+    ok("el volumen y el silencio se leen de vuelta",
+        state.afterVolume === 0.4 && state.clamped === 1 && state.muted === true && state.toggled === false,
+        JSON.stringify(state));
+    // El nodo maestro se comprueba en la suite `audio`, sobre dyno.html: allí el
+    // contexto lo arranca un gesto de puntero real, y solo entonces Chrome
+    // aplica la automatización de un AudioParam. Reanudado por código y sin
+    // gesto —como aquí— el contexto dice "running" pero no produce, así que una
+    // rampa no llega a ningún sitio. Tampoco se oiría nada, así que da igual
+    // para el juego; lo que no vale es afirmarlo desde esta página.
+
+    // A gun firing every frame must not pile up voices forever.
+    const capped = await page.evaluate(async () => {
+        const app = window.raptorAssets.app;
+        const buffer = app.assets.sound("moneda");
+        app.audio.maxVoices = 5;
+        for (let i = 0; i < 40; i++) app.audio.play(buffer, { volume: 0.001 });
+        const peak = app.audio.playing;
+        app.audio.stopAll();
+        await new Promise((r) => setTimeout(r, 100));
+        app.audio.maxVoices = 24;
+        return { peak, afterStopAll: app.audio.playing };
+    });
+    ok("el número de voces tiene tope", capped.peak <= 5, JSON.stringify(capped));
+    ok("stopAll las calla todas", capped.afterStopAll === 0, JSON.stringify(capped));
+
+    // Nothing to play is not an error: a game whose sound failed to load should
+    // fall silent, not throw three frames later.
+    ok("sin buffer devuelve null en vez de reventar",
+        await page.evaluate(() => window.raptorAssets.app.audio.play(null) === null));
+
+    // And the demo's own button now goes through it.
+    ok("el botón de la demo suena por el mixer",
+        await page.evaluate(() => window.raptorAssets.playCoin() === true));
     await page.close();
 });
 

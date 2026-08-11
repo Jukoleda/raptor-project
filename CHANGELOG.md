@@ -4,6 +4,50 @@ Todos los cambios notables de este proyecto se documentan en este archivo.
 
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/).
 
+## [0.8.0] - 2026-08-07
+
+La capa de audio pasa a ser una capa.
+
+### Añadido
+- **`components/audio/Mixer`**, y `app.audio` en todo `App`. `Assets` ya cargaba
+  un WAV y lo decodificaba; reproducirlo eran doce líneas de Web Audio que cada
+  juego escribía por su cuenta — y dos lo hacían, idénticas, en
+  `game/forestScene.js` y `assets/assetsDemo.js`. Ninguna de las dos copias sabía
+  bajar el volumen, silenciar, parar un sonido empezado ni dejar de crear voces
+  cuando ya había cien.
+
+  ```js
+  app.audio.play(buffer, { volume: 0.3, rate: 1.4, loop: false });
+  voz.stop(0.5);                // se desvanece
+  app.audio.setVolume(0.2);
+  app.audio.setMuted(true);
+  app.audio.stopAll();
+  ```
+
+  Construirlo no cuesta nada: no crea ningún `AudioContext` hasta que algo suena.
+
+### Cambiado
+- **Un solo contexto de audio por página.** Antes `Assets` creaba uno para
+  decodificar y `EngineSound` otro para sintetizar, así que una página podía
+  acabar con dos y un volumen maestro que no llegaba a ninguno. Los dos reciben
+  ahora el mixer: `new Assets({ audio })` decodifica en su contexto y
+  `new EngineSound({ mixer })` cuelga de su ganancia maestra. Ambos siguen
+  funcionando sin mixer, exactamente como antes.
+- `game/forestScene.js` y `assets/assetsDemo.js` pierden sus copias del mismo
+  fragmento; `vehicles/dynoDemo.js` pasa su motor por el mixer.
+
+### Corregido
+- **El tope de voces no topaba nada.** Se quitaba la voz más vieja del registro
+  en `onended`, que llega un turno después, así que cuarenta disparos en un
+  mismo frame pasaban de largo el límite mientras los `onended` seguían en cola.
+  Ahora se descuenta al pararla.
+- **Un volumen puesto antes del primer clic se perdía.** `resume()` es asíncrono
+  y `context.state` pasa a `"running"` antes de que el hilo de audio produzca;
+  una rampa de ganancia programada en esa ventana no llega nunca. El mixer marca
+  el momento real de arranque, hasta entonces aplica el volumen de golpe (no hay
+  nada audible, así que no hay chasquido que evitar) y lo vuelve a aplicar
+  cuando el `resume` aterriza.
+
 ## [0.7.0] - 2026-08-07
 
 `drive3d` deja de ser una versión recortada de la batalla y pasa a ser la

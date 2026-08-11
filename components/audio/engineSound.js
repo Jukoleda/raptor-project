@@ -26,11 +26,16 @@ const PARTIALS = [
 const SMOOTH = 0.05; // seconds — how fast parameters chase their target
 
 export default class EngineSound {
-    constructor({ cylinders = 4, strokes = 4, volume = 0.5 } = {}) {
+    constructor({ cylinders = 4, strokes = 4, volume = 0.5, mixer = null } = {}) {
         this.cylinders = cylinders;
         this.strokes = strokes;
         this.volume = volume;
         this.muted = false;
+        // Given a Mixer, the engine shares its context and hangs off its master
+        // gain, so one volume control reaches the engine and the sound effects
+        // alike. Without one it still works — it just makes a context of its own,
+        // which is how this class behaved before mixers existed.
+        this.mixer = mixer;
         this.ctx = null;
         this.nodes = null;
     }
@@ -46,14 +51,20 @@ export default class EngineSound {
 
     // Must be called from a user gesture. Safe to call again: it just resumes.
     start() {
-        const AudioCtx = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
-        if (!AudioCtx) return false;
         if (!this.ctx) {
-            try { this.ctx = new AudioCtx(); } catch { return false; }
+            const context = this.mixer ? this.mixer.context : this._ownContext();
+            if (!context) return false;
+            this.ctx = context;
             this._build();
         }
         if (this.ctx.state === "suspended") this.ctx.resume();
         return true;
+    }
+
+    _ownContext() {
+        const AudioCtx = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
+        if (!AudioCtx) return null;
+        try { return new AudioCtx(); } catch { return null; }
     }
 
     _build() {
@@ -61,7 +72,9 @@ export default class EngineSound {
 
         const master = ctx.createGain();
         master.gain.value = 0;
-        master.connect(ctx.destination);
+        // Through the mixer when there is one, so the master volume and the mute
+        // apply here too; straight out when there is not.
+        master.connect(this.mixer ? this.mixer.input : ctx.destination);
 
         // One lowpass for the lot: opening it with load is most of the "effort".
         const filter = ctx.createBiquadFilter();

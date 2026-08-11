@@ -212,6 +212,7 @@ components/
     tankAI.js              # TankAI: máquina de estados enemiga (patrulla/persigue/ataca/huye)
     index.js               # Re-exporta los controladores
   audio/
+    mixer.js               # Mixer: reproduce buffers, volumen maestro, silencio, tope de voces
     engineSound.js         # EngineSound: nota del motor sintetizada con Web Audio
     index.js               # Re-exporta el audio
   vehicles/
@@ -634,6 +635,49 @@ estado, así que ninguno pisa al otro.
 
 Con la configuración de fábrica: **0-100 en 4,87 s** y **400 m en 13,35 s** a
 169 km/h de paso.
+
+### La capa de audio
+
+`Assets` carga un WAV y lo decodifica en un `AudioBuffer`. Convertir ese buffer
+en algo que se oiga eran doce líneas de Web Audio que cada juego escribía por su
+cuenta — y dos lo hacían, idénticas, en `game/forestScene.js` y en
+`assets/assetsDemo.js`. Ninguna de las dos copias sabía bajar el volumen,
+silenciar, parar un sonido ya empezado, ni dejar de crear voces cuando ya había
+cien. Eso es lo que hace `Mixer` una capa y no un fragmento:
+
+```js
+app.audio.play(app.assets.sound("moneda"));
+app.audio.play(buffer, { volume: 0.3, rate: 1.4 });
+
+const ambiente = app.audio.play(bosque, { loop: true });
+ambiente.stop(0.5);           // se desvanece en medio segundo
+
+app.audio.setVolume(0.2);
+app.audio.setMuted(true);
+app.audio.stopAll();          // lo que quiere una escena al desmontarse
+```
+
+Todo `App` trae uno en `app.audio`. Construirlo no cuesta nada —no crea ningún
+`AudioContext` hasta que algo suena de verdad— y es también **el dueño del
+contexto**: antes `Assets` creaba uno para decodificar y `EngineSound` otro para
+sintetizar, así que una página podía acabar con dos y un volumen maestro que no
+llegaba a ninguno. Ahora los dos reciben el mixer.
+
+Tres cosas que impone el navegador y que la capa absorbe para que quien la use
+no tenga que pensarlas:
+
+- Un `AudioContext` creado antes de un gesto del usuario nace suspendido y
+  Chrome se queja, así que el contexto se crea **en el primer uso**.
+- Sonar necesita un gesto; decodificar no. `play()` reanuda el contexto solo.
+- `resume()` es **asíncrono**, y `context.state` pasa a `"running"` antes de que
+  el hilo de audio esté produciendo. Una rampa de ganancia programada en esa
+  ventana no llega nunca. El mixer marca el momento real en que arrancó y, hasta
+  entonces, aplica el volumen de golpe en vez de con rampa: no hay nada audible
+  todavía, así que no hay chasquido que evitar. Cuando el `resume` aterriza,
+  vuelve a aplicarlo — así un volumen elegido antes del primer clic no se pierde.
+
+Sin Web Audio todo son no-ops y `play` devuelve `null`, de modo que quien llama
+nunca tiene que protegerse.
 
 ### Sonido del motor
 

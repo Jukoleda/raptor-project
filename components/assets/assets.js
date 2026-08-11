@@ -65,11 +65,15 @@ function withTimeout(promise, ms) {
 const LOADERS = new Map();
 
 export default class Assets {
-    constructor({ gl = null, basePath = "", timeout = DEFAULT_TIMEOUT, concurrency = 8 } = {}) {
+    constructor({ gl = null, basePath = "", timeout = DEFAULT_TIMEOUT, concurrency = 8, audio = null } = {}) {
         this.gl = gl;
         this.basePath = basePath;
         this.timeout = timeout;
         this.concurrency = concurrency;
+        // A Mixer to decode into. Sharing one matters: a buffer belongs to the
+        // context that decoded it, and a master volume only reaches its own.
+        // Without one, sounds still load — into a context of our own.
+        this.audio = audio;
 
         this.entries = new Map();  // key -> { key, kind, url, options, status, value, error, ms }
         this._byUrl = new Map();   // url -> promise, so one file loads once
@@ -289,7 +293,12 @@ export default class Assets {
     async _loadSound(entry) {
         const AudioCtx = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
         if (!AudioCtx) throw new Error("este navegador no trae Web Audio");
-        if (!this._audioContext) this._audioContext = entry.options.context || new AudioCtx();
+        // Preference order: the context this entry names, the app's mixer, then
+        // one of our own. The middle one is the normal case and the reason a
+        // page ends up with a single context rather than one per subsystem.
+        if (!this._audioContext) {
+            this._audioContext = entry.options.context || this.audio?.context || new AudioCtx();
+        }
         const response = await fetch(entry.url);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const bytes = await response.arrayBuffer();
