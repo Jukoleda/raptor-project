@@ -686,10 +686,12 @@ App.boot({ title: "Batalla de tanques 3D", styles: STYLES }, (app) => {
     for (let i = 0; i < GARAGE.length; i++) keyboard.on(String(i + 1), () => setDesign(GARAGE[i]));
 
     // Turns a pointer position into a simulation point on the turret's plane.
+    // The same call the flat version makes — `camera.screenToWorld(clientX,
+    // clientY, canvas)` — only here the answer comes back on a plane and may be
+    // null, because in three dimensions you can point at the sky.
     function aimWorldPoint() {
         if (!aimPixel) return null;
-        const rect = canvas.getBoundingClientRect();
-        const ground = camera.groundPoint(aimPixel.x - rect.left, aimPixel.y - rect.top, canvas, TURRET_Y);
+        const ground = camera.screenToWorld(aimPixel.x, aimPixel.y, canvas, { height: TURRET_Y });
         return ground ? { x: ground.x, y: ground.z } : null;
     }
 

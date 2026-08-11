@@ -4,19 +4,86 @@ Todos los cambios notables de este proyecto se documentan en este archivo.
 
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/).
 
+## [0.8.0] - 2026-08-07
+
+La capa de audio pasa a ser una capa.
+
+### Añadido
+- **`components/audio/Mixer`**, y `app.audio` en todo `App`. `Assets` ya cargaba
+  un WAV y lo decodificaba; reproducirlo eran doce líneas de Web Audio que cada
+  juego escribía por su cuenta — y dos lo hacían, idénticas, en
+  `game/forestScene.js` y `assets/assetsDemo.js`. Ninguna de las dos copias sabía
+  bajar el volumen, silenciar, parar un sonido empezado ni dejar de crear voces
+  cuando ya había cien.
+
+  ```js
+  app.audio.play(buffer, { volume: 0.3, rate: 1.4, loop: false });
+  voz.stop(0.5);                // se desvanece
+  app.audio.setVolume(0.2);
+  app.audio.setMuted(true);
+  app.audio.stopAll();
+  ```
+
+  Construirlo no cuesta nada: no crea ningún `AudioContext` hasta que algo suena.
+
+### Cambiado
+- **Un solo contexto de audio por página.** Antes `Assets` creaba uno para
+  decodificar y `EngineSound` otro para sintetizar, así que una página podía
+  acabar con dos y un volumen maestro que no llegaba a ninguno. Los dos reciben
+  ahora el mixer: `new Assets({ audio })` decodifica en su contexto y
+  `new EngineSound({ mixer })` cuelga de su ganancia maestra. Ambos siguen
+  funcionando sin mixer, exactamente como antes.
+- `game/forestScene.js` y `assets/assetsDemo.js` pierden sus copias del mismo
+  fragmento; `vehicles/dynoDemo.js` pasa su motor por el mixer.
+
+### Corregido
+- **El tope de voces no topaba nada.** Se quitaba la voz más vieja del registro
+  en `onended`, que llega un turno después, así que cuarenta disparos en un
+  mismo frame pasaban de largo el límite mientras los `onended` seguían en cola.
+  Ahora se descuenta al pararla.
+- **Un volumen puesto antes del primer clic se perdía.** `resume()` es asíncrono
+  y `context.state` pasa a `"running"` antes de que el hilo de audio produzca;
+  una rampa de ganancia programada en esa ventana no llega nunca. El mixer marca
+  el momento real de arranque, hasta entonces aplica el volumen de golpe (no hay
+  nada audible, así que no hay chasquido que evitar) y lo vuelve a aplicar
+  cuando el `resume` aterriza.
+
 ## [0.7.0] - 2026-08-07
 
 `drive3d` deja de ser una versión recortada de la batalla y pasa a ser la
 batalla, vista desde detrás del casco.
 
 ### Añadido
-- **`Camera3D.rayFromScreen(px, py, canvas)`** y
-  **`Camera3D.groundPoint(px, py, canvas, alto)`** — la inversa de `project`.
-  `project` dice dónde cae un punto del mundo en pantalla; estas dicen qué hay
-  bajo un píxel. `groundPoint` corta el rayo contra un plano horizontal, que es
-  lo que necesita cualquier juego que se juegue sobre un suelo, y devuelve
-  `null` si el rayo apunta al cielo. Sin esto, apuntar con el ratón en 3D no
-  tenía forma de existir.
+- **`Camera3D.rayFromScreen(clientX, clientY, canvas)`** — la inversa de
+  `project`. `project` dice dónde cae un punto del mundo en pantalla; esta dice
+  qué hay bajo un píxel. Sin ella, apuntar con el ratón en 3D no tenía forma de
+  existir.
+
+### Cambiado (las dos cámaras hablan el mismo idioma)
+`Camera` y `Camera3D` tenían **una dirección cada una**: la 2D solo sabía ir de
+pantalla a mundo, la 3D solo de mundo a pantalla. Y las dos con convenciones de
+píxel distintas — la 2D restaba el `getBoundingClientRect` por dentro, la 3D
+esperaba píxeles ya relativos al canvas. Dos cámaras, dos idiomas para el mismo
+trabajo, y un desfase del margen entero que solo se nota apuntando.
+
+Ahora las dos tienen el mismo par, con los mismos argumentos:
+
+- **`camera.project(punto, canvas)`** — mundo → píxeles del canvas. Nueva en la
+  cámara 2D.
+- **`camera.screenToWorld(clientX, clientY, canvas)`** — píxeles de cliente →
+  mundo. Nueva en la 3D, donde corta el rayo contra un plano horizontal
+  (`{ height }`, por defecto el suelo). Reemplaza a `groundPoint`, que no llegó
+  a publicarse.
+
+La regla: **los píxeles que entran son de cliente** (lo que da un evento de
+puntero, así que quien llama nunca resta un rect) y **los que salen son del
+canvas** (lo que necesita un overlay en CSS). La conversión vive en un solo
+sitio nuevo, **`components/render/screen.js`**, porque hay dos cámaras y una
+sola respuesta correcta.
+
+Lo único que las separa lo impone la geometría: en 3D `screenToWorld` devuelve
+`null` si el píxel apunta al cielo, y `project` devuelve `null` para lo que
+queda detrás de la cámara. Las dos versiones 2D nunca devuelven `null`.
 
 ### Cambiado (`drive3d`)
 La demo se reescribió sobre el mismo paquete de juego que `controls/driveDemo.js`

@@ -1,5 +1,5 @@
-// Raptor 0.7.0 — GENERADO por tools/build.mjs, no editar a mano.
-// Fuente: raptor.js y sus dependencias (58 módulos).
+// Raptor 0.8.0 — GENERADO por tools/build.mjs, no editar a mano.
+// Fuente: raptor.js y sus dependencias (60 módulos).
 // Uso: <script src="raptor.global.js"></script> y luego window.Raptor.
 (function (root) {
 "use strict";
@@ -91,6 +91,57 @@ function modelViewFor({ x, y, depth, rotationDegrees, scaleX, scaleY }) {
     return modelView;
 }
 
+// ===== components/render/screen.js =====
+// Pixels — and which kind of pixel.
+//
+// Two coordinate spaces meet at the edge of the canvas, and mixing them up is an
+// afternoon of "why is my aim off by half a screen":
+//
+//   client pixels   what a pointer event hands you (`e.clientX` / `e.clientY`),
+//                   measured from the top-left of the *viewport*
+//   canvas pixels   measured from the top-left of the *canvas box*, which is
+//                   what a CSS-positioned overlay needs for `left` / `top`
+//
+// The framework's rule, and it is the same for both cameras:
+//
+//   pixels going IN  are client pixels — that is what the DOM gives you, so a
+//                    call site never has to subtract a bounding rect
+//   pixels coming OUT are canvas pixels — that is what you position a label with
+//
+// So `camera.project()` and `camera.screenToWorld()` are inverses in *world*
+// space, not in pixel space; `toClientPixels` below bridges the gap when you
+// genuinely need to round-trip.
+//
+// Both functions live here rather than in either camera because there are two
+// cameras and only one right answer.
+
+// The rect, not clientWidth: a pointer event is in viewport coordinates, and
+// getBoundingClientRect is the only measurement that agrees with it (it accounts
+// for CSS transforms, which clientWidth does not).
+function clientToNdc(clientX, clientY, canvas) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+        x: ((clientX - rect.left) / (rect.width || 1)) * 2 - 1,   // [-1, 1]
+        y: 1 - ((clientY - rect.top) / (rect.height || 1)) * 2,   // [-1, 1], y grows up
+    };
+}
+
+// clientWidth, not the rect: an overlay is positioned inside the canvas's own
+// CSS box, so that is the box its pixels are measured against.
+function ndcToCanvasPixels(ndcX, ndcY, canvas) {
+    return {
+        x: (ndcX * 0.5 + 0.5) * (canvas.clientWidth || 1),
+        y: (1 - (ndcY * 0.5 + 0.5)) * (canvas.clientHeight || 1),
+    };
+}
+
+// Canvas pixels back to client pixels, for feeding a projected point into
+// something that expects pointer coordinates.
+function toClientPixels(x, y, canvas) {
+    const rect = canvas.getBoundingClientRect();
+    return { x: x + rect.left, y: y + rect.top };
+}
+
 // ===== components/camera.js =====
 // A 2D camera: a movable window onto the world.
 //
@@ -102,6 +153,7 @@ function modelViewFor({ x, y, depth, rotationDegrees, scaleX, scaleY }) {
 //
 // `follow()` eases the center toward a target (the player) instead of snapping,
 // and optional `bounds` keep the center from revealing past the edges of a map.
+
 
 class Camera {
     constructor({ x = 0, y = 0, zoom = 1, smoothing = 8, bounds = null } = {}) {
@@ -141,12 +193,28 @@ class Camera {
     // Converts a pointer position (clientX/clientY, as given by mouse/touch
     // events) into world coordinates, accounting for the camera pan and zoom.
     // Use it to aim at, pick or place things where the user clicked/tapped.
+    //
+    // `Camera3D.screenToWorld` takes the same arguments and answers the same
+    // question, so a scene can swap one camera for the other without rewriting
+    // its input handling. The one difference geometry forces: in 3D a pixel can
+    // point at the sky and miss the ground, so that one may return null. This
+    // one never does — a flat world has no sky to point at.
     screenToWorld(clientX, clientY, canvas, opts) {
-        const rect = canvas.getBoundingClientRect();
         const { halfW, halfH } = this.viewExtents(canvas, opts);
-        const nx = ((clientX - rect.left) / rect.width) * 2 - 1;  // [-1, 1]
-        const ny = 1 - ((clientY - rect.top) / rect.height) * 2;   // y grows up
-        return { x: this.x + nx * halfW, y: this.y + ny * halfH };
+        const ndc = clientToNdc(clientX, clientY, canvas);
+        return { x: this.x + ndc.x * halfW, y: this.y + ndc.y * halfH };
+    }
+
+    // The other direction: a world point to canvas pixels, for hanging a DOM
+    // label over something. The counterpart of `Camera3D.project`, and named the
+    // same for the same reason `screenToWorld` is.
+    //
+    // Never null: everything in a flat world is in front of the camera. The 3D
+    // one returns null for points behind it, so code meant to work with either
+    // should still check.
+    project(point, canvas, opts) {
+        const { halfW, halfH } = this.viewExtents(canvas, opts);
+        return ndcToCanvasPixels((point.x - this.x) / halfW, (point.y - this.y) / halfH, canvas);
     }
 
     _clamp() {
@@ -1267,11 +1335,15 @@ function withTimeout(promise, ms) {
 const LOADERS = new Map();
 
 class Assets {
-    constructor({ gl = null, basePath = "", timeout = DEFAULT_TIMEOUT, concurrency = 8 } = {}) {
+    constructor({ gl = null, basePath = "", timeout = DEFAULT_TIMEOUT, concurrency = 8, audio = null } = {}) {
         this.gl = gl;
         this.basePath = basePath;
         this.timeout = timeout;
         this.concurrency = concurrency;
+        // A Mixer to decode into. Sharing one matters: a buffer belongs to the
+        // context that decoded it, and a master volume only reaches its own.
+        // Without one, sounds still load — into a context of our own.
+        this.audio = audio;
 
         this.entries = new Map();  // key -> { key, kind, url, options, status, value, error, ms }
         this._byUrl = new Map();   // url -> promise, so one file loads once
@@ -1491,7 +1563,12 @@ class Assets {
     async _loadSound(entry) {
         const AudioCtx = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
         if (!AudioCtx) throw new Error("este navegador no trae Web Audio");
-        if (!this._audioContext) this._audioContext = entry.options.context || new AudioCtx();
+        // Preference order: the context this entry names, the app's mixer, then
+        // one of our own. The middle one is the normal case and the reason a
+        // page ends up with a single context rather than one per subsystem.
+        if (!this._audioContext) {
+            this._audioContext = entry.options.context || this.audio?.context || new AudioCtx();
+        }
         const response = await fetch(entry.url);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const bytes = await response.arrayBuffer();
@@ -1530,6 +1607,272 @@ Assets.register(ASSET_KIND.JSON, (entry, assets) => assets._loadFetch(entry.url,
 Assets.register(ASSET_KIND.TEXT, (entry, assets) => assets._loadFetch(entry.url, "text"));
 Assets.register(ASSET_KIND.SOUND, (entry, assets) => assets._loadSound(entry));
 Assets.register(ASSET_KIND.FONT, (entry, assets) => assets._loadFont(entry));
+
+// ===== components/audio/mixer.js =====
+// The thing that actually plays a sound.
+//
+// `Assets` already loads a WAV and decodes it into an AudioBuffer. Turning that
+// buffer into something you can hear was, until this file existed, twelve lines
+// of Web Audio that every game had to write for itself — and two of them did,
+// identically, in `game/forestScene.js` and `assets/assetsDemo.js`:
+//
+//     const context = assets.audioContext;
+//     if (context.state === "suspended") context.resume();
+//     const source = context.createBufferSource();
+//     source.buffer = assets.sound(key);
+//     const gain = context.createGain();
+//     gain.gain.value = 0.45;
+//     source.connect(gain).connect(context.destination);
+//     source.start();
+//
+// Neither copy could turn the volume down, mute, stop a sound once started, or
+// stop making new ones when a hundred were already going. That is the whole
+// reason this is a layer and not a snippet:
+//
+//     app.audio.play(app.assets.sound("moneda"));
+//     app.audio.play(buffer, { volume: 0.3, rate: 1.4 });
+//     const loop = app.audio.play(ambience, { loop: true });
+//     loop.stop(0.5);          // se desvanece en medio segundo
+//     app.audio.setVolume(0.2);
+//     app.audio.setMuted(true);
+//
+// It also owns *the* audio context. Before this, `Assets` made one to decode
+// into and `EngineSound` made another to synthesise into, so a page could end up
+// with two — and a master volume that reached neither. Both now take a mixer.
+//
+// Two rules the browser imposes, and this file absorbs so callers do not have to:
+//
+//   - An AudioContext created before a user gesture starts suspended and Chrome
+//     complains, so the context here is created on first use, not in the
+//     constructor. Building a Mixer costs nothing.
+//   - Playing needs a gesture; decoding does not. `play()` resumes the context
+//     itself, so the first click that plays something also unblocks it.
+//
+// Without Web Audio every method is a no-op and `play` returns null, which means
+// a caller never has to guard — the same contract `EngineSound` already had.
+
+const RAMP = 0.02;       // seconds — smoothing a gain change so it does not click
+
+function audioContextClass() {
+    return typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
+}
+
+class Mixer {
+    constructor({ volume = 1, maxVoices = 24, context = null } = {}) {
+        this._volume = volume;
+        this._muted = false;
+        this.maxVoices = maxVoices;
+
+        this._context = context;
+        this._master = null;
+        // True once `context.resume()` has actually *landed*. Not the same as
+        // `context.state === "running"`: the state flips before the audio thread
+        // is producing, and automation scheduled inside that window is simply
+        // lost. Anything that has to survive that gap is set outright instead.
+        this._started = false;
+        // Insertion order is age order, which is what the voice cap needs.
+        this._voices = new Set();
+    }
+
+    get available() {
+        return !!audioContextClass() || !!this._context;
+    }
+
+    // Created on first use. Reading this property is what starts the audio
+    // hardware, so nothing does it during page construction.
+    get context() {
+        if (!this._context) {
+            const AudioCtx = audioContextClass();
+            if (!AudioCtx) return null;
+            try {
+                this._context = new AudioCtx();
+            } catch {
+                return null;   // some browsers refuse outright (autoplay policy)
+            }
+        }
+        return this._context;
+    }
+
+    // The node everything goes through: connect a synthesiser here and it obeys
+    // the master volume and the mute like any played buffer. `EngineSound` does.
+    get input() {
+        const context = this.context;
+        if (!context) return null;
+        if (!this._master) {
+            this._master = context.createGain();
+            this._master.gain.value = this._muted ? 0 : this._volume;
+            this._master.connect(context.destination);
+        }
+        return this._master;
+    }
+
+    get volume() { return this._volume; }
+    set volume(value) { this.setVolume(value); }
+
+    setVolume(value) {
+        this._volume = Math.max(0, Math.min(1, value));
+        this._applyGain();
+        return this;
+    }
+
+    get muted() { return this._muted; }
+
+    setMuted(muted = true) {
+        this._muted = !!muted;
+        this._applyGain();
+        return this;
+    }
+
+    toggleMuted() {
+        return this.setMuted(!this._muted);
+    }
+
+    // Ramped rather than set: a gain that jumps discontinuously is an audible
+    // click, and muting is exactly the case where you would hear it.
+    //
+    // Only once the context is genuinely running, though. Before that a ramp is
+    // both pointless and unreliable: pointless because nothing is audible yet,
+    // so there is no click to avoid, and unreliable because automation
+    // scheduled while the audio thread is still starting never arrives — the
+    // volume then silently stays where it was, which is exactly what a game
+    // setting its volume at startup would hit. `resume()` re-applies this when
+    // it lands, so a volume chosen before the first click still takes effect.
+    _applyGain() {
+        if (!this._master) return;
+        const target = this._muted ? 0 : this._volume;
+        const context = this._context;
+        const param = this._master.gain;
+        param.cancelScheduledValues(context.currentTime);
+        if (this._started && context.state === "running") {
+            // Anchored at where the gain actually is: after a cancel the ramp's
+            // start value is otherwise whatever the last scheduled event said,
+            // which is not necessarily what you can hear.
+            param.setValueAtTime(param.value, context.currentTime);
+            param.linearRampToValueAtTime(target, context.currentTime + RAMP);
+        } else {
+            param.value = target;
+        }
+    }
+
+    // Playing needs a user gesture. `play` calls this itself, so you only need
+    // it directly to unblock the context ahead of time (on the menu button, say,
+    // so the first real sound is not late).
+    //
+    // Returns a promise for when the context is actually producing — which is
+    // later than `state` flipping to "running", and the difference is a real
+    // race, not a nicety. Awaiting it is optional; `play` does not.
+    resume() {
+        const context = this.context;
+        if (!context) return Promise.resolve(false);
+        if (this._started) return Promise.resolve(true);
+        if (context.state !== "suspended") {
+            this._started = true;
+            this._applyGain();
+            return Promise.resolve(true);
+        }
+        return Promise.resolve(context.resume()).then(
+            () => {
+                this._started = true;
+                // Whatever volume was chosen while the context was asleep was
+                // set outright rather than ramped; re-apply it now that
+                // automation works, so the two paths cannot disagree.
+                this._applyGain();
+                return true;
+            },
+            () => false,
+        );
+    }
+
+    // Fires a buffer and returns a handle, or null when there is nothing to play
+    // (no Web Audio, no buffer). The handle is only needed to stop something
+    // early; a one-shot can be ignored entirely.
+    play(buffer, { volume = 1, rate = 1, loop = false, delay = 0 } = {}) {
+        if (!buffer) return null;
+        const context = this.context;
+        if (!context) return null;
+        this.resume();
+
+        // A rapid-fire gun can ask for a new voice every frame. Without a cap
+        // they pile up until the mix is mud and the tab is busy; the oldest is
+        // the one you are least likely to still be listening to.
+        if (this._voices.size >= this.maxVoices) {
+            const oldest = this._voices.values().next().value;
+            if (oldest) oldest.stop();
+        }
+
+        const source = context.createBufferSource();
+        source.buffer = buffer;
+        source.loop = loop;
+        source.playbackRate.value = rate;
+
+        const gain = context.createGain();
+        gain.gain.value = Math.max(0, volume);
+        source.connect(gain).connect(this.input);
+
+        const voice = {
+            source,
+            gain,
+            get playing() { return this._playing; },
+            _playing: true,
+            // A fade is what keeps stopping a looping sound from clicking.
+            stop: (fade = 0) => {
+                if (!voice._playing) return voice;
+                voice._playing = false;
+                // Dropped from the roster here and not only in `onended`, which
+                // fires a turn later: a loop that fires forty shots in one frame
+                // would blow straight past the cap while every `onended` was
+                // still queued. A voice fading out is on its way regardless, so
+                // it stops counting against the cap the moment it is told to go.
+                this._voices.delete(voice);
+                const now = context.currentTime;
+                if (fade > 0) {
+                    gain.gain.cancelScheduledValues(now);
+                    gain.gain.setValueAtTime(gain.gain.value, now);
+                    gain.gain.linearRampToValueAtTime(0, now + fade);
+                    try { source.stop(now + fade); } catch { /* already stopped */ }
+                } else {
+                    try { source.stop(); } catch { /* already stopped */ }
+                }
+                return voice;
+            },
+        };
+
+        source.onended = () => {
+            voice._playing = false;
+            this._voices.delete(voice);
+            try { gain.disconnect(); } catch { /* already gone */ }
+        };
+
+        this._voices.add(voice);
+        source.start(delay > 0 ? context.currentTime + delay : 0);
+        return voice;
+    }
+
+    get playing() {
+        return this._voices.size;
+    }
+
+    // Silence everything at once — what a scene wants when it unmounts.
+    stopAll(fade = 0) {
+        for (const voice of [...this._voices]) voice.stop(fade);
+        return this;
+    }
+
+    // Releases the hardware. Mostly for tests and for a page that tears an app
+    // down; a normal game never needs it.
+    dispose() {
+        this.stopAll();
+        this._voices.clear();
+        this._master = null;
+        this._started = false;
+        const context = this._context;
+        this._context = null;
+        if (context && typeof context.close === "function" && context.state !== "closed") {
+            try { context.close(); } catch { /* already closing */ }
+        }
+        return this;
+    }
+}
 
 // ===== components/math/angles.js =====
 // Degrees in, radians out.
@@ -1571,6 +1914,7 @@ const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 //
 // Orbiting is what an editor or a model viewer wants; `follow` on top of it is
 // what a third-person game wants.
+
 
 
 class Camera3D {
@@ -1676,14 +2020,11 @@ class Camera3D {
     // the camera. `project` answers "where on screen is this thing"; this one
     // answers "what did I just click on", which is the question a mouse asks.
     //
-    // Pixels are relative to the canvas box (subtract getBoundingClientRect()
-    // from a pointer event), matching what `project` returns.
-    rayFromScreen(px, py, canvas) {
+    // Takes client pixels, straight from a pointer event — see
+    // components/render/screen.js for why that is the framework's rule.
+    rayFromScreen(clientX, clientY, canvas) {
         const { mat4, vec4 } = glMatrix;
-        const width = canvas.clientWidth || 1;
-        const height = canvas.clientHeight || 1;
-        const ndcX = (px / width) * 2 - 1;
-        const ndcY = 1 - (py / height) * 2;
+        const { x: ndcX, y: ndcY } = clientToNdc(clientX, clientY, canvas);
 
         const inverse = mat4.invert(
             mat4.create(),
@@ -1708,12 +2049,17 @@ class Camera3D {
         return { origin: near, direction: { x: dx / length, y: dy / length, z: dz / length } };
     }
 
-    // Where that ray meets a horizontal plane — the ground, in other words. This
-    // is how a pointer becomes a world position in a game played on a floor.
-    // Null when the ray runs parallel to the plane or only meets it behind the
-    // camera (pointing at the sky).
-    groundPoint(px, py, canvas, height = 0) {
-        const ray = this.rayFromScreen(px, py, canvas);
+    // Where that ray meets a horizontal plane — the ground, in other words. A
+    // game played on a floor wants the floor point under the cursor, and that is
+    // the same question `Camera.screenToWorld` answers in two dimensions, so it
+    // carries the same name and the same arguments. A scene can hand either
+    // camera a pointer event and get back "where in the world is this".
+    //
+    // Null when the ray runs parallel to the plane, or only meets it behind the
+    // camera — which is what pointing at the sky looks like. The 2D camera never
+    // returns null, so code written for both should check.
+    screenToWorld(clientX, clientY, canvas, { height = 0 } = {}) {
+        const ray = this.rayFromScreen(clientX, clientY, canvas);
         if (!ray || Math.abs(ray.direction.y) < 1e-6) return null;
         const t = (height - ray.origin.y) / ray.direction.y;
         if (t < 0) return null;
@@ -1732,13 +2078,10 @@ class Camera3D {
         const viewProjection = mat4.multiply(mat4.create(), this.projectionMatrix(canvas), this.viewMatrix());
         vec4.transformMat4(clip, clip, viewProjection);
         if (clip[3] <= 0) return null;
-        const ndcX = clip[0] / clip[3];
-        const ndcY = clip[1] / clip[3];
-        return {
-            x: (ndcX * 0.5 + 0.5) * canvas.clientWidth,
-            y: (1 - (ndcY * 0.5 + 0.5)) * canvas.clientHeight,
-            depth: clip[3],
-        };
+        const pixels = ndcToCanvasPixels(clip[0] / clip[3], clip[1] / clip[3], canvas);
+        // `depth` is the w of the clip-space point: distance along the view
+        // direction, handy for sorting labels or fading distant ones.
+        return { ...pixels, depth: clip[3] };
     }
 }
 
@@ -1760,10 +2103,12 @@ class Camera3D {
 // scene never writes that plumbing again.
 //
 // What it owns: the canvas and its size, the render loop, the camera, the
-// entity list, the keyboard, the on-screen pad, the panel, fullscreen. What it
+// entity list, the keyboard, the on-screen pad, the panel, the audio mixer,
+// fullscreen. What it
 // does not own: your game. Everything is exposed (`app.engine`, `app.gl`,
 // `app.stage`) so you can drop to the layer below whenever the shell is in the
 // way.
+
 
 
 
@@ -1785,6 +2130,7 @@ class App {
         touch = true,          // create a TouchPad over the canvas
         autoResize = false,    // track the CSS box and resize the buffer to it
         assetPath = "",        // prefix for every relative asset URL
+        audioVolume = 1,       // master volume for app.audio, in 0..1
     } = {}) {
         injectStyles(
             (baseStyles ? BASE_STYLES + PAD_STYLES + FULLSCREEN_STYLES + LOADING_STYLES + SCENE_STYLES : "") + styles,
@@ -1800,9 +2146,14 @@ class App {
         this.engine.createWindow(this.stage, { width, height });
         this.keyboard = keyboard ? new Keyboard().attach(window) : null;
         this.touch = touch ? new TouchPad(this.stage, { keyboard: this.keyboard }) : null;
+        // Building a Mixer costs nothing — it creates no AudioContext until
+        // something actually plays — so every app gets one and a scene never
+        // writes Web Audio plumbing. Assets decodes into its context, so the
+        // page has one context and one master volume, not one per subsystem.
+        this.audio = new Mixer({ volume: audioVolume });
         // The registry exists from the start, so a scene can `put()` something
         // it generated even if it never loads a file.
-        this.assets = new Assets({ gl: this.gl, basePath: assetPath });
+        this.assets = new Assets({ gl: this.gl, basePath: assetPath, audio: this.audio });
         this.plugins = [];
 
         this._offFullscreen = onFullscreenChange((on) => this._emit("fullscreenchange", on));
@@ -2027,6 +2378,7 @@ class App {
         this._scenes?.destroy();
         this.keyboard?.detach();
         this.assets?.dispose();
+        this.audio?.dispose();
         this._resizeObserver?.disconnect();
         this._offFullscreen?.();
         this.root.remove();
@@ -4118,11 +4470,16 @@ const PARTIALS = [
 const SMOOTH = 0.05; // seconds — how fast parameters chase their target
 
 class EngineSound {
-    constructor({ cylinders = 4, strokes = 4, volume = 0.5 } = {}) {
+    constructor({ cylinders = 4, strokes = 4, volume = 0.5, mixer = null } = {}) {
         this.cylinders = cylinders;
         this.strokes = strokes;
         this.volume = volume;
         this.muted = false;
+        // Given a Mixer, the engine shares its context and hangs off its master
+        // gain, so one volume control reaches the engine and the sound effects
+        // alike. Without one it still works — it just makes a context of its own,
+        // which is how this class behaved before mixers existed.
+        this.mixer = mixer;
         this.ctx = null;
         this.nodes = null;
     }
@@ -4138,14 +4495,20 @@ class EngineSound {
 
     // Must be called from a user gesture. Safe to call again: it just resumes.
     start() {
-        const AudioCtx = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
-        if (!AudioCtx) return false;
         if (!this.ctx) {
-            try { this.ctx = new AudioCtx(); } catch { return false; }
+            const context = this.mixer ? this.mixer.context : this._ownContext();
+            if (!context) return false;
+            this.ctx = context;
             this._build();
         }
         if (this.ctx.state === "suspended") this.ctx.resume();
         return true;
+    }
+
+    _ownContext() {
+        const AudioCtx = typeof window !== "undefined" && (window.AudioContext || window.webkitAudioContext);
+        if (!AudioCtx) return null;
+        try { return new AudioCtx(); } catch { return null; }
     }
 
     _build() {
@@ -4153,7 +4516,9 @@ class EngineSound {
 
         const master = ctx.createGain();
         master.gain.value = 0;
-        master.connect(ctx.destination);
+        // Through the mixer when there is one, so the master volume and the mute
+        // apply here too; straight out when there is not.
+        master.connect(this.mixer ? this.mixer.input : ctx.destination);
 
         // One lowpass for the lot: opening it with load is most of the "effort".
         const filter = ctx.createBiquadFilter();
@@ -6039,7 +6404,7 @@ class Engine {
 // generated single-file pages (engine.html, dyno.html, …) come from
 // `node tools/build.mjs`, which also emits dist/raptor.js for consumers.
 
-const VERSION = "0.7.0";
+const VERSION = "0.8.0";
 
 root.Raptor = {
     AIM_CYCLE: AIM_CYCLE,
@@ -6078,6 +6443,7 @@ root.Raptor = {
     LOADING_STYLES: LOADING_STYLES,
     LoadingScreen: LoadingScreen,
     Mesh: Mesh,
+    Mixer: Mixer,
     NEAR_PLANE: NEAR_PLANE,
     PAD_STYLES: PAD_STYLES,
     PROGRAM_COLOR: PROGRAM_COLOR,
@@ -6115,6 +6481,7 @@ root.Raptor = {
     button: button,
     card: card,
     clamp: clamp,
+    clientToNdc: clientToNdc,
     collide: collide,
     coneGeometry: coneGeometry,
     createRandom: createRandom,
@@ -6129,6 +6496,7 @@ root.Raptor = {
     injectStyles: injectStyles,
     isFullscreen: isFullscreen,
     kv: kv,
+    ndcToCanvasPixels: ndcToCanvasPixels,
     normalizeKey: normalizeKey,
     onFullscreenChange: onFullscreenChange,
     planeGeometry: planeGeometry,
@@ -6143,6 +6511,7 @@ root.Raptor = {
     select: select,
     slider: slider,
     sphereGeometry: sphereGeometry,
+    toClientPixels: toClientPixels,
     toDegrees: toDegrees,
     toRadians: toRadians,
     toggleFullscreen: toggleFullscreen,

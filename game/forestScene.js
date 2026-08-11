@@ -321,20 +321,12 @@ export default class ForestScene extends Scene {
         this.progressFill.style.width = `${(this.collected / this.target) * 100}%`;
     }
 
-    // Fire-and-forget playback of a loaded buffer. Web Audio needs a gesture to
-    // *start*, which the menu button already provided, so by the time anything
-    // here plays the context is running.
+    // Fire-and-forget playback of a loaded buffer. The mixer resumes the context
+    // itself and returns null when there is nothing to play, so an asset that
+    // failed to load quietly makes no sound instead of throwing.
     play(key) {
-        const context = this.assets.audioContext;
-        if (!context || this.assets.status(key) !== "ready") return false;
-        if (context.state === "suspended") context.resume();
-        const source = context.createBufferSource();
-        source.buffer = this.assets.sound(key);
-        const gain = context.createGain();
-        gain.gain.value = 0.45;
-        source.connect(gain).connect(context.destination);
-        source.start();
-        return true;
+        if (this.assets.status(key) !== "ready") return false;
+        return !!this.app.audio.play(this.assets.sound(key), { volume: 0.45 });
     }
 
     exit() {

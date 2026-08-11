@@ -226,6 +226,131 @@ suite("audio", async () => {
     await page.evaluate(() => window.raptorDyno.toggleSound());
     await page.waitForTimeout(300);
     ok("silenciar lo calla", (await pitch()).gain < revving.gain * 0.05);
+
+    // The engine no longer makes a context of its own: it shares the app's, so
+    // one master volume reaches it and every sound effect alike.
+    ok("el motor suena a través del mixer de la app",
+        await page.evaluate(() => {
+            const api = window.raptorDyno;
+            return api.sound.mixer === api.app.audio && api.sound.ctx === api.app.audio.context;
+        }));
+
+    // And the master volume really moves. This is the page to assert it on: the
+    // pointer gesture above started the context for real, which is the only
+    // state in which Chrome applies AudioParam automation.
+    const master = await page.evaluate(async () => {
+        const audio = window.raptorDyno.app.audio;
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        const before = audio.input.gain.value;
+        audio.setVolume(0.3);
+        await wait(200);
+        const quieter = audio.input.gain.value;
+        audio.setMuted(true);
+        await wait(200);
+        const silent = audio.input.gain.value;
+        audio.setMuted(false);
+        audio.setVolume(1);
+        await wait(200);
+        return { before, quieter, silent, restored: audio.input.gain.value };
+    });
+    ok("bajar el volumen maestro mueve la ganancia de verdad",
+        Math.abs(master.before - 1) < 0.01 && Math.abs(master.quieter - 0.3) < 0.02,
+        JSON.stringify(master));
+    ok("silenciar el mixer lo lleva a cero, y se recupera",
+        master.silent < 0.01 && Math.abs(master.restored - 1) < 0.01, JSON.stringify(master));
+    await page.close();
+});
+
+// --- El mixer: la pieza que faltaba en la capa de audio -------------------
+//
+// `Assets` ya cargaba un WAV y lo decodificaba. Reproducirlo eran doce líneas de
+// Web Audio que cada juego escribía por su cuenta — y dos lo hacían, idénticas,
+// en game/forestScene.js y assets/assetsDemo.js. Ninguna de las dos copias podía
+// bajar el volumen, silenciar, parar un sonido ya empezado ni dejar de crear
+// voces nuevas cuando ya había cien.
+suite("mixer", async () => {
+    const { page } = await open("assets.html", null, { expect: EXPECTED_404 });
+    await page.waitForFunction(() => !!window.raptorAssets, { timeout: 15000 });
+
+    // Building a Mixer must cost nothing: an AudioContext created before a user
+    // gesture starts suspended and the browser complains about it.
+    ok("un mixer recién construido no ha creado ningún contexto",
+        await page.evaluate(() => {
+            const Mixer = window.raptorAssets.Mixer;
+            const mixer = new Mixer();
+            const cold = mixer._context === null;
+            mixer.dispose();
+            return cold;
+        }));
+
+    const played = await page.evaluate(async () => {
+        const app = window.raptorAssets.app;
+        const buffer = app.assets.sound("moneda");
+        const before = app.audio.playing;
+        const voice = app.audio.play(buffer, { volume: 0.2 });
+        const during = app.audio.playing;
+        voice.stop();
+        await new Promise((r) => setTimeout(r, 80));   // onended has to land
+        return {
+            gotVoice: !!voice, before, during, after: app.audio.playing,
+            // One context for the page: the mixer's is the one Assets decoded into.
+            shared: app.assets.audioContext === app.audio.context,
+            duration: buffer.duration,
+        };
+    });
+    ok("reproducir un buffer devuelve una voz y la cuenta",
+        played.gotVoice && played.before === 0 && played.during === 1, JSON.stringify(played));
+    ok("pararla la quita de la cuenta", played.after === 0, JSON.stringify(played));
+    ok("Assets decodifica en el contexto del mixer, no en uno propio",
+        played.shared, JSON.stringify(played));
+
+    // The public state, which is what a settings screen reads back.
+    const state = await page.evaluate(() => {
+        const audio = window.raptorAssets.app.audio;
+        audio.setVolume(0.4);
+        const afterVolume = audio.volume;
+        audio.setVolume(5);                       // fuera de rango
+        const clamped = audio.volume;
+        audio.setMuted(true);
+        const muted = audio.muted;
+        audio.toggleMuted();
+        const toggled = audio.muted;
+        audio.setVolume(1);
+        return { afterVolume, clamped, muted, toggled };
+    });
+    ok("el volumen y el silencio se leen de vuelta",
+        state.afterVolume === 0.4 && state.clamped === 1 && state.muted === true && state.toggled === false,
+        JSON.stringify(state));
+    // El nodo maestro se comprueba en la suite `audio`, sobre dyno.html: allí el
+    // contexto lo arranca un gesto de puntero real, y solo entonces Chrome
+    // aplica la automatización de un AudioParam. Reanudado por código y sin
+    // gesto —como aquí— el contexto dice "running" pero no produce, así que una
+    // rampa no llega a ningún sitio. Tampoco se oiría nada, así que da igual
+    // para el juego; lo que no vale es afirmarlo desde esta página.
+
+    // A gun firing every frame must not pile up voices forever.
+    const capped = await page.evaluate(async () => {
+        const app = window.raptorAssets.app;
+        const buffer = app.assets.sound("moneda");
+        app.audio.maxVoices = 5;
+        for (let i = 0; i < 40; i++) app.audio.play(buffer, { volume: 0.001 });
+        const peak = app.audio.playing;
+        app.audio.stopAll();
+        await new Promise((r) => setTimeout(r, 100));
+        app.audio.maxVoices = 24;
+        return { peak, afterStopAll: app.audio.playing };
+    });
+    ok("el número de voces tiene tope", capped.peak <= 5, JSON.stringify(capped));
+    ok("stopAll las calla todas", capped.afterStopAll === 0, JSON.stringify(capped));
+
+    // Nothing to play is not an error: a game whose sound failed to load should
+    // fall silent, not throw three frames later.
+    ok("sin buffer devuelve null en vez de reventar",
+        await page.evaluate(() => window.raptorAssets.app.audio.play(null) === null));
+
+    // And the demo's own button now goes through it.
+    ok("el botón de la demo suena por el mixer",
+        await page.evaluate(() => window.raptorAssets.playCoin() === true));
     await page.close();
 });
 
@@ -988,6 +1113,108 @@ suite("camara3d", async () => {
     await page.evaluate(() => window.raptorShapes3D.setLit(true));
     ok("y volver a encenderla lo devuelve",
         (await page.evaluate(() => window.raptorShapes3D.meshes[0].program)) === "lit3d");
+    await page.close();
+});
+
+// --- Las dos cámaras hablan el mismo idioma -------------------------------
+//
+// `Camera` y `Camera3D` responden las dos mismas preguntas —«dónde cae esto en
+// pantalla» y «qué hay bajo este píxel»— con los mismos nombres y los mismos
+// argumentos. Los píxeles que entran son de cliente (lo que da un evento de
+// puntero) y los que salen son del canvas (lo que necesita un overlay en CSS).
+// Esto no es una preferencia de estilo: el canvas está desplazado dentro de la
+// página, así que una implementación que no reste el rect se equivoca por el
+// margen entero, y es un fallo que solo se nota apuntando.
+suite("camaras", async () => {
+    for (const [file, handle, kind] of [["drive.html", "raptorDrive", "2D"], ["drive3d.html", "raptorDrive3D", "3D"]]) {
+        const { page } = await open(file);
+        await page.waitForFunction((h) => !!window[h], handle, { timeout: 15000 });
+
+        const shape = await page.evaluate((h) => {
+            const camera = window[h].camera;
+            return ["project", "screenToWorld"].every((m) => typeof camera[m] === "function");
+        }, handle);
+        ok(`${kind}: la cámara tiene project y screenToWorld`, shape);
+
+        const trip = await page.evaluate((h) => {
+            const api = window[h];
+            const app = api.app || api.game;
+            const canvas = app.canvas;
+            const camera = api.camera;
+            const rect = canvas.getBoundingClientRect();
+            const flat = typeof camera.zoom === "number";     // the 2D one
+
+            // A world point a little off centre, projected and then read back
+            // from the pixel it landed on. Everything in one synchronous block,
+            // so no frame moves the camera in between.
+            const point = flat
+                ? { x: camera.x + 1.2, y: camera.y - 0.7 }
+                : { x: camera.target.x + 1.5, y: 0, z: camera.target.z + 0.8 };
+            const pixels = camera.project(point, canvas);
+            // project() gives canvas pixels; screenToWorld() wants client ones.
+            const back = camera.screenToWorld(pixels.x + rect.left, pixels.y + rect.top, canvas);
+
+            // And the centre of the canvas, in client pixels, must land where
+            // the camera is aimed.
+            const centre = camera.screenToWorld(
+                rect.left + rect.width / 2, rect.top + rect.height / 2, canvas);
+
+            // In 3D the centre pixel does not land *on* the target: a chase
+            // camera looks a little above the ground, so the middle ray carries
+            // on past it and meets the floor further away. What must hold is
+            // that it lands along the direction the camera is looking.
+            let alignment = null;
+            if (!flat && centre) {
+                const f = camera.forward;
+                const fl = Math.hypot(f.x, f.z) || 1;
+                const dx = centre.x - camera.position.x;
+                const dz = centre.z - camera.position.z;
+                const dl = Math.hypot(dx, dz) || 1;
+                alignment = (f.x / fl) * (dx / dl) + (f.z / fl) * (dz / dl);   // 1 = dead ahead
+            }
+
+            return {
+                flat, point, pixels, back, centre, alignment,
+                offset: { left: rect.left, top: rect.top },
+                aim: flat ? { x: camera.x, y: camera.y } : { x: camera.target.x, z: camera.target.z },
+            };
+        }, handle);
+
+        // If the canvas sat at the viewport origin this would prove nothing.
+        ok(`${kind}: el canvas está desplazado, así que el rect importa`,
+            trip.offset.left > 0 && trip.offset.top > 0, JSON.stringify(trip.offset));
+
+        const near = (a, b, tol) => Math.abs(a - b) < tol;
+        ok(`${kind}: proyectar y volver devuelve el mismo punto`,
+            trip.flat
+                ? near(trip.back.x, trip.point.x, 0.01) && near(trip.back.y, trip.point.y, 0.01)
+                : near(trip.back.x, trip.point.x, 0.05) && near(trip.back.z, trip.point.z, 0.05),
+            JSON.stringify(trip));
+
+        ok(`${kind}: el centro del canvas es a dónde mira la cámara`,
+            trip.flat
+                ? near(trip.centre.x, trip.aim.x, 0.01) && near(trip.centre.y, trip.aim.y, 0.01)
+                : trip.centre !== null && near(trip.alignment, 1, 1e-6),
+            JSON.stringify(trip));
+
+        await page.close();
+    }
+
+    // The one difference geometry forces: in three dimensions a pixel can point
+    // at the sky and meet no ground at all. The flat camera has no sky.
+    const { page } = await open("drive3d.html");
+    await page.waitForFunction(() => !!window.raptorDrive3D, { timeout: 15000 });
+    const sky = await page.evaluate(() => {
+        const api = window.raptorDrive3D;
+        const canvas = api.app.canvas;
+        const rect = canvas.getBoundingClientRect();
+        return {
+            up: api.camera.screenToWorld(rect.left + rect.width / 2, rect.top + 2, canvas),
+            down: api.camera.screenToWorld(rect.left + rect.width / 2, rect.bottom - 2, canvas),
+        };
+    });
+    ok("3D: apuntar al cielo no devuelve punto, apuntar al suelo sí",
+        sky.up === null && sky.down !== null, JSON.stringify(sky));
     await page.close();
 });
 

@@ -150,7 +150,9 @@ App.boot({ title: "Banco de pruebas · motor y caja", styles: STYLES }, (app) =>
     });
 
     // Four cylinders, four strokes: the note is rpm/30, fed from the gearbox.
-    const sound = new EngineSound({ cylinders: 4, strokes: 4, volume: 0.5 });
+    // Through the app's mixer, so the engine and any sound effect share one
+    // context and one master volume.
+    const sound = new EngineSound({ cylinders: 4, strokes: 4, volume: 0.5, mixer: app.audio });
 
     let speed = 0;        // m/s
     let distance = 0;     // m from the start line

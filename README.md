@@ -212,6 +212,7 @@ components/
     tankAI.js              # TankAI: máquina de estados enemiga (patrulla/persigue/ataca/huye)
     index.js               # Re-exporta los controladores
   audio/
+    mixer.js               # Mixer: reproduce buffers, volumen maestro, silencio, tope de voces
     engineSound.js         # EngineSound: nota del motor sintetizada con Web Audio
     index.js               # Re-exporta el audio
   vehicles/
@@ -634,6 +635,49 @@ estado, así que ninguno pisa al otro.
 
 Con la configuración de fábrica: **0-100 en 4,87 s** y **400 m en 13,35 s** a
 169 km/h de paso.
+
+### La capa de audio
+
+`Assets` carga un WAV y lo decodifica en un `AudioBuffer`. Convertir ese buffer
+en algo que se oiga eran doce líneas de Web Audio que cada juego escribía por su
+cuenta — y dos lo hacían, idénticas, en `game/forestScene.js` y en
+`assets/assetsDemo.js`. Ninguna de las dos copias sabía bajar el volumen,
+silenciar, parar un sonido ya empezado, ni dejar de crear voces cuando ya había
+cien. Eso es lo que hace `Mixer` una capa y no un fragmento:
+
+```js
+app.audio.play(app.assets.sound("moneda"));
+app.audio.play(buffer, { volume: 0.3, rate: 1.4 });
+
+const ambiente = app.audio.play(bosque, { loop: true });
+ambiente.stop(0.5);           // se desvanece en medio segundo
+
+app.audio.setVolume(0.2);
+app.audio.setMuted(true);
+app.audio.stopAll();          // lo que quiere una escena al desmontarse
+```
+
+Todo `App` trae uno en `app.audio`. Construirlo no cuesta nada —no crea ningún
+`AudioContext` hasta que algo suena de verdad— y es también **el dueño del
+contexto**: antes `Assets` creaba uno para decodificar y `EngineSound` otro para
+sintetizar, así que una página podía acabar con dos y un volumen maestro que no
+llegaba a ninguno. Ahora los dos reciben el mixer.
+
+Tres cosas que impone el navegador y que la capa absorbe para que quien la use
+no tenga que pensarlas:
+
+- Un `AudioContext` creado antes de un gesto del usuario nace suspendido y
+  Chrome se queja, así que el contexto se crea **en el primer uso**.
+- Sonar necesita un gesto; decodificar no. `play()` reanuda el contexto solo.
+- `resume()` es **asíncrono**, y `context.state` pasa a `"running"` antes de que
+  el hilo de audio esté produciendo. Una rampa de ganancia programada en esa
+  ventana no llega nunca. El mixer marca el momento real en que arrancó y, hasta
+  entonces, aplica el volumen de golpe en vez de con rampa: no hay nada audible
+  todavía, así que no hay chasquido que evitar. Cuando el `resume` aterriza,
+  vuelve a aplicarlo — así un volumen elegido antes del primer clic no se pierde.
+
+Sin Web Audio todo son no-ops y `play` devuelve `null`, de modo que quien llama
+nunca tiene que protegerse.
 
 ### Sonido del motor
 
@@ -1272,15 +1316,37 @@ voltea la normal hacia quien mira para que la cara de atrás no salga negra.
 camera.orbit({ yaw, pitch, distance });   // gira alrededor del objetivo
 camera.lookFrom(posicion, objetivo);      // colocada a mano
 camera.follow(punto, dt);                 // persecución
-camera.project(punto, canvas);            // mundo → píxeles, para colgar HUD
-camera.rayFromScreen(px, py, canvas);     // píxeles → rayo, la inversa de project
-camera.groundPoint(px, py, canvas, alto); // dónde corta ese rayo un plano horizontal
+camera.rayFromScreen(clientX, clientY, canvas);   // píxel → rayo (solo 3D)
 ```
 
-`project` responde «dónde está esto en pantalla»; `rayFromScreen` responde «qué
-acabo de señalar», que es la pregunta que hace un ratón. `groundPoint` es el
-caso que aparece siempre: un juego que se juega sobre un suelo quiere el punto
-del suelo bajo el cursor, y devuelve `null` cuando el rayo apunta al cielo.
+### Las dos cámaras hablan el mismo idioma
+
+`Camera` y `Camera3D` responden las dos mismas preguntas, con los mismos nombres
+y los mismos argumentos, así que una escena puede cambiar una por la otra sin
+reescribir cómo lee la entrada:
+
+```js
+camera.project(punto, canvas);                    // mundo → píxeles del canvas
+camera.screenToWorld(clientX, clientY, canvas);   // píxeles de cliente → mundo
+```
+
+La regla de los píxeles, y es la misma para las dos:
+
+- **los que entran son de cliente** — es lo que da un evento de puntero
+  (`e.clientX`), así que quien llama nunca tiene que restar un `getBoundingClientRect`;
+- **los que salen son del canvas** — es lo que necesita un overlay posicionado
+  con CSS.
+
+Vivía en dos convenciones distintas: la cámara 2D restaba el rect por dentro y
+la 3D esperaba píxeles ya relativos al canvas. Dos cámaras, dos idiomas para el
+mismo trabajo, y un desfase del margen entero que solo se nota apuntando. La
+conversión está ahora en un solo sitio, `components/render/screen.js`.
+
+Lo único que las separa lo impone la geometría: en 3D `screenToWorld` corta el
+rayo contra un plano horizontal (`{ height }`, por defecto el suelo) y devuelve
+`null` si el píxel apunta al cielo. La 2D nunca devuelve `null`, porque un mundo
+plano no tiene cielo al que apuntar. Al revés, `project` devuelve `null` en 3D
+para lo que queda detrás de la cámara y nunca en 2D.
 
 El cabeceo se recorta justo antes de la vertical: a exactamente 90° la dirección
 de vista queda paralela al vector «arriba», la matriz colapsa y el mundo gira un
