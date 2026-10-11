@@ -6,7 +6,7 @@
     <title>Raptor — Carga de assets</title>
     <!--
         GENERATED FILE — do not edit by hand.
-        Source: components/render/projection.js, components/render/screen.js, components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/ui/loadingScreen.js, components/scenes/sceneManager.js, components/input/keyboard.js, components/input/touchpad.js, components/render/texture.js, components/assets/assets.js, components/audio/mixer.js, components/math/angles.js, components/render3d/camera3d.js, components/app.js, components/ui/index.js, components/render/shaders.js, components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/shapes/sprite.js, components/shapes/index.js, components/render/spriteSheet.js, components/render/index.js, components/render3d/shaders3d.js, components/render3d/mesh.js, components/render3d/geometry.js, components/render3d/index.js, components/physics/body.js, components/physics/collision.js, components/physics/world.js, components/physics/index.js, components/input/index.js, components/audio/engineSound.js, components/audio/index.js, components/assets/index.js, components/scenes/scene.js, components/scenes/index.js, components/math/random.js, components/math/index.js, components/controls/tankController.js, components/controls/tankAI.js, components/controls/gearbox.js, components/controls/autoAim.js, components/controls/index.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/armor.js, components/weapons/index.js, components/vehicles/tank.js, components/vehicles/engine.js, components/vehicles/index.js, components/index.js, assets/assetsDemo.js + vendor/gl-matrix-min.js
+        Source: components/render/projection.js, components/render/screen.js, components/camera.js, components/raptorEngine.js, components/ui/dom.js, components/ui/fullscreen.js, components/ui/loadingScreen.js, components/scenes/sceneManager.js, components/input/keyboard.js, components/input/touchpad.js, components/render/texture.js, components/assets/assets.js, components/audio/mixer.js, components/math/angles.js, components/render3d/camera3d.js, components/app.js, components/ui/index.js, components/render/shaders.js, components/shapes/shape.js, components/shapes/rectangle.js, components/shapes/square.js, components/shapes/triangle.js, components/shapes/polygon.js, components/shapes/circle.js, components/shapes/sprite.js, components/shapes/index.js, components/render/spriteSheet.js, components/render/index.js, components/render3d/shaders3d.js, components/render3d/mesh.js, components/render3d/geometry.js, components/render3d/index.js, components/physics/body.js, components/physics/collision.js, components/physics/world.js, components/physics/index.js, components/input/index.js, components/audio/wav.js, components/audio/engineSound.js, components/audio/index.js, components/assets/index.js, components/scenes/scene.js, components/scenes/index.js, components/math/random.js, components/math/index.js, components/controls/tankController.js, components/controls/tankAI.js, components/controls/gearbox.js, components/controls/autoAim.js, components/controls/index.js, components/weapons/ballistics.js, components/weapons/projectiles.js, components/weapons/bullet.js, components/weapons/weapon.js, components/weapons/armor.js, components/weapons/index.js, components/vehicles/tank.js, components/vehicles/engine.js, components/vehicles/index.js, components/index.js, assets/assetsDemo.js + vendor/gl-matrix-min.js
         Regenerate with: node tools/build.mjs
         This file is fully self-contained: open it directly in any browser.
     -->
@@ -2404,6 +2404,21 @@ class App {
         return this;
     }
 
+    // Subscribing without a way to unsubscribe is a leak with a delay on it:
+    // a scene that listens for "resize" keeps resizing a world it no longer
+    // owns, three scene changes later. Omit `handler` to drop them all.
+    off(event, handler = null) {
+        if (!handler) {
+            this._listeners.delete(event);
+            return this;
+        }
+        const list = this._listeners.get(event);
+        if (!list) return this;
+        const index = list.indexOf(handler);
+        if (index !== -1) list.splice(index, 1);
+        return this;
+    }
+
     _emit(event, payload) {
         for (const handler of this._listeners.get(event) || []) handler(payload);
     }
@@ -4478,6 +4493,56 @@ class World {
 
 // ===== components/input/index.js =====
 // Barrel for the input layer.
+
+// ===== components/audio/wav.js =====
+// Sound without files.
+//
+// The pages Raptor builds are self-contained and open from `file://`, so there
+// is nowhere to put a .wav. This builds one in memory instead — header and all —
+// and hands back a `data:` URL that the asset loader fetches like any other
+// file. That matters: the sound then travels the whole real path (fetch, bytes,
+// `decodeAudioData`) rather than a shortcut only synthesised audio could take.
+//
+//     const pickup = wavUrl(0.24, (t) => Math.sin(2 * Math.PI * 880 * t) * Math.exp(-t * 9));
+//     assets.sound("moneda", pickup);
+//
+// `sample(t)` is called once per frame with the time in seconds and returns the
+// amplitude in −1..1; anything outside is clipped rather than wrapped, because
+// a wrap is a loud buzz and a clip is just a louder note.
+//
+// Mono, 16-bit PCM. 22 050 Hz is half of CD rate: plenty for the blips and
+// thunks a game needs, and half the base64 to carry around.
+
+const DEFAULT_RATE = 22050;
+
+function wavUrl(seconds, sample, { rate = DEFAULT_RATE } = {}) {
+    const frames = Math.max(1, Math.floor(rate * seconds));
+    const bytes = new Uint8Array(44 + frames * 2);
+    const view = new DataView(bytes.buffer);
+    const ascii = (at, text) => { for (let i = 0; i < text.length; i++) view.setUint8(at + i, text.charCodeAt(i)); };
+
+    ascii(0, "RIFF");
+    view.setUint32(4, 36 + frames * 2, true);
+    ascii(8, "WAVEfmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);          // PCM
+    view.setUint16(22, 1, true);          // mono
+    view.setUint32(24, rate, true);
+    view.setUint32(28, rate * 2, true);   // byte rate
+    view.setUint16(32, 2, true);          // block align
+    view.setUint16(34, 16, true);         // bits per sample
+    ascii(36, "data");
+    view.setUint32(40, frames * 2, true);
+
+    for (let i = 0; i < frames; i++) {
+        const value = Math.max(-1, Math.min(1, sample(i / rate)));
+        view.setInt16(44 + i * 2, value * 32767, true);
+    }
+
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return "data:audio/wav;base64," + btoa(binary);
+}
 
 // ===== components/audio/engineSound.js =====
 // Engine note, synthesised from revs. No audio files: the pages are

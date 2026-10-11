@@ -4,6 +4,35 @@ Todos los cambios notables de este proyecto se documentan en este archivo.
 
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.0.0/).
 
+## [0.9.0] - 2026-10-11
+
+Un segundo juego, y las dos piezas del framework que hacían falta para hacerlo.
+
+### Añadido
+- **El Muro** (`muro.html`) — un rompeladrillos completo: menú, partida,
+  resultado, niveles generados, puntuación, vidas y mejor marca de la sesión.
+  Está aquí porque es de una forma distinta a El Bosque: sin hoja de sprites,
+  sin cámara que siga a nadie y sin mapa de casillas, usa en cambio las partes
+  que un juego cenital de recoger cosas no toca. El rebote es `collide` contra
+  el contorno real de cada ladrillo y `reflect`; la pala sigue al puntero con
+  `camera.screenToWorld`; los seis sonidos pasan por `app.audio` con el tono
+  variado por `rate`. Las reglas (`muro/level.js`) son puras y deterministas:
+  el mismo nivel es el mismo muro siempre.
+- **`components/audio/wavUrl`** — el sintetizador de WAV que vivía dentro de
+  `game/art.js`, movido a la capa de audio, que es de quien era el trabajo. El
+  Bosque lo importa ahora en vez de llevar su propia copia de la cabecera RIFF.
+- **`app.off(evento, handler)`** — se podía suscribir a los eventos de `App` y
+  no desuscribirse. Es una fuga con retardo: una escena que escucha "resize"
+  sigue redimensionando un mundo que ya no es suyo tres cambios de escena
+  después.
+
+### Cambiado
+- `app.watchResize()` y `app.toggleFullscreen()` pasan de no usarlos nadie
+  (0 y 1 de 16 páginas) a tener una página que los usa de verdad. El Muro va a
+  pantalla completa, sigue la caja CSS a la densidad del dispositivo y ajusta
+  el zoom de la cámara para que el campo entero entre en cualquier proporción
+  de ventana.
+
 ## [0.8.0] - 2026-08-07
 
 La capa de audio pasa a ser una capa.

@@ -280,6 +280,21 @@ export default class App {
         return this;
     }
 
+    // Subscribing without a way to unsubscribe is a leak with a delay on it:
+    // a scene that listens for "resize" keeps resizing a world it no longer
+    // owns, three scene changes later. Omit `handler` to drop them all.
+    off(event, handler = null) {
+        if (!handler) {
+            this._listeners.delete(event);
+            return this;
+        }
+        const list = this._listeners.get(event);
+        if (!list) return this;
+        const index = list.indexOf(handler);
+        if (index !== -1) list.splice(index, 1);
+        return this;
+    }
+
     _emit(event, payload) {
         for (const handler of this._listeners.get(event) || []) handler(payload);
     }
