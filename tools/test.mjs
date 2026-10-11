@@ -93,7 +93,7 @@ suite("pages", async () => {
         ["engine.html", null], ["editor.html", "raptorEditor"], ["tanks.html", "raptorTanks"],
         ["dyno.html", "raptorDyno"], ["drive.html", "raptorDrive"],
         ["sprites.html", "raptorSprites"], ["assets.html", "raptorAssets"],
-        ["bosque.html", "raptorBosque"],
+        ["bosque.html", "raptorBosque"], ["muro.html", "raptorMuro"],
     ];
     for (const [file, handle] of pages) {
         const { page, errors } = await open(file, null, { expect: EXPECTED_404 });
@@ -109,7 +109,10 @@ suite("pages", async () => {
         if (handle) {
             ok(`${file} expone window.${handle}`, await page.evaluate((h) => !!window[h], handle));
             // The game runs full-bleed with no side panel; everything else has one.
-            if (file !== "bosque.html") ok(`${file} construye el panel`, shape.cards > 0, `${shape.cards} tarjetas`);
+            // The two games run full-bleed with no side panel; everything else has one.
+            if (file !== "bosque.html" && file !== "muro.html") {
+                ok(`${file} construye el panel`, shape.cards > 0, `${shape.cards} tarjetas`);
+            }
         }
         await page.close();
     }
@@ -1456,17 +1459,223 @@ suite("juegos3d", async () => {
     await battle.page.close();
 });
 
+// --- El Muro: el segundo juego completo ----------------------------------
+//
+// Lo que se comprueba no es "la pelota se mueve" sino las tres cosas que
+// deciden si el juego se puede jugar: que la pala apunte, que la pelota nunca
+// se quede plana, y que no atraviese la pared en un frame largo.
+suite("muro", async () => {
+    const { page, errors } = await open("muro.html");
+    await page.waitForFunction(() => window.raptorMuro?.scene === "menu", { timeout: 15000 });
+
+    // The rules are a pure function of the level: the same wall every time.
+    const walls = await page.evaluate(async () => {
+        // The level generator is reachable through the scene that uses it.
+        // `go()` is a promise: the manager fades out, tears down and builds.
+        // Reading the new scene before it lands gets the previous one's state.
+        const build = async (level) => {
+            await window.raptorMuro.go("juego", { level, score: 0 });
+            const game = window.raptorMuro.game;
+            return { grid: game.grid.map((r) => r.join("")).join("|"), bricks: game.remaining };
+        };
+        const a = await build(3);
+        const b = await build(3);
+        const c = await build(4);
+        return { a, b, c };
+    });
+    ok("el mismo nivel da siempre el mismo muro",
+        walls.a.grid === walls.b.grid, `${walls.a.grid} vs ${walls.b.grid}`);
+    ok("un nivel más alto trae más muro",
+        walls.c.bricks > 0 && walls.c.grid !== walls.a.grid, JSON.stringify({ a: walls.a.bricks, c: walls.c.bricks }));
+
+    await page.evaluate(() => window.raptorMuro.go("juego", { level: 1, score: 0 }));
+    await page.waitForFunction(() => window.raptorMuro.state, { timeout: 15000 });
+
+    // The ball waits on the paddle until it is launched — otherwise a life is
+    // gone before the player has looked at the screen.
+    ok("la pelota espera en la pala",
+        await page.evaluate(() => window.raptorMuro.state.stuck === true));
+
+    // The mechanic the whole game rests on: where it hits the paddle decides
+    // where it leaves. Hit it left of centre and it must go left.
+    const steer = await page.evaluate(() => {
+        const game = window.raptorMuro.game;
+        const bounce = (offset) => {
+            game.stuck = false;
+            game.paddle.setPosition({ x: 0 });
+            // Just above the paddle, coming down, offset across its face.
+            game.ball.setPosition({ x: offset * 0.4, y: game.paddle.position.y + 0.1 });
+            game.velocity = { x: 0, y: -3 };
+            game._bouncePaddle();
+            return { x: game.velocity.x, y: game.velocity.y };
+        };
+        return { left: bounce(-1), middle: bounce(0), right: bounce(1) };
+    });
+    ok("la pala apunta: el borde izquierdo manda la pelota a la izquierda",
+        steer.left.x < -0.5 && steer.left.y > 0, JSON.stringify(steer));
+    ok("y el derecho a la derecha", steer.right.x > 0.5 && steer.right.y > 0, JSON.stringify(steer));
+    ok("desde el centro sale casi recta",
+        Math.abs(steer.middle.x) < 0.2 && steer.middle.y > 0, JSON.stringify(steer));
+
+    // A ball travelling flat skims the paddle for ten seconds. That is not
+    // difficulty, it is waiting, so shallow angles get pushed back out.
+    const flat = await page.evaluate(() => {
+        const game = window.raptorMuro.game;
+        game._setDirection(1, 0.001);
+        const speed = Math.hypot(game.velocity.x, game.velocity.y);
+        return { dy: Math.abs(game.velocity.y), speed };
+    });
+    ok("la pelota nunca sale plana", flat.dy > 0.1 && flat.speed > 2, JSON.stringify(flat));
+
+    // Breaking bricks: one hit for a weak one, two for the next, and the score
+    // only moves when the brick actually goes.
+    const breaking = await page.evaluate(async () => {
+        await window.raptorMuro.go("juego", { level: 1, score: 0 });
+        const game = window.raptorMuro.game;
+        const brick = game.bricks[0];
+        const before = { remaining: game.remaining, score: game.score };
+        // Park the ball inside it and run one brick pass.
+        game.stuck = false;
+        game.ball.setPosition({ x: brick.shape.position.x, y: brick.shape.position.y - 0.1 });
+        game.velocity = { x: 0, y: 3 };
+        game._bounceBricks();
+        return {
+            before, after: { remaining: game.remaining, score: game.score },
+            bounced: game.velocity.y < 0, strength: brick.strength, alive: brick.alive,
+        };
+    });
+    ok("romper un ladrillo lo quita y suma puntos",
+        breaking.after.remaining === breaking.before.remaining - 1 && breaking.after.score > breaking.before.score,
+        JSON.stringify(breaking));
+    ok("y la pelota rebota", breaking.bounced, JSON.stringify(breaking));
+
+    // The substepping: at full speed, one long frame must not step the ball
+    // through the wall. Fire it up through the bricks with dt a whole frame.
+    const tunnel = await page.evaluate(async () => {
+        await window.raptorMuro.go("juego", { level: 1, score: 0 });
+        const game = window.raptorMuro.game;
+        const target = game.bricks.find((b) => b.alive);
+        game.stuck = false;
+        game.ball.setPosition({ x: target.shape.position.x, y: target.shape.position.y - 0.6 });
+        game.velocity = { x: 0, y: 9 };          // far faster than the game ever goes
+        const before = game.remaining;
+        game.update(0.05);                        // the longest frame the engine allows
+        return { before, after: game.remaining, y: game.ball.position.y };
+    });
+    ok("un frame largo no atraviesa el muro",
+        tunnel.after < tunnel.before, JSON.stringify(tunnel));
+
+    // Clearing the wall is the loop's other end, and it has to carry the score
+    // and the lives forward rather than starting over.
+    const cleared = await page.evaluate(async () => {
+        await window.raptorMuro.go("juego", { level: 2, score: 500, lives: 2 });
+        const game = window.raptorMuro.game;
+        game.stuck = false;
+        // Break every brick through the real path, one at a time.
+        let guard = 0;
+        while (game.remaining > 0 && guard++ < 500) {
+            const brick = game.bricks.find((b) => b.alive);
+            game.ball.setPosition({ x: brick.shape.position.x, y: brick.shape.position.y - 0.1 });
+            game.velocity = { x: 0, y: 3 };
+            game._bounceBricks();
+        }
+        const atClear = { remaining: game.remaining, score: game.score };
+        await new Promise((r) => setTimeout(r, 1600));
+        const after = window.raptorMuro.state;
+        return { atClear, after, scene: window.raptorMuro.scene };
+    });
+    ok("tirar el muro entero pasa al nivel siguiente",
+        cleared.atClear.remaining === 0 && cleared.scene === "juego" && cleared.after.level === 3,
+        JSON.stringify(cleared));
+    ok("y se lleva los puntos y las vidas",
+        cleared.after.score > 500 && cleared.after.lives === 2, JSON.stringify(cleared));
+
+    // Losing the ball costs a life; the last one ends the game.
+    const lives = await page.evaluate(async () => {
+        await window.raptorMuro.go("juego", { level: 1, score: 0, lives: 1 });
+        const game = window.raptorMuro.game;
+        game.stuck = false;
+        game.ball.setPosition({ x: 0, y: -10 });
+        game.velocity = { x: 0, y: -3 };
+        game.update(0.016);
+        const after = game.lives;
+        await new Promise((r) => setTimeout(r, 1200));
+        return { after, scene: window.raptorMuro.scene };
+    });
+    ok("perder la última vida termina la partida",
+        lives.after === 0 && lives.scene === "fin", JSON.stringify(lives));
+
+    // The paddle follows the pointer through the camera — the same
+    // `screenToWorld(clientX, clientY, canvas)` the 3D battle calls.
+    const pointer = await page.evaluate(async () => {
+        await window.raptorMuro.go("juego", { level: 1, score: 0 });
+        const game = window.raptorMuro.game;
+        const canvas = game.app.canvas;
+        const rect = canvas.getBoundingClientRect();
+        game.pointerX = rect.left + rect.width * 0.75;   // three quarters across
+        game._movePaddle(0.016);
+        return { x: game.paddle.position.x, expected: game.camera.screenToWorld(game.pointerX, 0, canvas).x };
+    });
+    ok("la pala sigue al puntero por la cámara",
+        pointer.x > 0.3 && Math.abs(pointer.x - pointer.expected) < 0.01, JSON.stringify(pointer));
+
+    // The whole field has to be visible whatever shape the window is, which is
+    // the point of zooming the camera to fit rather than trusting 4:3.
+    const fits = await page.evaluate(() => {
+        const game = window.raptorMuro.game;
+        const canvas = game.app.canvas;
+        game._fitCamera();
+        const { halfW, halfH } = game.camera.viewExtents(canvas);
+        return { halfW, halfH, zoom: game.camera.zoom };
+    });
+    ok("el campo entero entra en la vista",
+        fits.halfW >= 3.0 && fits.halfH >= 2.35, JSON.stringify(fits));
+
+    // Mute runs through the app mixer, not a flag of its own.
+    const muting = await page.evaluate(() => {
+        const game = window.raptorMuro.game;
+        game._toggleMute();
+        const on = game.app.audio.muted;
+        game._toggleMute();
+        return { on, off: game.app.audio.muted };
+    });
+    ok("silenciar pasa por el mixer de la app",
+        muting.on === true && muting.off === false, JSON.stringify(muting));
+
+    // Leaving a scene has to take its DOM with it, pads included.
+    const teardown = await page.evaluate(async () => {
+        await window.raptorMuro.go("menu");
+        await new Promise((r) => setTimeout(r, 200));
+        return {
+            pads: document.querySelectorAll(".pad").length,
+            huds: document.querySelectorAll(".hud").length,
+            scene: window.raptorMuro.scene,
+        };
+    });
+    ok("salir de la partida se lleva su HUD y sus mandos",
+        teardown.pads === 0 && teardown.huds === 0 && teardown.scene === "menu", JSON.stringify(teardown));
+
+    ok("muro: sin errores", errors.length === 0, errors.join(" | "));
+    await page.close();
+});
+
 // --- Phone ---------------------------------------------------------------
 
 suite("mobile", async () => {
-    for (const file of ["dyno.html", "drive.html", "sprites.html", "bosque.html"]) {
+    for (const file of ["dyno.html", "drive.html", "sprites.html", "bosque.html", "muro.html"]) {
         const { page, context, errors } = await open(file, devices["iPhone 12"]);
-        // The game opens on its menu, whose controls are ordinary DOM buttons.
-        // The on-screen pad belongs to the forest scene, so get into it first.
+        // A game opens on its menu, whose controls are ordinary DOM buttons.
+        // The on-screen pad belongs to the match, so get into it first.
         if (file === "bosque.html") {
             await page.waitForFunction(() => window.raptorBosque?.scene === "menu", { timeout: 15000 });
             await page.evaluate(() => window.raptorBosque.go("juego", { acorns: 6, seconds: 60 }));
             await page.waitForFunction(() => window.raptorBosque.state, { timeout: 15000 });
+            await page.waitForTimeout(300);
+        }
+        if (file === "muro.html") {
+            await page.waitForFunction(() => window.raptorMuro?.scene === "menu", { timeout: 15000 });
+            await page.evaluate(() => window.raptorMuro.go("juego", { level: 1, score: 0 }));
+            await page.waitForFunction(() => window.raptorMuro.state, { timeout: 15000 });
             await page.waitForTimeout(300);
         }
         const fit = await page.evaluate(() => {

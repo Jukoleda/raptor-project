@@ -96,6 +96,7 @@ drive.html                 # GENERADO: batalla de tanques (IA + combate), doble 
 sprites.html               # GENERADO: sprites, texturas y animación, doble clic
 assets.html                # GENERADO: carga de assets con manifiesto, doble clic
 bosque.html                # GENERADO: El Bosque, un juego completo, doble clic
+muro.html                  # GENERADO: El Muro, un rompeladrillos, doble clic
 shapes3d.html              # GENERADO: formas 3D con luz y cámara orbital
 editor3d.html              # GENERADO: editor 3D
 tanks3d.html               # GENERADO: cañón vs blindaje en 3D
@@ -147,6 +148,13 @@ game/                      # El Bosque: un juego pequeño pero completo
   endScene.js              # Resultado: victoria o derrota, y qué hacer ahora
   forest.js                # Generación del mapa y colisión con deslizamiento
   art.js                   # Hoja de sprites y sonidos, generados al arrancar
+muro/                      # El Muro: un rompeladrillos
+  main.js                  # Arranque: pantalla completa, watchResize, escenas
+  menuScene.js             # Menú, con el muro del nivel 1 de fondo
+  playScene.js             # La partida: pala, pelota, rebotes y muro
+  endScene.js              # Resultado y mejor marca de la sesión
+  level.js                 # Las reglas: muros por nivel, puntuación, velocidad
+  art.js                   # Los seis sonidos, sintetizados al arrancar
 components/
   index.js                 # Barrel de barrels: toda la superficie pública
   app.js                   # App: arranque, canvas, panel, entrada, ciclo de vida
@@ -236,6 +244,7 @@ motor embebidos, funcionan incluso offline vía `file://`:
 - `sprites.html` — sprites, texturas y animación (ver abajo).
 - `assets.html` — carga de assets: manifiesto, progreso y errores (ver abajo).
 - `bosque.html` — **El Bosque**: un juego completo con menú (ver abajo).
+- `muro.html` — **El Muro**: un rompeladrillos a pantalla completa (ver abajo).
 
 **Online:** publicado con GitHub Pages en
 <https://jukoleda.github.io/raptor-project/>. El workflow
@@ -1168,6 +1177,50 @@ conviene hacer a propósito y no por descuido.
 - **No se pisa consigo mismo.** Dos `go()` a la vez —una tecla y un clic en el
   mismo botón— harían dos desmontajes y dos montajes entrelazados. El segundo
   espera.
+
+## El Muro: el segundo juego
+
+`muro.html` es un rompeladrillos, y está aquí porque es de una forma distinta a
+El Bosque. Sin hoja de sprites, sin cámara que sigue a nadie, sin mapa de
+casillas. Lo que usa en cambio son las partes que un juego cenital de recoger
+cosas no toca nunca.
+
+Tirá el muro sin que se te caiga la pelota. **Mové con el ratón** o con **A/D**,
+**Espacio** lanza, **P** pausa, **M** silencia, **F** pantalla completa — y en el
+móvil hay mandos en pantalla.
+
+Tres cosas son diseño y no fontanería, y son las tres que deciden si se puede
+jugar:
+
+- **La pala apunta.** Dónde pega la pelota en la pala decide el ángulo con el
+  que sale. Sin eso la trayectoria es fija y el jugador es un espectador; con
+  eso, la pala es una mira.
+- **La pelota nunca sale plana.** Un rebote que la deja casi horizontal la manda
+  a rasar diez segundos, y eso no es dificultad, es esperar. Los ángulos muy
+  bajos se empujan de vuelta hacia arriba.
+- **Se mueve en pasos cortos.** A casi cinco unidades por segundo y con
+  ladrillos de 0,2 de alto, un frame largo la pasaría limpia a través del muro
+  sin llegar a solaparse con nada. Ningún paso es más largo que su propio radio.
+
+Lo que reusa del framework, sin tocarlo:
+
+- **El rebote es `collide`** del paquete de física, contra el contorno real de
+  cada ladrillo, y la reflexión es `reflect` del de armas. De una esquina salen
+  bien porque el manifiesto trae la normal correcta.
+- **La pala sigue al puntero con `camera.screenToWorld`**, la misma llamada que
+  hace la batalla de tanques en 3D.
+- **Los seis sonidos pasan por `app.audio`**, con el tono del ladrillo variado
+  por `rate` según lo duro que fuera: un solo archivo, tres notas.
+- **Las reglas son puras.** `muro/level.js` no sabe nada de GL: dado un número
+  de nivel devuelve el muro, y el mismo nivel 3 es el mismo muro siempre.
+
+Y es la página que usa dos cosas que el framework tenía y no usaba nadie:
+`app.watchResize()`, para que el búfer de dibujo siga a la caja CSS a la
+densidad del dispositivo en vez de ser un 800×600 fijo estirado por el
+navegador, y `app.toggleFullscreen()`. El campo mide lo que mide en unidades de
+mundo y la escena ajusta el zoom de la cámara a la proporción que tenga la
+ventana, así que cambiar de tamaño cambia cuánto ves **alrededor** del campo y
+nunca cuánto ves **del** campo.
 
 ## El Bosque: un juego completo
 

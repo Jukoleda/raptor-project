@@ -8,6 +8,7 @@
 //     assets.texture("bosque", "bosque.png");   // en vez de sheetUrl()
 
 import { createRandom, randomInt } from "../components/math/random.js";
+import { wavUrl } from "../components/audio/wav.js";
 
 export const CELL = 32;                 // pixels per sheet cell
 export const PPU = 32;                  // pixels per world unit → a tile is 1
@@ -149,37 +150,8 @@ export function sheetUrl() {
 
 // --- Sound ---------------------------------------------------------------
 // Real WAV files, header and all, so the loader has to fetch bytes and hand
-// them to decodeAudioData — the same path a downloaded file would take.
-
-function wavUrl(seconds, sample) {
-    const rate = 22050;
-    const frames = Math.floor(rate * seconds);
-    const bytes = new Uint8Array(44 + frames * 2);
-    const view = new DataView(bytes.buffer);
-    const ascii = (at, text) => { for (let i = 0; i < text.length; i++) view.setUint8(at + i, text.charCodeAt(i)); };
-
-    ascii(0, "RIFF");
-    view.setUint32(4, 36 + frames * 2, true);
-    ascii(8, "WAVEfmt ");
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);          // PCM
-    view.setUint16(22, 1, true);          // mono
-    view.setUint32(24, rate, true);
-    view.setUint32(28, rate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    ascii(36, "data");
-    view.setUint32(40, frames * 2, true);
-
-    for (let i = 0; i < frames; i++) {
-        const value = Math.max(-1, Math.min(1, sample(i / rate)));
-        view.setInt16(44 + i * 2, value * 32767, true);
-    }
-
-    let binary = "";
-    for (const byte of bytes) binary += String.fromCharCode(byte);
-    return "data:audio/wav;base64," + btoa(binary);
-}
+// them to decodeAudioData — the same path a downloaded file would take. The
+// synthesiser itself lives in the audio layer; what is here is the notes.
 
 // Two rising notes: the universal "you picked something up".
 export const pickupUrl = () => wavUrl(0.24, (t) => {

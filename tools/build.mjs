@@ -43,6 +43,7 @@ const PAGES = [
     { out: "sprites.html", title: "Raptor — Sprites y animación", entry: "sprites/spritesDemo.js" },
     { out: "assets.html", title: "Raptor — Carga de assets", entry: "assets/assetsDemo.js" },
     { out: "bosque.html", title: "El Bosque — juego hecho con Raptor", entry: "game/main.js" },
+    { out: "muro.html", title: "El Muro — juego hecho con Raptor", entry: "muro/main.js" },
 
     // --- 3D -------------------------------------------------------------
     { out: "shapes3d.html", title: "Raptor 3D — Formas", entry: "demos3d/shapes3d.js" },
